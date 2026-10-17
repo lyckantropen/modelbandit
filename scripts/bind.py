@@ -343,6 +343,14 @@ def main() -> None:
         for mid, note in shown:
             print(f"  {mid}: {note}")
 
+    summaries = policy.get("summaries", {})
+    shown = [(mid, verdict_for(mid, summaries)) for mid, _ in ranked]
+    shown = [(mid, note) for mid, note in shown if note]
+    if shown:
+        print("\nsummaries (context only; selection stays popularity):")
+        for mid, note in shown:
+            print(f"  {mid}: {note}")
+
     if pick is None:
         raise SystemExit("domain has no ranked candidates in the model list")
     print(f"\ndefault pick (rank 1): {pick[0]}")

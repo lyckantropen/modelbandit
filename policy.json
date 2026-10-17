@@ -6,6 +6,9 @@
   "verdicts": {
     "example/model-id": "EXAMPLE ENTRY - replace with your own verdict: one dated sentence, user-validated or suspected, advisory only."
   },
+  "summaries": {
+    "example/model-id": "EXAMPLE ENTRY - replace with a research summary: what the model is known for, its caveats, every claim cited. Summaries are produced and refreshed by the summaries-refresh procedure (research/README.md)."
+  },
   "domains": {
     "research": [
       "research_report",

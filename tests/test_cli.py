@@ -84,6 +84,8 @@ def build_world():
 POLICY = {
     "baseline": {"id": "xiaomi/mimo-v2.6-pro", "notes": "anchor"},
     "verdicts": {"deepseek/deepseek-v4-pro": "skipped on output cost"},
+    "summaries": {"deepseek/deepseek-v4-pro-0813": "eol sibling summary",
+                  "deepseek/deepseek-v4-pro": "eol summary"},
     "domains": {
         "writing": ["content_writing", "roleplay_fiction", "gone_tag"],
         "coding": ["math"],
@@ -248,6 +250,19 @@ class CliTests(unittest.TestCase):
     def test_verdicts_absent_when_no_match(self):
         out, _, _, _ = self.run_cli("--domain", "coding")
         self.assertNotIn("verdicts (context only", out)
+
+    def test_summaries_annotate_by_longest_prefix(self):
+        out, _, _, _ = self.run_cli("--domain", "writing")
+        block = out[out.index("summaries (context only"):]
+        aug = next(ln for ln in block.splitlines() if "v4-pro-0813" in ln)
+        apr = next(ln for ln in block.splitlines()
+                   if ln.strip().startswith("deepseek/deepseek-v4-pro:"))
+        self.assertIn("eol sibling summary", aug)
+        self.assertIn("eol summary", apr)
+
+    def test_summaries_absent_when_no_match(self):
+        out, _, _, _ = self.run_cli("--domain", "coding")
+        self.assertNotIn("summaries (context only", out)
 
     def test_default_pick_and_route_to_floor(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
