@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""Rank OpenRouter models by domain popularity and price them live.
+
+Stdlib only. Reads OpenRouter's task-classification leaderboards and daily token
+rankings (Data API; CC BY 4.0), maps them to a domain from policy.json, and
+emits a popularity-ranked candidate table priced at live rates, with effort
+rungs and a batch cost projection. Prices are per-endpoint, not the models-list
+figure: the same model can span 20x on output across providers, so projection
+defaults to the worst endpoint. Mechanics live in --help; SKILL.md holds the
+policy.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
+
+MODELS_URL = "https://openrouter.ai/api/v1/models"
+CLASS_URL = "https://openrouter.ai/api/v1/classifications/task?window=7d"
+RANK_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "modelbind")
+CACHE_TTL = 24 * 3600
+
+# Effort intent -> output-token multiplier. Reasoning tokens bill as completion
+# tokens, so deliberation is bought in output spend — the axis that dominates
+# authoring cost. Heuristic; override per run with --out-tokens.
+EFFORT_MULTIPLIERS = {"glance": 0.6, "measured": 1.0, "thorough": 2.5, "exhaustive": 6.0}
+INTENTS = tuple(EFFORT_MULTIPLIERS)
+
+# Token profiles: (input tokens, output tokens, cached share of input).
+# authoring is output-weighted: a .md research note is mostly completion tokens.
+PROFILES = {
+    "authoring": (20_000, 12_000, 0.4),
+    "agentic": (40_000, 4_000, 0.75),
+    "chat": (8_000, 2_000, 0.5),
+}
+DOMAIN_PROFILE = {
+    "research": "authoring", "writing": "authoring",
+    "coding": "agentic", "orchestration": "agentic", "ops": "agentic",
+}
+BASES = ("worst", "primary", "best")
+
+DEFAULT_POLICY = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "policy.json"
+)
+
+
+def api_key() -> str | None:
+    env = os.environ.get("OPENROUTER_API_KEY")
+    if env:
+        return env
+    for path in ("~/.local/share/opencode/auth.json", "~/.config/opencode/auth.json"):
+        p = os.path.expanduser(path)
+        if os.path.exists(p):
+            try:
+                auth = json.load(open(p)).get("openrouter", {})
+            except Exception:
+                continue
+            for field in ("api_key", "access_token", "key"):
+                if auth.get(field):
+                    return auth[field]
+    return None
+
+
+def fetch_json(url: str, cache_name: str, *, auth: bool, refresh: bool):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(CACHE_DIR, cache_name)
+    if not refresh and os.path.exists(cache_path):
+        if time.time() - os.path.getmtime(cache_path) < CACHE_TTL:
+            with open(cache_path) as f:
+                return json.load(f)
+    headers = {"Accept": "application/json"}
+    if auth:
+        key = api_key()
+        if not key:
+            raise SystemExit(
+                "OpenRouter Data API needs a key: set OPENROUTER_API_KEY or keep "
+                "an OpenCode auth.json with an openrouter entry")
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except Exception as exc:
+        if os.path.exists(cache_path):
+            print(f"warning: fetch failed ({exc}); using stale cache", file=sys.stderr)
+            with open(cache_path) as f:
+                return json.load(f)
+        raise SystemExit(f"cannot reach {url}: {exc}")
+    with open(cache_path, "w") as f:
+        json.dump(data, f)
+    return data
+
+
+def norm_id(model_id: str) -> str:
+    return model_id.removeprefix("openrouter/")
+
+
+def resolve_model(models: dict, by_canon: dict, permaslug: str):
+    """Leaderboard rows are permaslugs. Resolve via canonical_slug; heuristic
+    date-stripping misprices dated releases (v4-pro-0813 vs v4-pro) and is a
+    last resort only. Returns (model_or_None, how)."""
+    if permaslug in models:
+        return models[permaslug], "exact"
+    if permaslug in by_canon:
+        return by_canon[permaslug], "canonical"
+    stripped = re.sub(r"-\d{8}(:.*)?$", lambda m: m.group(1) or "", permaslug)
+    if stripped in models:
+        return models[stripped], "heuristic"
+    return None, "unresolved"
+
+
+def endpoint_pricings(slug: str, refresh: bool) -> list[dict]:
+    """Per-provider pricing for one model. Failures return [] quietly."""
+    safe = re.sub(r"[^a-zA-Z0-9._-]", "--", slug)
+    try:
+        data = fetch_json(f"{MODELS_URL}/{slug}/endpoints",
+                          f"endpoints--{safe}.json", auth=True, refresh=refresh)
+    except SystemExit:
+        return []
+    payload = data.get("data", {}) if isinstance(data, dict) else {}
+    return payload.get("endpoints", []) or []
+
+
+def per_million(price_str: str) -> float:
+    return float(price_str) * 1_000_000
+
+
+def effort_ladder(model: dict) -> list[str]:
+    """Ladder assumption when the catalog does not name rungs:
+    reasoning_effort models expose the full house; reasoning-only models are
+    binary; anything else has no effort dial. Collapse-to-nearest makes an
+    over-full assumption harmless."""
+    params = model.get("supported_parameters") or []
+    if "reasoning_effort" in params:
+        return ["none", "low", "medium", "high", "xhigh", "max"]
+    if "reasoning" in params:
+        return ["none", "thinking"]
+    return ["default"]
+
+
+def resolve_rung(ladder: list[str], intent: str) -> str:
+    n = len(ladder)
+    if n == 1:
+        return ladder[0]
+    default_idx = ladder.index("medium") if "medium" in ladder else (n - 1 + 1) // 2
+    idx = {"glance": 0, "measured": default_idx,
+           "thorough": min(default_idx + 1, n - 1), "exhaustive": n - 1}[intent]
+    return ladder[idx]
+
+
+def blended_from_pricing(pricing: dict, in_tok: int, out_tok: int, cached: float,
+                         multiplier: float) -> float:
+    return (
+        in_tok * (1 - cached) * float(pricing["prompt"])
+        + in_tok * cached * float(pricing.get("input_cache_read", pricing["prompt"]))
+        + out_tok * multiplier * float(pricing["completion"])
+    )
+
+
+def price_model(model: dict, eps: list[dict], in_tok: int, out_tok: int,
+                cached: float, mult: float) -> dict:
+    """Costs across endpoints: worst (budget-safe), primary (models list),
+    best (floor). Output range is shown because it dominates authoring cost."""
+    primary = blended_from_pricing(model["pricing"], in_tok, out_tok, cached, mult)
+    if not eps:
+        return {"worst": primary, "primary": primary, "best": primary,
+                "worst_ep": None, "best_ep": None,
+                "out_min": per_million(model["pricing"]["completion"]),
+                "out_max": per_million(model["pricing"]["completion"]),
+                "n_eps": 0}
+    costs = [(blended_from_pricing(e["pricing"], in_tok, out_tok, cached, mult), e)
+             for e in eps]
+    outs = [per_million(e["pricing"]["completion"]) for e in eps]
+    worst = max(costs, key=lambda t: t[0])
+    best = min(costs, key=lambda t: t[0])
+    return {"worst": worst[0], "primary": primary, "best": best[0],
+            "worst_ep": worst[1].get("name", "?"), "best_ep": best[1].get("name", "?"),
+            "out_min": min(outs), "out_max": max(outs), "n_eps": len(eps)}
+
+
+def verdict_for(mid: str, verdicts: dict) -> str | None:
+    """Longest matching prefix wins so family verdicts cover dated slugs."""
+    best = None
+    for key, note in verdicts.items():
+        if mid.startswith(key) and (best is None or len(key) > len(best[0])):
+            best = (key, note)
+    return best[1] if best else None
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--domain", help="domain from policy.json (see --list-domains)")
+    ap.add_argument("--list-domains", action="store_true",
+                    help="show domains and their leaderboard tags")
+    ap.add_argument("--effort", default="measured", choices=INTENTS,
+                    help="effort intent (default: measured)")
+    ap.add_argument("--profile", choices=PROFILES,
+                    help="token profile (default: per-domain — authoring for "
+                         "research/writing, agentic otherwise)")
+    ap.add_argument("--pricing-basis", choices=BASES, default="worst",
+                    help="worst=cheapest-provider-blind budget-safe projection "
+                         "(default); primary=models-list figure; best=floor")
+    ap.add_argument("--in-tokens", type=int, help="override profile input tokens")
+    ap.add_argument("--out-tokens", type=int, help="override profile output tokens")
+    ap.add_argument("--cached-share", type=float,
+                    help="override profile cached share of input (0..1)")
+    ap.add_argument("--tickets", type=int, default=1, help="runs to project for")
+    ap.add_argument("--budget", type=float, help="run budget in USD")
+    ap.add_argument("--top", type=int, default=8, help="ranking rows to show")
+    ap.add_argument("--policy", default=DEFAULT_POLICY,
+                    help="policy file: domains + baseline (default: beside script)")
+    ap.add_argument("--refresh", action="store_true", help="bypass the 24h cache")
+    args = ap.parse_args()
+
+    policy: dict = {}
+    if os.path.exists(args.policy):
+        with open(args.policy) as f:
+            policy = json.load(f)
+    domains = policy.get("domains", {})
+
+    if args.list_domains:
+        for name, tags in domains.items():
+            print(f"{name:14s} {', '.join(tags)}")
+        return
+    if not args.domain:
+        raise SystemExit("need --domain (or --list-domains)")
+    if args.domain not in domains:
+        raise SystemExit(
+            f"no domain '{args.domain}'; known: {', '.join(domains) or 'none'}")
+    tags = domains[args.domain]
+
+    profile_name = args.profile or DOMAIN_PROFILE.get(args.domain, "agentic")
+    in_tok, out_tok, cached = PROFILES[profile_name]
+    if args.in_tokens is not None:
+        in_tok = args.in_tokens
+    if args.out_tokens is not None:
+        out_tok = args.out_tokens
+    if args.cached_share is not None:
+        cached = args.cached_share
+
+    models_raw = fetch_json(MODELS_URL, "models.json", auth=False, refresh=args.refresh)
+    model_rows = models_raw["data"] if isinstance(models_raw, dict) else models_raw
+    models = {norm_id(m["id"]): m for m in model_rows}
+    by_canon = {}
+    for m in models.values():
+        if m.get("canonical_slug"):
+            by_canon.setdefault(norm_id(m["canonical_slug"]), m)
+
+    classif = fetch_json(CLASS_URL, "classifications.json", auth=True,
+                         refresh=args.refresh)["data"]
+    ranks = fetch_json(RANK_URL, "rankings.json", auth=True, refresh=args.refresh)
+
+    share = collections.defaultdict(float)
+    matches: dict[str, str] = {}
+    known_tags = set()
+    for c in classif["classifications"]:
+        if c["tag"] not in tags:
+            continue
+        known_tags.add(c["tag"])
+        for m in c["models"]:
+            resolved, how = resolve_model(models, by_canon, norm_id(m["id"]))
+            key = resolved["id"] if resolved else norm_id(m["id"])
+            matches[key] = how if resolved else "unresolved"
+            share[key] += c["usage_share"] * m["tag_usage_share"]
+    missing = set(tags) - known_tags
+    if missing:
+        print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
+              file=sys.stderr)
+
+    tokens_30d = collections.Counter()
+    for row in ranks["data"]:
+        if row["model_permaslug"] == "other":
+            continue
+        resolved, how = resolve_model(models, by_canon, norm_id(row["model_permaslug"]))
+        key = resolved["id"] if resolved else norm_id(row["model_permaslug"])
+        tokens_30d[key] += int(row["total_tokens"])
+
+    mult = EFFORT_MULTIPLIERS[args.effort]
+    base = policy.get("baseline", {})
+    base_id = norm_id(base.get("id", ""))
+    base_per = None
+    if base_id in models:
+        bp = price_model(models[base_id],
+                         endpoint_pricings(base_id, args.refresh),
+                         in_tok, out_tok, cached, mult)
+        base_per = bp[args.pricing_basis]
+
+    print(f"# Popularity ranking: {args.domain}\n")
+    print(f"profile={profile_name} (in={in_tok:,} out={out_tok:,} cached={cached:.0%}) "
+          f"| effort={args.effort} | basis={args.pricing_basis} "
+          f"| source: OpenRouter (openrouter.ai/rankings), as of "
+          f"{classif.get('as_of', '?')}\n")
+    print("| # | model | share | 30d tokens | $/1M out (floor–worst) | "
+          "$/ticket | Δ baseline | rung |")
+    print("|---|---|---|---|---|---|---|---|")
+
+    ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
+    verdicts = policy.get("verdicts", {})
+    pick = None
+    cheapest = None
+    floor_total = 0.0
+    for i, (mid, s) in enumerate(ranked, 1):
+        m = models.get(mid)
+        if not m:
+            print(f"| {i} | {mid} | {s:.2%} | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
+                  f"— unresolved to a priced model | | | |")
+            continue
+        pr = price_model(m, endpoint_pricings(mid, args.refresh),
+                         in_tok, out_tok, cached, mult)
+        per = pr[args.pricing_basis]
+        delta = f"{per / base_per:.2f}x" if base_per else "—"
+        spread = "" if pr["n_eps"] <= 1 else \
+            f" ({pr['n_eps']} eps)" if pr["out_max"] / max(pr["out_min"], 1e-9) < 2 else \
+            f" ({pr['n_eps']} eps, wide)"
+        out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
+        if pr["n_eps"] == 0:
+            out_cell += " (no endpoint data)"
+        print(f"| {i} | {mid} | {s:.2%} | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
+              f"{out_cell} | ${per:.4f} | {delta} | "
+              f"{resolve_rung(effort_ladder(m), args.effort)} |")
+        if pick is None:
+            pick = (mid, per, pr)
+            floor_total = pr["best"] * args.tickets
+        if cheapest is None or per < cheapest[1]:
+            cheapest = (mid, per)
+
+    odd = {k: v for k, v in matches.items() if v in ("heuristic", "unresolved")}
+    if odd:
+        print(f"\nnote: leaderboard rows resolved without canonical match "
+              f"(price unverified or unpriced): {', '.join(sorted(odd))}")
+
+    shown = [(mid, verdict_for(mid, verdicts)) for mid, _ in ranked]
+    shown = [(mid, note) for mid, note in shown if note]
+    if shown:
+        print("\nverdicts (context only; selection stays popularity):")
+        for mid, note in shown:
+            print(f"  {mid}: {note}")
+
+    if pick is None:
+        raise SystemExit("domain has no ranked candidates in the model list")
+    print(f"\ndefault pick (rank 1): {pick[0]}")
+    pr_pick = pick[2]
+    if pr_pick.get("best_ep") and pr_pick.get("worst_ep") \
+            and pr_pick["best_ep"] != pr_pick["worst_ep"]:
+        print(f"route to floor: pin provider '{pr_pick['best_ep']}' via "
+              f"body.provider.order (allow_fallbacks: false) — unpinned worst "
+              f"endpoint is '{pr_pick['worst_ep']}' at ${pr_pick['worst']:.4f}/ticket")
+    if cheapest and cheapest[0] != pick[0]:
+        print(f"cheapest shown: {cheapest[0]} at ${cheapest[1]:.4f}/ticket "
+              f"(budget pressure moves within the ranking, by price)")
+    total = pick[1] * args.tickets
+    print(f"projection at {args.tickets} ticket(s): ${total:.2f} "
+          f"(floor ${floor_total:.2f})"
+          + (f" | baseline anchor: ${base_per * args.tickets:.2f}" if base_per else ""))
+    if args.budget is not None:
+        verdict = "under" if total <= args.budget else "OVER"
+        print(f"budget: ${args.budget:.2f} -> {verdict}")
+        if total > args.budget:
+            sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

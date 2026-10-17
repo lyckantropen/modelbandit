@@ -1,0 +1,45 @@
+{
+  "baseline": {
+    "id": "xiaomi/mimo-v2.6-pro",
+    "notes": "Price anchor and personal benchmark. Not a selection input: selection is popularity within a domain."
+  },
+  "verdicts": {
+    "example/model-id": "EXAMPLE ENTRY - replace with your own verdict: one dated sentence, user-validated or suspected, advisory only."
+  },
+  "domains": {
+    "research": [
+      "research_report",
+      "qa_knowledge",
+      "math"
+    ],
+    "writing": [
+      "content_writing",
+      "roleplay_fiction",
+      "summarization",
+      "translation"
+    ],
+    "coding": [
+      "code:general_impl",
+      "code:debugging",
+      "code:review_security",
+      "code:file_read_write",
+      "code:shell_execution",
+      "code:frontend_ui",
+      "code:repo_scan",
+      "code:sql_database"
+    ],
+    "orchestration": [
+      "agent:workflow_execution",
+      "agent:multi_step_planning",
+      "agent:tool_dispatch",
+      "agent:memory_extraction",
+      "agent:web_search"
+    ],
+    "ops": [
+      "devops",
+      "security_audit",
+      "code:devops_config",
+      "code:shell_execution"
+    ]
+  }
+}
