@@ -20,13 +20,15 @@ ln -s ~/openrouter-model-router ~/.agents/skills/openrouter-model-router
 
 ## Usage
 
-The skill fires on model-choice questions; name it (`$openrouter-model-router`)
-to be sure. The natural interface is a prompt — two shapes cover most use.
+The skill fires on model-choice questions; naming it is enough (it is
+model-invoked). In OpenCode, invoke it as `@openrouter-model-router`; in other
+harnesses, just say "use the openrouter-model-router skill". The natural
+interface is a prompt — two shapes cover most use.
 
 **Single task** — one piece of work, picked and costed before spending:
 
 > I need to write a .md research note on <topic>, roughly 1500 words. Using
-> $openrouter-model-router: pick the model for this, weigh the hints and
+> the openrouter-model-router skill: pick the model for this, weigh the hints and
 > summaries against the ranking, and tell me what the run will cost before
 > starting.
 
@@ -38,7 +40,7 @@ due for a research refresh.
 **A set of tickets** — one binding per domain, whole-run budget:
 
 > Work through the tickets in <directory>. Before starting, use
-> $openrouter-model-router to plan model spend: group the tickets by domain
+> the openrouter-model-router skill to plan model spend: group the tickets by domain
 > (research, writing, coding, orchestration, ops), bind one model and effort
 > rung per group, project the total against a $5 budget, and stop and tell me
 > if the projection goes over.
