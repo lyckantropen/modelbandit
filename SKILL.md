@@ -31,7 +31,9 @@ to a rung on each candidate's ladder.
    `scoring`; free routes priced at the pool's cheapest paid ticket, never
    zero). The candidate set stays the popularity top; the score orders it.
    Rung rules: `glance`→floor, `measured`→default, `thorough`→above-default,
-   `exhaustive`→ceiling; a rung the model lacks collapses to its nearest.
+   `exhaustive`→ceiling; a rung the model lacks collapses to its nearest, and
+   the output multiplier discounts toward `glance`'s in proportion to the rung
+   achieved.
    Done when: candidates are in task order with share, score, price, context
    window and rung visible.
 
@@ -124,7 +126,10 @@ to a rung on each candidate's ladder.
 - **Prices** — per 1M tokens: input, output, cache-read, cache-write. Some
   models tier prices by context size; the table prices the base tier. The
   effort rung multiplies output spend (glance 0.6×, measured 1×, thorough 2.5×,
-  exhaustive 6×). The baseline (`policy.json`) is the price anchor for Δ
+  exhaustive 6×); a collapsed rung discounts toward glance 0.6× in proportion
+  to the rung achieved, so a short-ladder model provably costs less than a
+  full-ladder model at the same intent, and full ladders price the table
+  exactly. The baseline (`policy.json`) is the price anchor for Δ
   columns and nothing else.
 
 - **Attribution** — rankings data is CC BY 4.0. When quoting figures outside

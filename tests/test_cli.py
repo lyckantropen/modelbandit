@@ -443,12 +443,76 @@ class CliTests(unittest.TestCase):
         self.assertIn("$0.5784", out)
         self.assertIn("| max |", out)
 
+    def test_collapsed_rung_prices_below_full_ladder(self):
+        # Same pricing, different ladders: acme-x carries the full
+        # reasoning_effort ladder, acme-x-lite only none/thinking. At
+        # `thorough` the lite's rung collapses to `thinking`, and a collapsed
+        # model must price strictly below its full-ladder twin at the same
+        # intent.
+        world = build_world()
+        world["models"] += [
+            make_model("acme/acme-x", "0.000001", "0.00001", "0"),
+            make_model("acme/acme-x-lite", "0.000001", "0.00001", "0",
+                       params=("reasoning",)),
+        ]
+        world["classifications"]["classifications"][0]["models"] += [
+            {"id": "acme/acme-x", "tag_usage_share": 0.3},
+            {"id": "acme/acme-x-lite", "tag_usage_share": 0.3},
+        ]
+        out, _, _, _ = self.run_cli("--domain", "writing", "--effort",
+                                    "thorough", world=world)
+        full_row = next(ln for ln in out.splitlines()
+                        if ln.startswith("|") and "acme/acme-x |" in ln)
+        lite_row = next(ln for ln in out.splitlines()
+                        if ln.startswith("|") and "acme/acme-x-lite |" in ln)
+
+        def per_ticket(row):
+            return float(row.split("|")[7].strip().lstrip("$"))
+
+        # Hand-computed at the authoring profile (in=20,000 out=12,000
+        # cached=40%), thorough:
+        #   full ladder resolves `high` -> table multiplier 2.5:
+        #     20000*0.6*1e-6 + 12000*2.5*1e-5 = 0.012 + 0.30 = $0.3120
+        #   binary ladder resolves `thinking` = rung index 1 = 1/3 of the
+        #   effort scale, short of the 0.75 target -> mult
+        #   0.6 + (2.5-0.6)*(1/3)/(3/4) = 13/9:
+        #     0.012 + 12000*(13/9)*1e-5 = 0.012 + 0.17333 = $0.1853
+        self.assertLess(per_ticket(lite_row), per_ticket(full_row))
+        self.assertIn("$0.3120", full_row)
+        self.assertIn("$0.1853", lite_row)
+        # the collapse is visible in the rung column, and only there
+        self.assertIn("thinking (collapsed)", lite_row)
+        self.assertNotIn("(collapsed)", full_row)
+
+    def test_full_ladder_unchanged_at_glance(self):
+        # At `glance` nothing collapses (target 0.0): both ladders price the
+        # glance multiplier 0.6 exactly, and no row carries the marker.
+        world = build_world()
+        world["models"] += [
+            make_model("acme/acme-x", "0.000001", "0.00001", "0"),
+            make_model("acme/acme-x-lite", "0.000001", "0.00001", "0",
+                       params=("reasoning",)),
+        ]
+        world["classifications"]["classifications"][0]["models"] += [
+            {"id": "acme/acme-x", "tag_usage_share": 0.3},
+            {"id": "acme/acme-x-lite", "tag_usage_share": 0.3},
+        ]
+        out, _, _, _ = self.run_cli("--domain", "writing", "--effort", "glance",
+                                    world=world)
+        # 20000*0.6*1e-6 + 12000*0.6*1e-5 = 0.012 + 0.072 = $0.0840
+        self.assertEqual(out.count("$0.0840"), 2)
+        self.assertNotIn("(collapsed)", out)
+
     def test_delta_against_baseline(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
-        # baseline = 12000*4.35e-7 + 8000*3.6e-9 + 12000*8.7e-7 = 0.0156888
-        # 0.0984 / 0.0156888 = 6.27x ; 0.00772 / 0.0156888 = 0.49x
-        self.assertIn("6.27x", out)
-        self.assertIn("0.49x", out)
+        # The baseline (mimo, none/thinking ladder) collapses at `measured`:
+        # thinking is rung index 1 = 1/3 of the effort scale, short of the
+        # 1/2 target -> mult 0.6 + (1.0-0.6)*((1/3)/(1/2)) = 13/15.
+        # baseline = 12000*4.35e-7 + 8000*3.6e-9 + 12000*(13/15)*8.7e-7
+        #          = 0.00522 + 0.0000288 + 0.009048 = 0.0142968
+        # 0.0984 / 0.0142968 = 6.88x ; 0.00772 / 0.0142968 = 0.54x
+        self.assertIn("6.88x", out)
+        self.assertIn("0.54x", out)
 
     def test_no_endpoint_data_flagged(self):
         out, _, _, _ = self.run_cli("--domain", "writing")

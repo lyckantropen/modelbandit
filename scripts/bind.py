@@ -35,6 +35,13 @@ CACHE_TTL = 24 * 3600
 EFFORT_MULTIPLIERS = {"glance": 0.6, "measured": 1.0, "thorough": 2.5, "exhaustive": 6.0}
 INTENTS = tuple(EFFORT_MULTIPLIERS)
 
+# What each intent asks for: its share of full deliberation on the effort
+# scale (four levels, glance..exhaustive). A ladder's rung at index i delivers
+# i / (len(INTENTS) - 1) of that scale — rungs past the scale's top saturate —
+# so a resolved rung short of the intent's share is a collapsed rung and
+# discounts the multiplier toward glance's (effort_multiplier).
+INTENT_TARGETS = {"glance": 0.0, "measured": 0.5, "thorough": 0.75, "exhaustive": 1.0}
+
 # Token profiles: (input tokens, output tokens, cached share of input).
 # authoring is output-weighted: a .md research note is mostly completion tokens.
 PROFILES = {
@@ -147,14 +154,36 @@ def effort_ladder(model: dict) -> list[str]:
     return ["default"]
 
 
-def resolve_rung(ladder: list[str], intent: str) -> str:
+def resolve_rung_index(ladder: list[str], intent: str) -> int:
     n = len(ladder)
     if n == 1:
-        return ladder[0]
+        return 0
     default_idx = ladder.index("medium") if "medium" in ladder else (n - 1 + 1) // 2
-    idx = {"glance": 0, "measured": default_idx,
-           "thorough": min(default_idx + 1, n - 1), "exhaustive": n - 1}[intent]
-    return ladder[idx]
+    return {"glance": 0, "measured": default_idx,
+            "thorough": min(default_idx + 1, n - 1), "exhaustive": n - 1}[intent]
+
+
+def resolve_rung(ladder: list[str], intent: str) -> str:
+    return ladder[resolve_rung_index(ladder, intent)]
+
+
+def effort_multiplier(ladder: list[str], intent: str) -> float:
+    """Output multiplier for `intent` on this model's ladder.
+
+    The intent targets its share of full deliberation (INTENT_TARGETS); the
+    resolved rung delivers its index on the effort scale, resolved index over
+    len(INTENTS) - 1. A rung short of the target is a collapsed rung: the
+    multiplier scales toward glance's in proportion to the rung achieved,
+    never below glance's and never above the intent's own. Full ladders price
+    the EFFORT_MULTIPLIERS table exactly.
+    """
+    mult = EFFORT_MULTIPLIERS[intent]
+    target = INTENT_TARGETS[intent]
+    achieved = resolve_rung_index(ladder, intent) / (len(INTENTS) - 1)
+    if achieved >= target:
+        return mult
+    glance = EFFORT_MULTIPLIERS["glance"]
+    return max(glance, min(mult, glance + (mult - glance) * (achieved / target)))
 
 
 def blended_from_pricing(pricing: dict, in_tok: int, out_tok: int, cached: float,
@@ -412,7 +441,7 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
 
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
-                     mult: float, basis: str, config: PolicyConfig) -> None:
+                     intent: str, basis: str, config: PolicyConfig) -> None:
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -499,8 +528,9 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         in_tok, out_tok, cached = PROFILES[DOMAIN_PROFILE.get(name, "agentic")]
         costs = {}
         for mid, s in pool:
+            m_mult = effort_multiplier(effort_ladder(models[mid]), intent)
             pricing = price_model(models[mid], endpoint_pricings(mid, False),
-                                  in_tok, out_tok, cached, mult)
+                                  in_tok, out_tok, cached, m_mult)
             costs[mid] = pricing[basis]
         eff = effective_costs(costs)
         masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
@@ -545,7 +575,10 @@ def main() -> None:
                     help="report summary drift (ranked models without summaries, "
                          "stale summaries) and policy age; no --domain needed")
     ap.add_argument("--effort", default="measured", choices=INTENTS,
-                    help="effort intent (default: measured)")
+                    help="effort intent (default: measured); a rung the "
+                         "model's ladder collapses discounts the output "
+                         "multiplier toward glance's, in proportion to the "
+                         "rung achieved")
     ap.add_argument("--profile", choices=PROFILES,
                     help="token profile (default: per-domain — authoring for "
                          "research/writing, agentic otherwise)")
@@ -602,7 +635,7 @@ def main() -> None:
     if args.check_policy:
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
-                         EFFORT_MULTIPLIERS[args.effort], args.pricing_basis,
+                         args.effort, args.pricing_basis,
                          config)
         return
 
@@ -632,14 +665,14 @@ def main() -> None:
         key = resolved["id"] if resolved else norm_id(row["model_permaslug"])
         tokens_30d[key] += int(row["total_tokens"])
 
-    mult = EFFORT_MULTIPLIERS[args.effort]
     baseline = policy.get("baseline", {})
     base_id = norm_id(baseline.get("id", ""))
     base_per = None
     if base_id in models:
-        bp = price_model(models[base_id],
-                         endpoint_pricings(base_id, args.refresh),
-                         in_tok, out_tok, cached, mult)
+        base_m = models[base_id]
+        bp = price_model(base_m, endpoint_pricings(base_id, args.refresh),
+                         in_tok, out_tok, cached,
+                         effort_multiplier(effort_ladder(base_m), args.effort))
         base_per = bp[args.pricing_basis]
 
     print(f"# Popularity ranking: {args.domain}\n")
@@ -665,7 +698,8 @@ def main() -> None:
         if not m:
             continue
         pr = price_model(m, endpoint_pricings(mid, args.refresh),
-                         in_tok, out_tok, cached, mult)
+                         in_tok, out_tok, cached,
+                         effort_multiplier(effort_ladder(m), args.effort))
         priced[mid] = pr
         pers[mid] = pr[args.pricing_basis]
     eff_costs = effective_costs(pers)
@@ -696,13 +730,17 @@ def main() -> None:
         if pr["n_eps"] == 0:
             out_cell += " (no endpoint data)"
         ctx = f"{m['context_length'] / 1024:.0f}K" if m.get("context_length") else "?"
+        ladder = effort_ladder(m)
+        rung = resolve_rung(ladder, args.effort)
+        if effort_multiplier(ladder, args.effort) < EFFORT_MULTIPLIERS[args.effort]:
+            rung = f"{rung} (collapsed)"
         fit_cell = ""
         if fit_map:
             shown = f"{fit:.1f}" if fit is not None else "—"
             fit_cell = f" {shown} | {adj:.2f} |"
         print(f"| {i} | {mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
-              f"{delta} | {ctx} | {resolve_rung(effort_ladder(m), args.effort)} |")
+              f"{delta} | {ctx} | {rung} |")
         if pick is None:
             pick = (mid, per, pr)
             floor_total = pr["best"] * args.tickets
@@ -767,9 +805,10 @@ def main() -> None:
         for i, row in enumerate(rows, 1):
             pr = priced.get(row["mid"])
             if pr is None:
-                pr = price_model(models[row["mid"]],
-                                 endpoint_pricings(row["mid"], args.refresh),
-                                 in_tok, out_tok, cached, mult)
+                dm = models[row["mid"]]
+                pr = price_model(dm, endpoint_pricings(row["mid"], args.refresh),
+                                 in_tok, out_tok, cached,
+                                 effort_multiplier(effort_ladder(dm), args.effort))
             per = pr[args.pricing_basis]
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]

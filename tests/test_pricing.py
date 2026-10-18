@@ -1,4 +1,5 @@
-"""Unit tests for price arithmetic, endpoint spread pricing, and user hints."""
+"""Unit tests for price arithmetic, endpoint spread pricing, effort
+multipliers, and user hints."""
 
 import os
 import sys
@@ -99,6 +100,54 @@ class PriceModelTests(unittest.TestCase):
         pr = bind.price_model(model, eps, 1, 1, 0.0, 1.0)
         self.assertAlmostEqual(pr["out_min"], 0.4)
         self.assertAlmostEqual(pr["out_max"], 8.0)
+
+
+FULL = ["none", "low", "medium", "high", "xhigh", "max"]
+BINARY = ["none", "thinking"]
+
+
+class EffortMultiplierTests(unittest.TestCase):
+    """The output multiplier a ladder earns per intent: a full ladder prices
+    the table exactly; a rung short of the intent's share of the effort scale
+    discounts toward glance's, never past it in either direction."""
+
+    def test_full_ladder_prices_the_table_at_every_intent(self):
+        for intent in bind.INTENTS:
+            self.assertEqual(bind.effort_multiplier(FULL, intent),
+                             bind.EFFORT_MULTIPLIERS[intent])
+
+    def test_binary_ladder_collapses_toward_glance(self):
+        # `thinking` is rung index 1 = 1/3 of the four-level effort scale.
+        # measured targets 1/2: 0.6 + (1.0-0.6)*((1/3)/(1/2)) = 13/15
+        self.assertAlmostEqual(bind.effort_multiplier(BINARY, "measured"),
+                               13 / 15, places=12)
+        # thorough targets 3/4: 0.6 + (2.5-0.6)*((1/3)/(3/4)) = 13/9
+        self.assertAlmostEqual(bind.effort_multiplier(BINARY, "thorough"),
+                               13 / 9, places=12)
+        # exhaustive targets 1: 0.6 + (6.0-0.6)*((1/3)/1) = 2.4
+        self.assertAlmostEqual(bind.effort_multiplier(BINARY, "exhaustive"),
+                               2.4, places=12)
+
+    def test_glance_never_collapses(self):
+        for ladder in (FULL, BINARY, ["default"]):
+            self.assertEqual(bind.effort_multiplier(ladder, "glance"), 0.6)
+
+    def test_single_rung_ladder_stays_at_glance(self):
+        # A one-rung ladder delivers rung 0 of the effort scale: nothing above
+        # glance, at any intent.
+        for intent in bind.INTENTS:
+            self.assertEqual(bind.effort_multiplier(["default"], intent), 0.6)
+
+    def test_collapsed_multiplier_never_leaves_glance_intent_bounds(self):
+        for intent in bind.INTENTS:
+            m = bind.effort_multiplier(BINARY, intent)
+            self.assertGreaterEqual(m, bind.EFFORT_MULTIPLIERS["glance"])
+            self.assertLessEqual(m, bind.EFFORT_MULTIPLIERS[intent])
+
+    def test_collapsed_rung_prices_strictly_below_full_ladder(self):
+        for intent in ("measured", "thorough", "exhaustive"):
+            self.assertLess(bind.effort_multiplier(BINARY, intent),
+                            bind.effort_multiplier(FULL, intent))
 
 
 class HintForTests(unittest.TestCase):
