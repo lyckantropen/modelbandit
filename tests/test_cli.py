@@ -381,6 +381,28 @@ class CliTests(unittest.TestCase):
         self.assertIn("OUT OF BALANCE", block)  # fixture shares are top-heavy
         self.assertIn("coefficient re-tune due: yes", out)
 
+    def test_every_required_policy_key_fails_loudly_when_missing(self):
+        cases = [("scoring", "alpha"), ("scoring", "beta"),
+                 ("scoring.thresholds", "top1_min"),
+                 ("scoring.thresholds", "top1_max"),
+                 ("scoring.thresholds", "top2_max"),
+                 ("affinity.factors", "favor_validated"),
+                 ("affinity.factors", "favor_suspected"),
+                 ("affinity.factors", "avoid_validated"),
+                 ("affinity.factors", "avoid_suspected"),
+                 ("affinity", "blend_weight"),
+                 ("affinity", "eligibility_top_k")]
+        for path, key in cases:
+            pol = json.loads(json.dumps(POLICY))
+            node = pol
+            for part in path.split("."):
+                node = node[part]
+            del node[key]
+            with open(self.policy_path, "w") as f:
+                json.dump(pol, f)
+            _, _, code, _ = self.run_cli("--domain", "writing")
+            self.assertIn(f"{path}.{key}", code)
+
     def test_missing_domain_exits(self):
         _, _, code, _ = self.run_cli()
         self.assertIn("need --domain", code)
@@ -499,13 +521,12 @@ class CliTests(unittest.TestCase):
         # cached=40%), thorough:
         #   full ladder resolves `high` -> table multiplier 2.5:
         #     20000*0.6*1e-6 + 12000*2.5*1e-5 = 0.012 + 0.30 = $0.3120
-        #   binary ladder resolves `thinking` = rung index 1 = 1/3 of the
-        #   effort scale, short of the 0.75 target -> mult
-        #   0.6 + (2.5-0.6)*(1/3)/(3/4) = 13/9:
-        #     0.012 + 12000*(13/9)*1e-5 = 0.012 + 0.17333 = $0.1853
+        #   binary ladder lacks above-default: `thinking` is the nearest rung
+        #   (slot 1 of 2) -> mult 0.6 + (2.5-0.6)*(1/2) = 31/20:
+        #     0.012 + 12000*(31/20)*1e-5 = 0.012 + 0.186 = $0.1980
         self.assertLess(per_ticket(lite_row), per_ticket(full_row))
         self.assertIn("$0.3120", full_row)
-        self.assertIn("$0.1853", lite_row)
+        self.assertIn("$0.1980", lite_row)
         # the collapse is visible in the rung column, and only there
         self.assertIn("thinking (collapsed)", lite_row)
         self.assertNotIn("(collapsed)", full_row)
@@ -531,14 +552,13 @@ class CliTests(unittest.TestCase):
 
     def test_delta_against_baseline(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
-        # The baseline (mimo, none/thinking ladder) collapses at `measured`:
-        # thinking is rung index 1 = 1/3 of the effort scale, short of the
-        # 1/2 target -> mult 0.6 + (1.0-0.6)*((1/3)/(1/2)) = 13/15.
-        # baseline = 12000*4.35e-7 + 8000*3.6e-9 + 12000*(13/15)*8.7e-7
-        #          = 0.00522 + 0.0000288 + 0.009048 = 0.0142968
-        # 0.0984 / 0.0142968 = 6.88x ; 0.00772 / 0.0142968 = 0.54x
-        self.assertIn("6.88x", out)
-        self.assertIn("0.54x", out)
+        # The baseline (mimo, none/thinking ladder) resolves `measured` ->
+        # default exactly: no collapse, table multiplier 1.0.
+        # baseline = 20000*0.6*4.35e-7 + 20000*0.4*3.6e-9 + 12000*8.7e-7
+        #          = 0.00522 + 0.0000288 + 0.01044 = 0.0156888
+        # 0.0984 / 0.0156888 = 6.27x ; 0.00772 / 0.0156888 = 0.49x
+        self.assertIn("6.27x", out)
+        self.assertIn("0.49x", out)
 
     def test_no_endpoint_data_flagged(self):
         out, _, _, _ = self.run_cli("--domain", "writing")

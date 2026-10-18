@@ -116,25 +116,34 @@ class EffortMultiplierTests(unittest.TestCase):
             self.assertEqual(bind.effort_multiplier(FULL, intent),
                              bind.EFFORT_MULTIPLIERS[intent])
 
-    def test_binary_ladder_collapses_toward_glance(self):
-        # `thinking` is rung index 1 = 1/3 of the four-level effort scale.
-        # measured targets 1/2: 0.6 + (1.0-0.6)*((1/3)/(1/2)) = 13/15
-        self.assertAlmostEqual(bind.effort_multiplier(BINARY, "measured"),
-                               13 / 15, places=12)
-        # thorough targets 3/4: 0.6 + (2.5-0.6)*((1/3)/(3/4)) = 13/9
+    def test_binary_ladder_discounts_only_where_a_rung_is_lacked(self):
+        # `measured`->default and `exhaustive`->ceiling both resolve exactly on
+        # a binary ladder: the table value, no collapse.
+        self.assertEqual(bind.effort_multiplier(BINARY, "measured"),
+                         bind.EFFORT_MULTIPLIERS["measured"])
+        self.assertEqual(bind.effort_multiplier(BINARY, "exhaustive"),
+                         bind.EFFORT_MULTIPLIERS["exhaustive"])
+        # `thorough`->above-default is lacking: nearest rung `thinking` (slot 1
+        # of 2) -> 0.6 + (2.5-0.6)*(1/2) = 31/20
         self.assertAlmostEqual(bind.effort_multiplier(BINARY, "thorough"),
-                               13 / 9, places=12)
-        # exhaustive targets 1: 0.6 + (6.0-0.6)*((1/3)/1) = 2.4
-        self.assertAlmostEqual(bind.effort_multiplier(BINARY, "exhaustive"),
-                               2.4, places=12)
+                               31 / 20, places=12)
+
+    def test_ladder_providing_every_slot_prices_unchanged(self):
+        # three rungs give floor, default, above-default and (shared) ceiling:
+        # nothing the intents ask for is lacking -> table values throughout
+        ladder = ["low", "medium", "high"]
+        for intent in bind.INTENTS:
+            self.assertEqual(bind.effort_multiplier(ladder, intent),
+                             bind.EFFORT_MULTIPLIERS[intent])
+            self.assertFalse(bind.rung_collapsed(ladder, intent))
 
     def test_glance_never_collapses(self):
         for ladder in (FULL, BINARY, ["default"]):
             self.assertEqual(bind.effort_multiplier(ladder, "glance"), 0.6)
 
     def test_single_rung_ladder_stays_at_glance(self):
-        # A one-rung ladder delivers rung 0 of the effort scale: nothing above
-        # glance, at any intent.
+        # A one-rung ladder has no effort dial: no deliberation is deliverable
+        # above glance, at any intent.
         for intent in bind.INTENTS:
             self.assertEqual(bind.effort_multiplier(["default"], intent), 0.6)
 
@@ -145,8 +154,10 @@ class EffortMultiplierTests(unittest.TestCase):
             self.assertLessEqual(m, bind.EFFORT_MULTIPLIERS[intent])
 
     def test_collapsed_rung_prices_strictly_below_full_ladder(self):
+        self.assertLess(bind.effort_multiplier(BINARY, "thorough"),
+                        bind.EFFORT_MULTIPLIERS["thorough"])
         for intent in ("measured", "thorough", "exhaustive"):
-            self.assertLess(bind.effort_multiplier(BINARY, intent),
+            self.assertLess(bind.effort_multiplier(["default"], intent),
                             bind.effort_multiplier(FULL, intent))
 
 

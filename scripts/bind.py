@@ -35,12 +35,10 @@ CACHE_TTL = 24 * 3600
 EFFORT_MULTIPLIERS = {"glance": 0.6, "measured": 1.0, "thorough": 2.5, "exhaustive": 6.0}
 INTENTS = tuple(EFFORT_MULTIPLIERS)
 
-# What each intent asks for: its share of full deliberation on the effort
-# scale (four levels, glance..exhaustive). A ladder's rung at index i delivers
-# i / (len(INTENTS) - 1) of that scale — rungs past the scale's top saturate —
-# so a resolved rung short of the intent's share is a collapsed rung and
-# discounts the multiplier toward glance's (effort_multiplier).
-INTENT_TARGETS = {"glance": 0.0, "measured": 0.5, "thorough": 0.75, "exhaustive": 1.0}
+# Effort intents map to structural rung slots — glance->floor, measured->
+# default, thorough->above-default, exhaustive->ceiling (the documented rung
+# rule). A rung the model lacks collapses to its nearest and discounts the
+# multiplier toward glance's (requested_rung_index / effort_multiplier).
 
 # Token profiles: (input tokens, output tokens, cached share of input).
 # authoring is output-weighted: a .md research note is mostly completion tokens.
@@ -167,23 +165,51 @@ def resolve_rung(ladder: list[str], intent: str) -> str:
     return ladder[resolve_rung_index(ladder, intent)]
 
 
+def requested_rung_index(ladder: list[str], intent: str) -> int:
+    """The intent's structural slot on the ladder, uncapped: glance->floor,
+    measured->default, thorough->above-default, exhaustive->ceiling. A slot the
+    ladder provides resolves exactly; one it lacks collapses to its nearest
+    rung."""
+    n = len(ladder)
+    if n == 1:
+        return 0
+    default_idx = ladder.index("medium") if "medium" in ladder else (n - 1 + 1) // 2
+    return {"glance": 0, "measured": default_idx,
+            "thorough": default_idx + 1, "exhaustive": n - 1}[intent]
+
+
+def rung_collapsed(ladder: list[str], intent: str) -> bool:
+    """True when the ladder lacked the requested rung and the nearest was taken."""
+    return (len(ladder) > 1
+            and resolve_rung_index(ladder, intent)
+            < requested_rung_index(ladder, intent))
+
+
 def effort_multiplier(ladder: list[str], intent: str) -> float:
     """Output multiplier for `intent` on this model's ladder.
 
-    The intent targets its share of full deliberation (INTENT_TARGETS); the
-    resolved rung delivers its index on the effort scale, resolved index over
-    len(INTENTS) - 1. A rung short of the target is a collapsed rung: the
-    multiplier scales toward glance's in proportion to the rung achieved,
-    never below glance's and never above the intent's own. Full ladders price
-    the EFFORT_MULTIPLIERS table exactly.
+    A rung the model lacks collapses to its nearest, and a collapsed rung is
+    priced for the deliberation the ladder can deliver: the multiplier scales
+    toward glance's in proportion to the resolved rung's slot over the
+    requested one, never below glance's and never above the intent's own.
+    Ladders that provide the requested rung — every intent on a full ladder —
+    price the EFFORT_MULTIPLIERS table exactly. A one-rung ladder has no
+    effort dial and delivers no deliberation above glance at any intent.
     """
     mult = EFFORT_MULTIPLIERS[intent]
-    target = INTENT_TARGETS[intent]
-    achieved = resolve_rung_index(ladder, intent) / (len(INTENTS) - 1)
-    if achieved >= target:
+    if len(ladder) == 1:
+        return EFFORT_MULTIPLIERS["glance"] if intent != "glance" else mult
+    requested = requested_rung_index(ladder, intent)
+    resolved = resolve_rung_index(ladder, intent)
+    if requested == 0 or resolved >= requested:
         return mult
     glance = EFFORT_MULTIPLIERS["glance"]
-    return max(glance, min(mult, glance + (mult - glance) * (achieved / target)))
+    return glance + (mult - glance) * (resolved / requested)
+
+
+def mult_for(model: dict, intent: str) -> float:
+    """The model's output multiplier at the intent's rung."""
+    return effort_multiplier(effort_ladder(model), intent)
 
 
 def blended_from_pricing(pricing: dict, in_tok: int, out_tok: int, cached: float,
@@ -563,7 +589,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         in_tok, out_tok, cached = PROFILES[DOMAIN_PROFILE.get(name, "agentic")]
         costs = {}
         for mid, s in pool:
-            m_mult = effort_multiplier(effort_ladder(models[mid]), intent)
+            m_mult = mult_for(models[mid], intent)
             pricing = price_model(models[mid], endpoint_pricings(mid, False),
                                   in_tok, out_tok, cached, m_mult)
             costs[mid] = pricing[basis]
@@ -705,7 +731,7 @@ def main() -> None:
         base_m = models[base_id]
         bp = price_model(base_m, endpoint_pricings(base_id, args.refresh),
                          in_tok, out_tok, cached,
-                         effort_multiplier(effort_ladder(base_m), args.effort))
+                         mult_for(base_m, args.effort))
         base_per = bp[args.pricing_basis]
 
     print(f"# Popularity ranking: {args.domain}\n")
@@ -740,7 +766,7 @@ def main() -> None:
             continue
         pr = price_model(m, endpoint_pricings(mid, args.refresh),
                          in_tok, out_tok, cached,
-                         effort_multiplier(effort_ladder(m), args.effort))
+                         mult_for(m, args.effort))
         priced[mid] = pr
         pers[mid] = pr[args.pricing_basis]
     eff_costs = effective_costs(pers)
@@ -753,7 +779,7 @@ def main() -> None:
         sc = task_score(s, eff_costs[mid], alpha, beta)
         fit = fit_for(mid, fit_map)
         rows_out.append((mid, s, models[mid], pr, sc, fit,
-                         standing(s, eff_costs[mid], fit, alpha, beta)))
+                         adjusted_score(sc, fit)))
     rows_out.sort(key=lambda r: -r[6])
 
     pick = None
@@ -773,7 +799,7 @@ def main() -> None:
         ctx = f"{m['context_length'] / 1024:.0f}K" if m.get("context_length") else "?"
         ladder = effort_ladder(m)
         rung = resolve_rung(ladder, args.effort)
-        if effort_multiplier(ladder, args.effort) < EFFORT_MULTIPLIERS[args.effort]:
+        if rung_collapsed(ladder, args.effort):
             rung = f"{rung} (collapsed)"
         fit_cell = ""
         if fit_map:
@@ -849,7 +875,7 @@ def main() -> None:
                 dm = models[row["mid"]]
                 pr = price_model(dm, endpoint_pricings(row["mid"], args.refresh),
                                  in_tok, out_tok, cached,
-                                 effort_multiplier(effort_ladder(dm), args.effort))
+                                 mult_for(dm, args.effort))
             per = pr[args.pricing_basis]
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
