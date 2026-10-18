@@ -85,7 +85,8 @@ POLICY = {
     "baseline": {"id": "xiaomi/mimo-v2.6-pro", "notes": "anchor"},
     "hints": {"deepseek/deepseek-v4-pro": "skipped on output cost"},
     "summaries": {"deepseek/deepseek-v4-pro-0813": "eol sibling summary",
-                  "deepseek/deepseek-v4-pro": "eol summary"},
+                  "deepseek/deepseek-v4-pro": "eol summary",
+                  "stale/model": "gone summary"},
     "domains": {
         "writing": ["content_writing", "roleplay_fiction", "gone_tag"],
         "coding": ["math"],
@@ -140,6 +141,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("writing", out)
         self.assertIn("content_writing", out)
         self.assertIn("coding", out)
+
+    def test_check_policy_reports_gaps_and_stale(self):
+        out, _, code, _ = self.run_cli("--check-policy")
+        self.assertIsNone(code)
+        self.assertIn("# Policy check", out)
+        self.assertIn("policy.json last modified: 0 days old", out)
+        gaps = out[out.index("Research gaps"):out.index("Stale summaries")]
+        self.assertIn("deepseek/deepseek-v4-flash", gaps)
+        self.assertNotIn("deepseek/deepseek-v4-pro-0813", gaps)
+        stale = out[out.index("Stale summaries"):out.index("research cycle due")]
+        self.assertIn("stale/model", stale)
+        self.assertIn("not in model list", stale)
+        self.assertIn("research cycle due: yes", out)
 
     def test_missing_domain_exits(self):
         _, _, code, _ = self.run_cli()
@@ -208,6 +222,7 @@ class CliTests(unittest.TestCase):
     def test_worst_basis_is_default(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
         self.assertIn("basis=worst", out)
+        self.assertIn("policy: 0d old", out)
         self.assertIn("$0.0984", out)
 
     def test_best_basis_shows_floor(self):

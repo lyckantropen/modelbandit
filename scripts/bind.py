@@ -194,11 +194,79 @@ def hint_for(mid: str, hints: dict) -> str | None:
     return best[1] if best else None
 
 
+def policy_age_days(policy_path: str) -> int | None:
+    try:
+        return int((time.time() - os.path.getmtime(policy_path)) // 86400)
+    except OSError:
+        return None
+
+
+def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
+    """Rank models by their share of the domain's classified traffic."""
+    share = collections.defaultdict(float)
+    matches: dict[str, str] = {}
+    known_tags = set()
+    for c in classif["classifications"]:
+        if c["tag"] not in tags:
+            continue
+        known_tags.add(c["tag"])
+        for m in c["models"]:
+            resolved, how = resolve_model(models, by_canon, norm_id(m["id"]))
+            key = resolved["id"] if resolved else norm_id(m["id"])
+            matches[key] = how if resolved else "unresolved"
+            share[key] += c["usage_share"] * m["tag_usage_share"]
+    return share, matches, known_tags
+
+
+def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
+                     summaries: dict, top: int, policy_path: str) -> None:
+    ranked_domains: dict[str, str] = {}
+    all_ranked: set[str] = set()
+    for name, tags in domains.items():
+        share, _, _ = domain_candidates(classif, tags, models, by_canon)
+        for mid, _ in sorted(share.items(), key=lambda kv: -kv[1])[:top]:
+            ranked_domains.setdefault(mid, "")
+            ranked_domains[mid] += f"{name}, "
+            all_ranked.add(mid)
+
+    gaps = sorted(mid for mid in all_ranked if not hint_for(mid, summaries))
+    stale = sorted(k for k in summaries
+                   if not any(mid.startswith(k) for mid in all_ranked))
+    age = policy_age_days(policy_path)
+
+    print("# Policy check\n")
+    age_txt = f"{age} day{'' if age == 1 else 's'} old" if age is not None \
+        else "unknown (file missing)"
+    print(f"policy.json last modified: {age_txt}\n")
+
+    print("## Research gaps (ranked without summary)")
+    for mid in gaps or ["— none"]:
+        doms = ranked_domains.get(mid, "").rstrip(", ")
+        print(f"- {mid}" + (f" ({doms})" if doms else ""))
+    print("\n## Stale summaries (no current rank)")
+    for key in stale or ["— none"]:
+        gone = "" if any(m.startswith(key) for m in models) else " — not in model list"
+        print(f"- {key}{gone}")
+
+    due = bool(gaps) or bool(stale) or (age is not None and age > 30)
+    reasons = []
+    if gaps:
+        reasons.append(f"{len(gaps)} gap{'' if len(gaps) == 1 else 's'}")
+    if stale:
+        reasons.append(f"{len(stale)} stale")
+    if age is not None and age > 30:
+        reasons.append(f"policy {age} days old")
+    print(f"\nresearch cycle due: {'yes (' + ', '.join(reasons) + ')' if due else 'no'}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--domain", help="domain from policy.json (see --list-domains)")
     ap.add_argument("--list-domains", action="store_true",
                     help="show domains and their leaderboard tags")
+    ap.add_argument("--check-policy", action="store_true",
+                    help="report summary drift (ranked models without summaries, "
+                         "stale summaries) and policy age; no --domain needed")
     ap.add_argument("--effort", default="measured", choices=INTENTS,
                     help="effort intent (default: measured)")
     ap.add_argument("--profile", choices=PROFILES,
@@ -229,21 +297,11 @@ def main() -> None:
         for name, tags in domains.items():
             print(f"{name:14s} {', '.join(tags)}")
         return
-    if not args.domain:
-        raise SystemExit("need --domain (or --list-domains)")
-    if args.domain not in domains:
+    if not args.domain and not args.check_policy:
+        raise SystemExit("need --domain (or --list-domains / --check-policy)")
+    if args.domain and args.domain not in domains:
         raise SystemExit(
             f"no domain '{args.domain}'; known: {', '.join(domains) or 'none'}")
-    tags = domains[args.domain]
-
-    profile_name = args.profile or DOMAIN_PROFILE.get(args.domain, "agentic")
-    in_tok, out_tok, cached = PROFILES[profile_name]
-    if args.in_tokens is not None:
-        in_tok = args.in_tokens
-    if args.out_tokens is not None:
-        out_tok = args.out_tokens
-    if args.cached_share is not None:
-        cached = args.cached_share
 
     models_raw = fetch_json(MODELS_URL, "models.json", auth=False, refresh=args.refresh)
     model_rows = models_raw["data"] if isinstance(models_raw, dict) else models_raw
@@ -255,20 +313,25 @@ def main() -> None:
 
     classif = fetch_json(CLASS_URL, "classifications.json", auth=True,
                          refresh=args.refresh)["data"]
+
+    if args.check_policy:
+        run_check_policy(models, by_canon, classif, domains,
+                         policy.get("summaries", {}), args.top, args.policy)
+        return
+
+    tags = domains[args.domain]
+    profile_name = args.profile or DOMAIN_PROFILE.get(args.domain, "agentic")
+    in_tok, out_tok, cached = PROFILES[profile_name]
+    if args.in_tokens is not None:
+        in_tok = args.in_tokens
+    if args.out_tokens is not None:
+        out_tok = args.out_tokens
+    if args.cached_share is not None:
+        cached = args.cached_share
+
     ranks = fetch_json(RANK_URL, "rankings.json", auth=True, refresh=args.refresh)
 
-    share = collections.defaultdict(float)
-    matches: dict[str, str] = {}
-    known_tags = set()
-    for c in classif["classifications"]:
-        if c["tag"] not in tags:
-            continue
-        known_tags.add(c["tag"])
-        for m in c["models"]:
-            resolved, how = resolve_model(models, by_canon, norm_id(m["id"]))
-            key = resolved["id"] if resolved else norm_id(m["id"])
-            matches[key] = how if resolved else "unresolved"
-            share[key] += c["usage_share"] * m["tag_usage_share"]
+    share, matches, known_tags = domain_candidates(classif, tags, models, by_canon)
     missing = set(tags) - known_tags
     if missing:
         print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
@@ -293,8 +356,10 @@ def main() -> None:
         base_per = bp[args.pricing_basis]
 
     print(f"# Popularity ranking: {args.domain}\n")
+    age = policy_age_days(args.policy)
+    age_txt = f"{age}d old" if age is not None else "unknown"
     print(f"profile={profile_name} (in={in_tok:,} out={out_tok:,} cached={cached:.0%}) "
-          f"| effort={args.effort} | basis={args.pricing_basis} "
+          f"| effort={args.effort} | basis={args.pricing_basis} | policy: {age_txt} "
           f"| source: OpenRouter (openrouter.ai/rankings), as of "
           f"{classif.get('as_of', '?')}\n")
     print("| # | model | share | 30d tokens | $/1M out (floor–worst) | "

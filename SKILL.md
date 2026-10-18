@@ -41,6 +41,15 @@ whatever the ranking picks.
    output, so effort is a real cost lever here.
    Done when: the run total carries an explicit under/OVER verdict.
 
+6. **Offer to refresh stale policy.** Every run prints `policy.json`'s age in
+   the header — check it. `--check-policy` adds the drift detail: ranked models
+   without summaries, summaries no longer ranked. When the policy is older than
+   one rankings window (~30 days) or the check reports drift, tell the user and
+   offer to run a summaries refresh (re-pull the current top models, re-research
+   the gaps and the dead entries, replace the summaries).
+   Done when: a due policy has been surfaced to the user with an offer to
+   update — never silently ignored.
+
 ## Reference
 
 - **Domains** — five, mapped to leaderboard tags in `policy.json`: research,
