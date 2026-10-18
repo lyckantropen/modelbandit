@@ -32,11 +32,11 @@ interface is a prompt — two shapes cover most use.
 > summaries against the ranking, and tell me what the run will cost before
 > starting.
 
-The agent resolves the domain (here: writing), binds the effort rung, shows
-the popularity ranking with hints and research summaries beside it, projects
-the run ("$0.036 worst / $0.003 floor") — stepping down the ranking if the
-project already runs rank 1 — and flags whether `policy.json` is due for a
-research refresh.
+The agent resolves the domain (here: writing), orders candidates by task score
+(popularity priced at effort), judges task fit from the research summaries
+(context window, rung coverage, domain guidance), projects the run ("$0.036
+worst / $0.003 floor") — stepping down the order if the project already runs
+the pick — and flags whether `policy.json` is due for a research refresh.
 
 **A set of tickets** — one binding per domain, whole-run budget:
 
@@ -70,6 +70,9 @@ python3 scripts/bind.py --domain research --effort thorough
 # multi-ticket runs: deal the tickets across the popular pool,
 # preference-tilted and reproducible per project seed
 python3 scripts/bind.py --domain writing --tickets 12 --deal --seed my-project
+
+# agent's task-fit judgments (0-5) compose as score * fit/5
+python3 scripts/bind.py --domain writing --fit "z-ai/glm-5.3=4.5,openai/gpt-6-luna=1"
 
 # price at the floor instead of the budget-safe worst endpoint
 python3 scripts/bind.py --domain coding --pricing-basis best

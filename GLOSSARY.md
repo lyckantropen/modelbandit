@@ -26,6 +26,24 @@ preference-tilted process. Exists so a project does not run one model for
 everything.
 _Avoid_: assignment plan, binding schedule
 
+**Score**
+A model's per-task baseline value: popularity share to the α power over priced
+cost to the β power. Deterministic and taste-free; it orders candidates and
+nothing more. The exponent ratio orders, the scale sharpens.
+_Avoid_: ranking score, rating
+
+**Score mass**
+The share of total score a candidate holds in its pool. The balance criterion —
+top-1 mass within 20–50%, top-2 ≤ 75% — keeps the order from going uniform or
+winner-take-all.
+_Avoid_: probability, weight
+
+**Task fit**
+An agent-assigned 0–5 judgment (fractions allowed) of how well a candidate
+suits a specific task — context window, rung coverage, summary-backed domain
+guidance. Judged per task from the summaries, never computed.
+_Avoid_: quality, capability, fit (that is the hint direction)
+
 **Projection**
 The priced cost of a run: per ticket and total, at a stated pricing basis.
 _Avoid_: estimate, quote

@@ -5,12 +5,13 @@ description: Pick OpenRouter models by domain popularity and price them live. Us
 
 # OpenRouter Model Router
 
-Selection is popularity: what real traffic actually runs in the domain, not
-benchmarks, reputation, or curation. Eligibility stays popularity; the
-multi-ticket deal tilts by preference. Prices are live; quality is not claimed.
-The work also carries one effort coordinate — how hard the mind deliberates
-(`glance` / `measured` / `thorough` / `exhaustive`) — resolved to a rung on
-whatever the ranking picks.
+The ranking is popularity — what real traffic actually runs in the domain, not
+benchmarks, reputation, or curation. The task order is that ranking priced at
+effort. Task fit is judged from the research summaries; user taste tilts only
+the multi-ticket deal. Prices are live; quality is claimed only where the
+research cites it. The work also carries one effort coordinate — how hard the
+mind deliberates (`glance` / `measured` / `thorough` / `exhaustive`) — resolved
+to a rung on each candidate's ladder.
 
 ## Steps
 
@@ -25,37 +26,50 @@ whatever the ranking picks.
    Done when: candidates are ranked by their share of the domain's traffic,
    prices and data timestamp shown.
 
-3. **Pick — or deal.** A single task gets rank 1 — unless the project already
-   has that model bound, in which case deliberately step down to the next rank:
-   switching models across a project is good for the project. A multi-ticket run
-   gets a deal instead of a monoculture — `bind.py --deal --seed <project-name>`
-   spreads tickets across the eligible pool by seeded draw from a
-   preference-blended distribution (`policy.json` `affinity`). Deterministic in
-   the seed: the same project replays the same deal. Budget pressure moves
-   within the ranking toward cheaper rows — never outside it.
-   Done when: a single task names one pick (with the cheaper alternative shown
-   if one exists in the ranking), or a batch names its deal with per-model
-   ticket counts and a combined projection.
+3. **Order by task score.** Each candidate scores `share^α / cost^β` —
+   popularity priced at its rung for the effort intent (α, β from `policy.json`
+   `scoring`; free routes priced at the pool's cheapest paid ticket, never
+   zero). The candidate set stays the popularity top; the score orders it.
+   Rung rules: `glance`→floor, `measured`→default, `thorough`→above-default,
+   `exhaustive`→ceiling; a rung the model lacks collapses to its nearest.
+   Done when: candidates are in task order with share, score, price, context
+   window and rung visible.
 
-4. **Resolve the rung.** Effort intent binds to a position on the pick's
-   ladder — each dealt model resolves its own: `glance`→floor,
-   `measured`→default, `thorough`→above-default, `exhaustive`→ceiling. Default
-   is `medium` when the ladder names it, else the middle rung rounded up; a rung
-   the model lacks collapses to its nearest.
-   Done when: the rung is a real setting of every picked model.
+4. **Judge task fit.** Score every candidate 0–5 for THIS task (fractions
+   fine), from the summaries: 5 = summaries explicitly endorse it here;
+   3 = no evidence either way; 1 = summaries warn against; 0 = cannot do the
+   task. Context window and rung coverage are judged too — shown as data,
+   never floored mechanically. Standing = score × fit/5 (unscored = 5). Pass
+   the judgments to the script (`--fit`) so the order and the deal use them.
+   Done when: every considered candidate carries a fit score and a one-line
+   reason.
 
-5. **Project and decide.** Per-ticket cost and run total against the budget.
+5. **Pick — or deal.** A single task takes the top of the fit-adjusted order —
+   unless the project already has that model bound, in which case deliberately
+   step down: switching models across a project is good for the project. A
+   multi-ticket run gets a deal instead of a monoculture — `bind.py --deal
+   --seed <project-name>` spreads tickets per ticket shape across the eligible
+   pool by seeded draw from a preference-tilted blend of the fit-adjusted
+   scores (`policy.json` `affinity`). Deterministic in the seed: the same
+   project replays the same deal. Budget pressure moves within the order
+   toward cheaper rows — never outside the popularity set.
+   Done when: a single task names one pick (score and fit both shown), or a
+   batch names its deal with per-model ticket counts and a combined projection.
+
+6. **Project and decide.** Per-ticket cost and run total against the budget.
    Over budget means a cheaper rank or a lower rung — reasoning tokens bill as
    output, so effort is a real cost lever here.
    Done when: the run total carries an explicit under/OVER verdict.
 
-6. **Offer to refresh stale policy.** Every run prints `policy.json`'s age in
+7. **Offer to refresh stale policy.** Every run prints `policy.json`'s age in
    the header — check it. `--check-policy` adds the drift detail: ranked models
    without summaries, summaries no longer ranked, stale fit keys, and signal
    coverage gaps (a hint that favors or avoids a model in one domain while the
-   model ranks in another where the hint is silent). When the policy is older
-   than one rankings window (~30 days) or the check reports drift, tell the
-   user and offer to run a summaries refresh; the procedure is
+   model ranks in another where the hint is silent). It also re-measures score
+   balance against `scoring.thresholds` — a `coefficient re-tune due: yes`
+   verdict is coefficient work; surface it with the same offer. When the policy
+   is older than one rankings window (~30 days) or the check reports drift, tell
+   the user and offer to run a summaries refresh; the procedure is
    `research/README.md`. Signal drift is taste maintenance: report it, never
    fix it — the user edits fit and evidence.
    Done when: a due policy has been surfaced to the user with an offer to
@@ -72,6 +86,14 @@ whatever the ranking picks.
   quality. The boards carry only each tag's top models, so the long tail is
   invisible and a miss there means "unranked", not "bad".
 
+- **Score** — the task order: `share^α / cost^β`, cost at the candidate's rung
+  for the effort intent. The exponent *ratio* decides the ordering, their
+  *scale* the sharpness. α, β live in `policy.json` `scoring` and are accepted
+  only against the balance thresholds (top-1 score mass 20–50%, top-2 ≤ 75% per
+  pool): neither uniform nor dominated by one or two entries.
+  `--check-policy` re-measures and calls for a re-tune when the balance
+  drifts.
+
 - **Hints** — user observations in `policy.json`, structured: a `note` (shown
   beside the ranking), `fit` (favor/avoid/neutral, per domain), and `evidence`
   (validated/suspected). Weighed, not obeyed — a hint may contradict the crowd
@@ -86,9 +108,9 @@ whatever the ranking picks.
   the popular candidates. Eligibility stays popularity: the top-K selectable
   models (`affinity.eligibility_top_k`), plus favored models ranked below the
   cut if `admit_favored_outside_top_k` is set — unranked or unresolved models
-  never play. The draw blends popularity and preference:
-  `w = (1−λ)·pop + λ·pref`, λ = `affinity.blend_weight`, seeded per ticket for
-  a reproducible deal. **Affinity** is derived at run time, never stored: a
+  never play. The draw blends the fit-adjusted task score and preference:
+  `w = (1−λ)·score + λ·pref`, λ = `affinity.blend_weight`, seeded per ticket
+  for a reproducible deal. **Affinity** is derived at run time, never stored: a
   hint's fit for the domain and its evidence map through `affinity.factors`
   (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
   avoid/suspected ×0.5). Longest prefix wins. The deal is the only place taste

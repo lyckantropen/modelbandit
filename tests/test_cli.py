@@ -101,6 +101,7 @@ POLICY = {
         "writing": ["content_writing", "roleplay_fiction", "gone_tag"],
         "coding": ["math"],
     },
+    "scoring": {"alpha": 1.0, "beta": 0.0},
     "affinity": {
         "blend_weight": 0.6,
         "eligibility_top_k": 2,
@@ -204,7 +205,7 @@ class CliTests(unittest.TestCase):
         rows = [ln for ln in block.splitlines()
                 if ln.startswith("| ") and ln.split("|")[1].strip().isdigit()]
         self.assertEqual(len(rows), 3)
-        self.assertEqual(sum(int(ln.split("|")[6].strip()) for ln in rows), 12)
+        self.assertEqual(sum(int(ln.split("|")[7].strip()) for ln in rows), 12)
         self.assertIn("projection at 12 ticket(s)", out)
 
     def test_deal_is_deterministic_per_seed(self):
@@ -213,6 +214,31 @@ class CliTests(unittest.TestCase):
         out2 = self.run_cli(*args, "--seed", "proj")[0]
         self.assertEqual(out1[out1.index("deal (seed"):],
                          out2[out2.index("deal (seed"):])
+
+    def test_score_orders_by_popularity_priced_at_cost(self):
+        pol = json.loads(json.dumps(POLICY))
+        del pol["scoring"]  # defaults: alpha 0.7, beta 1.0
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, _, _ = self.run_cli("--domain", "writing")
+        body = out[out.index("| # |"):]
+        # v4-pro is ~13x cheaper per ticket than the share leader -> tops the order
+        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro\n", out)
+        self.assertLess(body.index("deepseek/deepseek-v4-pro |"),
+                        body.index("deepseek/deepseek-v4-pro-0813 |"))
+
+    def test_fit_composes_and_reorders(self):
+        out, _, _, _ = self.run_cli("--domain", "writing",
+                                    "--fit", "deepseek/deepseek-v4-pro-0813=0")
+        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro\n", out)
+        self.assertIn("| fit | adj |", out)
+
+    def test_score_balance_section_and_retune_verdict(self):
+        out, _, _, _ = self.run_cli("--check-policy")
+        block = out[out.index("## Score balance"):]
+        self.assertIn("writing:", block)
+        self.assertIn("OUT OF BALANCE", block)  # fixture shares are top-heavy
+        self.assertIn("coefficient re-tune due: yes", out)
 
     def test_missing_domain_exits(self):
         _, _, code, _ = self.run_cli()
@@ -327,7 +353,7 @@ class CliTests(unittest.TestCase):
 
     def test_summaries_annotate_by_longest_prefix(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
-        block = out[out.index("summaries (context only"):]
+        block = out[out.index("summaries (task-fit context"):]
         aug = next(ln for ln in block.splitlines() if "v4-pro-0813" in ln)
         apr = next(ln for ln in block.splitlines()
                    if ln.strip().startswith("deepseek/deepseek-v4-pro:"))
@@ -336,11 +362,11 @@ class CliTests(unittest.TestCase):
 
     def test_summaries_absent_when_no_match(self):
         out, _, _, _ = self.run_cli("--domain", "coding")
-        self.assertNotIn("summaries (context only", out)
+        self.assertNotIn("summaries (task-fit context", out)
 
     def test_default_pick_and_route_to_floor(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
-        self.assertIn("default pick (rank 1): deepseek/deepseek-v4-pro-0813", out)
+        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro-0813", out)
         self.assertIn("route to floor: pin provider 'Baidu'", out)
         self.assertIn("'Relace'", out)
 

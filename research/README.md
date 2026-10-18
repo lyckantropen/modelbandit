@@ -48,5 +48,8 @@ the trigger, this is the procedure.
 
 - Re-run `--check-policy --top 15` until only accepted drift remains (models
   deliberately excluded, documented as such).
+- If the check reports `coefficient re-tune due: yes`, the scoring exponents
+  (`policy.json` `scoring`) no longer balance the pools — re-tune them against
+  the thresholds there before shipping the cycle's content.
 - Run the unit suite. Commit research files and `policy.json` together; tag a
   content drop (v1.4, v1.5, …).

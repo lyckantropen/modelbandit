@@ -121,6 +121,15 @@ class AdmissionTests(unittest.TestCase):
 
 
 class DrawTests(unittest.TestCase):
+    def test_blend_uses_weights_over_share(self):
+        share = {"a/1": 9.0, "b/2": 1.0}
+        weights = {"a/1": 0.1, "b/2": 10.0}
+        rows = bind.plan_deal(share, {m: {} for m in share}, {},
+                              blend_weight=0.0, top_k=2, admit=False,
+                              seed="s", tickets=100, weights=weights)
+        draws = {r["mid"]: r["draw"] for r in rows}
+        self.assertLess(draws["a/1"], draws["b/2"])  # weight, not share
+
     def test_deal_deterministic_per_seed(self):
         a = plan({"a/model-1": 2.0}, seed="proj", tickets=12)
         b = plan({"a/model-1": 2.0}, seed="proj", tickets=12)

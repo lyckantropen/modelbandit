@@ -51,6 +51,16 @@
       "code:shell_execution"
     ]
   },
+  "scoring": {
+    "notes": "Task order = share^alpha / cost^beta (cost at the candidate's effort rung; free models priced at the pool's cheapest paid ticket). The exponent ratio decides the ordering, their scale the sharpness. Tuned 2026-10-18 against the balance thresholds across all five domains (top-1 score mass 24-47%, top-2 <= 74%): neither uniform nor dominated. Thresholds are the acceptance criterion for any coefficient change.",
+    "alpha": 0.7,
+    "beta": 1.0,
+    "thresholds": {
+      "top1_min": 0.2,
+      "top1_max": 0.5,
+      "top2_max": 0.75
+    }
+  },
   "affinity": {
     "notes": "Derivation policy for the multi-ticket deal, not stored weights: a hint's fit (favor/avoid, per domain) and evidence (validated/suspected) map to a multiplier through factors at run time. Eligibility stays popularity; the deal tilts by preference.",
     "blend_weight": 0.6,

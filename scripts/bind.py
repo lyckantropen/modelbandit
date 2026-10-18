@@ -223,6 +223,63 @@ def domain_weights(hints: dict, domain: str, factors: dict) -> dict[str, float]:
     return out
 
 
+# Task order: popularity share^alpha over priced cost^beta. The exponent ratio
+# decides the ordering, their scale the sharpness. Tuned in policy.json
+# `scoring` against the balance thresholds (see mass_balance).
+DEFAULT_ALPHA = 0.7
+DEFAULT_BETA = 1.0
+DEFAULT_THRESHOLDS = {"top1_min": 0.2, "top1_max": 0.5, "top2_max": 0.75}
+
+
+def task_score(share: float, cost: float, alpha: float, beta: float) -> float:
+    """share^alpha / cost^beta. cost must already be floored (see
+    effective_costs) so free models cannot win on division alone."""
+    return share ** alpha / cost ** beta
+
+
+def effective_costs(costs: dict) -> dict:
+    """Price free routes at the pool's cheapest paid ticket, never zero."""
+    positive = [v for v in costs.values() if v > 0]
+    floor = min(positive) if positive else 1.0
+    return {mid: (v if v > 0 else floor) for mid, v in costs.items()}
+
+
+def fit_for(mid: str, fit_map: dict) -> float | None:
+    """The agent's task-fit judgment for a model (0-5). Longest prefix wins;
+    None means unscored (no judgment, no penalty)."""
+    best = None
+    for key, v in fit_map.items():
+        if mid.startswith(key) and (best is None or len(key) > len(best[0])):
+            best = (key, v)
+    return best[1] if best else None
+
+
+def adjusted_score(score: float, fit: float | None) -> float:
+    """Final standing = score * fit/5. Unscored = 5 = no judgment, no penalty."""
+    return score * (5.0 if fit is None else fit) / 5.0
+
+
+def parse_fit(spec: str) -> dict:
+    """'mid=score,mid=score' -> {prefix: clamped 0-5 float}."""
+    out = {}
+    for part in spec.split(","):
+        mid, eq, val = part.strip().partition("=")
+        if mid and eq:
+            out[mid] = max(0.0, min(5.0, float(val)))
+    return out
+
+
+def mass_balance(masses: list) -> tuple[float, float]:
+    """(top-1, top-2) share of score mass in a pool. The balance criterion:
+    top-1 within [top1_min, top1_max] (not uniform, not dominated) and top-2
+    <= top2_max (not a two-entry race)."""
+    total = sum(masses) or 1.0
+    s = sorted(masses, reverse=True)
+    top1 = s[0] / total
+    top2 = (s[0] + s[1]) / total if len(s) > 1 else top1
+    return top1, top2
+
+
 def weight_for(mid: str, table: dict) -> float:
     """Longest matching prefix wins (same semantics as hint_for); 1.0 = neutral."""
     best = None
@@ -233,17 +290,19 @@ def weight_for(mid: str, table: dict) -> float:
 
 
 def plan_deal(share: dict, models: dict, aff: dict, *, blend_weight: float,
-              top_k: int, admit: bool, seed: str, tickets: int) -> list[dict]:
+              top_k: int, admit: bool, seed: str, tickets: int,
+              weights: dict | None = None) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility stays popularity — the top_k selectable models. When admit is
     set, ranked models the user favors (weight > 1) join the pool even below
     the cut; popularity remains the floor, so unranked or unresolved models
-    never play. The draw blends popularity and preference:
+    never play. The draw blends the task baseline and preference:
 
-        w = (1 - blend_weight) * pop + blend_weight * pref   (each normalized)
+        w = (1 - blend_weight) * base + blend_weight * pref   (each normalized)
 
-    Deterministic in seed. Returns one row per pool model:
+    where base is the per-model weight (fit-adjusted task score; falls back to
+    popularity share). Deterministic in seed. Returns one row per pool model:
     {"mid", "share", "pref", "draw", "tickets"}.
     """
     ranked = [(mid, s) for mid, s in sorted(share.items(), key=lambda kv: -kv[1])
@@ -255,11 +314,11 @@ def plan_deal(share: dict, models: dict, aff: dict, *, blend_weight: float,
                  if mid not in in_pool and weight_for(mid, aff) > 1.0]
     if not pool:
         return []
-    pops = [s for _, s in pool]
+    base = [(weights or {}).get(mid, s) for mid, s in pool]
     prefs = [weight_for(mid, aff) for mid, _ in pool]
-    pt, at = sum(pops) or 1.0, sum(prefs) or 1.0
+    pt, at = sum(base) or 1.0, sum(prefs) or 1.0
     draws = [(1 - blend_weight) * (p / pt) + blend_weight * (a / at)
-             for p, a in zip(pops, prefs)]
+             for p, a in zip(base, prefs)]
     dt = sum(draws) or 1.0
     draws = [d / dt for d in draws]
     counts = [0] * len(pool)
@@ -302,14 +361,17 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
 
 
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
-                     policy: dict, top: int, policy_path: str) -> None:
+                     policy: dict, top: int, policy_path: str,
+                     mult: float, basis: str) -> None:
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
     ranked_by_domain: dict[str, list[str]] = {}
+    share_by_domain: dict[str, dict] = {}
     all_ranked: set[str] = set()
     for name, tags in domains.items():
         share, _, _ = domain_candidates(classif, tags, models, by_canon)
+        share_by_domain[name] = share
         ranked_by_domain[name] = [mid for mid, _ in
                                   sorted(share.items(), key=lambda kv: -kv[1])[:top]]
         all_ranked.update(ranked_by_domain[name])
@@ -354,6 +416,34 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     for line in sorted(coverage) or ["— none"]:
         print(f"- {line}")
 
+    sc_conf = policy.get("scoring", {})
+    alpha = float(sc_conf.get("alpha", DEFAULT_ALPHA))
+    beta = float(sc_conf.get("beta", DEFAULT_BETA))
+    th = {**DEFAULT_THRESHOLDS, **sc_conf.get("thresholds", {})}
+    pool_k = int(policy.get("affinity", {}).get("eligibility_top_k", 5))
+    print(f"\n## Score balance (top-{pool_k} pool, {basis} basis)")
+    re_tune = False
+    for name in domains:
+        pool = [(mid, s) for mid, s in
+                sorted(share_by_domain[name].items(), key=lambda kv: -kv[1])
+                if mid in models][:pool_k]
+        if not pool:
+            continue
+        in_tok, out_tok, cached = PROFILES[DOMAIN_PROFILE.get(name, "agentic")]
+        costs = {}
+        for mid, s in pool:
+            pr = price_model(models[mid], endpoint_pricings(mid, False),
+                             in_tok, out_tok, cached, mult)
+            costs[mid] = pr[basis]
+        eff = effective_costs(costs)
+        masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
+        t1, t2 = mass_balance(masses)
+        ok = th["top1_min"] <= t1 <= th["top1_max"] and t2 <= th["top2_max"]
+        re_tune = re_tune or not ok
+        print(f"- {name}: top-1 {t1:.0%}, top-2 {t2:.0%} "
+              f"(limits {th['top1_min']:.0%}–{th['top1_max']:.0%} / "
+              f"{th['top2_max']:.0%}) — {'ok' if ok else 'OUT OF BALANCE'}")
+
     due = bool(gaps) or bool(stale) or bool(stale_signals) or bool(coverage) \
         or (age is not None and age > 30)
     reasons = []
@@ -368,6 +458,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     if age is not None and age > 30:
         reasons.append(f"policy {age} days old")
     print(f"\nresearch cycle due: {'yes (' + ', '.join(reasons) + ')' if due else 'no'}")
+    print(f"coefficient re-tune due: {'yes' if re_tune else 'no'}")
 
 
 def main() -> None:
@@ -396,6 +487,9 @@ def main() -> None:
                          "from the preference-blended distribution")
     ap.add_argument("--seed", default="bind",
                     help="deal seed for reproducibility; use the project name")
+    ap.add_argument("--fit", default=None, metavar="SPEC",
+                    help="agent's task-fit judgments, 'mid=score,...' on 0-5; "
+                         "composes as score * fit/5 (longest prefix wins)")
     ap.add_argument("--budget", type=float, help="run budget in USD")
     ap.add_argument("--top", type=int, default=8, help="ranking rows to show")
     ap.add_argument("--policy", default=DEFAULT_POLICY,
@@ -431,8 +525,9 @@ def main() -> None:
                          refresh=args.refresh)["data"]
 
     if args.check_policy:
-        run_check_policy(models, by_canon, classif, domains,
-                         policy, args.top, args.policy)
+        run_check_policy(models, by_canon, classif, domains, policy,
+                         args.top, args.policy,
+                         EFFORT_MULTIPLIERS[args.effort], args.pricing_basis)
         return
 
     tags = domains[args.domain]
@@ -478,24 +573,46 @@ def main() -> None:
           f"| effort={args.effort} | basis={args.pricing_basis} | policy: {age_txt} "
           f"| source: OpenRouter (openrouter.ai/rankings), as of "
           f"{classif.get('as_of', '?')}\n")
-    print("| # | model | share | 30d tokens | $/1M out (floor–worst) | "
-          "$/ticket | Δ baseline | rung |")
-    print("|---|---|---|---|---|---|---|---|")
+    fit_map = parse_fit(args.fit) if args.fit else {}
+    sc_conf = policy.get("scoring", {})
+    alpha = float(sc_conf.get("alpha", DEFAULT_ALPHA))
+    beta = float(sc_conf.get("beta", DEFAULT_BETA))
+
+    print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
+          + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
+          "ctx | rung |")
+    print("|---" * (10 + (2 if fit_map else 0)) + "|")
 
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
-    pick = None
-    cheapest = None
-    floor_total = 0.0
     priced = {}
-    for i, (mid, s) in enumerate(ranked, 1):
+    pers = {}
+    for mid, s in ranked:
         m = models.get(mid)
         if not m:
-            print(f"| {i} | {mid} | {s:.2%} | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
-                  f"— unresolved to a priced model | | | |")
             continue
         pr = price_model(m, endpoint_pricings(mid, args.refresh),
                          in_tok, out_tok, cached, mult)
         priced[mid] = pr
+        pers[mid] = pr[args.pricing_basis]
+    eff_costs = effective_costs(pers)
+
+    rows_out = []
+    for mid, s in ranked:
+        if mid not in priced:
+            continue
+        pr = priced[mid]
+        sc = task_score(s, eff_costs[mid], alpha, beta)
+        fit = fit_for(mid, fit_map)
+        rows_out.append((mid, s, models[mid], pr, sc, fit,
+                         adjusted_score(sc, fit)))
+    rows_out.sort(key=lambda r: -r[6])
+
+    pick = None
+    cheapest = None
+    floor_total = 0.0
+    i = 0
+    for mid, s, m, pr, sc, fit, adj in rows_out:
+        i += 1
         per = pr[args.pricing_basis]
         delta = f"{per / base_per:.2f}x" if base_per else "—"
         spread = "" if pr["n_eps"] <= 1 else \
@@ -504,14 +621,24 @@ def main() -> None:
         out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
         if pr["n_eps"] == 0:
             out_cell += " (no endpoint data)"
-        print(f"| {i} | {mid} | {s:.2%} | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
-              f"{out_cell} | ${per:.4f} | {delta} | "
-              f"{resolve_rung(effort_ladder(m), args.effort)} |")
+        ctx = f"{m['context_length'] / 1024:.0f}K" if m.get("context_length") else "?"
+        fit_cell = ""
+        if fit_map:
+            shown = f"{fit:.1f}" if fit is not None else "—"
+            fit_cell = f" {shown} | {adj:.2f} |"
+        print(f"| {i} | {mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
+              f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
+              f"{delta} | {ctx} | {resolve_rung(effort_ladder(m), args.effort)} |")
         if pick is None:
             pick = (mid, per, pr)
             floor_total = pr["best"] * args.tickets
         if cheapest is None or per < cheapest[1]:
             cheapest = (mid, per)
+    for mid, s in sorted(((mid, s) for mid, s in ranked if mid not in priced),
+                         key=lambda t: -t[1]):
+        i += 1
+        print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
+              f"— unresolved to a priced model | | | |")
 
     odd = {k: v for k, v in matches.items() if v in ("heuristic", "unresolved")}
     if odd:
@@ -520,7 +647,7 @@ def main() -> None:
 
     for kind, header in (("hints", "hints (advisory; eligibility stays popularity "
                                    "— the deal tilts by preference)"),
-                         ("summaries", "summaries (context only; same rule)")):
+                         ("summaries", "summaries (task-fit context; never taste)")):
         notes = policy.get(kind, {})
         shown = [(mid, hint_for(mid, notes)) for mid, _ in ranked]
         shown = [(mid, note) for mid, note in shown if note]
@@ -531,7 +658,7 @@ def main() -> None:
 
     if pick is None:
         raise SystemExit("domain has no ranked candidates in the model list")
-    print(f"\ndefault pick (rank 1): {pick[0]}")
+    print(f"\ndefault pick (top of task order): {pick[0]}")
     pr_pick = pick[2]
     if pr_pick.get("best_ep") and pr_pick.get("worst_ep") \
             and pr_pick["best_ep"] != pr_pick["worst_ep"]:
@@ -545,18 +672,21 @@ def main() -> None:
     if args.deal:
         aff_conf = policy.get("affinity", {})
         blend_weight = float(aff_conf.get("blend_weight", 0.5))
+        adj_scores = {mid: adj for mid, s, m, pr, sc, fit, adj in rows_out}
         rows = plan_deal(share, models,
                          domain_weights(policy.get("hints", {}), args.domain,
                                         aff_conf.get("factors", {})),
                          blend_weight=blend_weight,
                          top_k=int(aff_conf.get("eligibility_top_k", 5)),
                          admit=bool(aff_conf.get("admit_favored_outside_top_k", True)),
-                         seed=args.seed, tickets=args.tickets)
+                         seed=args.seed, tickets=args.tickets,
+                         weights=adj_scores)
         print(f"\ndeal (seed '{args.seed}', blend {blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
-        print("| # | model | pop% | pref | draw% | tickets | $/ticket | subtotal |")
-        print("|---|---|---|---|---|---|---|---|")
+        print("| # | model | pop% | score | pref | draw% | tickets | $/ticket | "
+              "subtotal |")
+        print("|---|---|---|---|---|---|---|---|---|")
         total = floor_total = 0.0
         for i, row in enumerate(rows, 1):
             pr = priced.get(row["mid"])
@@ -567,9 +697,10 @@ def main() -> None:
             per = pr[args.pricing_basis]
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
-            print(f"| {i} | {row['mid']} | {row['share']:.2%} | {row['pref']:.1f} | "
-                  f"{row['draw']:.2%} | {row['tickets']} | ${per:.4f} | "
-                  f"${per * row['tickets']:.4f} |")
+            print(f"| {i} | {row['mid']} | {row['share']:.2%} | "
+                  f"{adj_scores.get(row['mid'], row['share']):.2f} | "
+                  f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
+                  f"${per:.4f} | ${per * row['tickets']:.4f} |")
     else:
         total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "
