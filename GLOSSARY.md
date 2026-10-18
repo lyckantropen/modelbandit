@@ -38,7 +38,9 @@ Weighed, not obeyed; it annotates, never reorders.
 _Avoid_: verdict, preference, taste
 
 **Fit**
-The direction of a hint for one domain: favor or avoid. Absent fit is neutral.
+The direction of a hint for one domain: favor, avoid, or neutral (explicitly no
+opinion). Omitted fit is an unanswered question; explicit neutral is an
+answered one. Only favor and avoid tilt the deal.
 _Avoid_: affinity score, weight (it is not numeric)
 
 **Evidence**

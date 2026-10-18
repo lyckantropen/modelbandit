@@ -58,6 +58,12 @@ class DerivationTests(unittest.TestCase):
         self.assertEqual(bind.domain_weights({"a/m": "just a note"}, "writing",
                                              bind.DEFAULT_FACTORS), {})
 
+    def test_explicit_neutral_derives_no_weight(self):
+        hints = {"a/m": {"note": "n", "fit": {"writing": "neutral"},
+                         "evidence": "validated"}}
+        self.assertEqual(bind.domain_weights(hints, "writing",
+                                             bind.DEFAULT_FACTORS), {})
+
     def test_policy_factors_override(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "favor"},
                          "evidence": "validated"}}

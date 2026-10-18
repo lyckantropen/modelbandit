@@ -73,10 +73,13 @@ whatever the ranking picks.
   invisible and a miss there means "unranked", not "bad".
 
 - **Hints** — user observations in `policy.json`, structured: a `note` (shown
-  beside the ranking), `fit` (favor/avoid, per domain), and `evidence`
+  beside the ranking), `fit` (favor/avoid/neutral, per domain), and `evidence`
   (validated/suspected). Weighed, not obeyed — a hint may contradict the crowd
-  or age out. Shown beside the ranking; never a reordering force. Missing fit
-  means neutral: a hint without a fit for the domain tilts nothing.
+  or age out. Shown beside the ranking; never a reordering force. A domain the
+  hint names — including an explicit `neutral`, "no opinion here" — is an
+  answered question; a domain it omits is an open one, flagged by
+  `--check-policy` until the user answers. Either way a non-favor/avoid fit
+  tilts nothing.
 
 - **Deal (multi-ticket diversity)** — a project that runs one model for
   everything carries one model's failure modes, so batches are spread across

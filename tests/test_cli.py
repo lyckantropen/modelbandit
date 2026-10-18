@@ -181,6 +181,15 @@ class CliTests(unittest.TestCase):
         self.assertIn("ghost/unknown-20260101 ranks in writing", gaps)
         self.assertIn("research cycle due: yes", out)
 
+    def test_signal_coverage_gap_closed_by_explicit_neutral(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["hints"]["ghost/unknown-20260101"]["fit"]["writing"] = "neutral"
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, _, _ = self.run_cli("--check-policy")
+        gaps = out[out.index("Signal coverage gaps"):out.index("research cycle due")]
+        self.assertNotIn("ghost/unknown-20260101", gaps)
+
     # --- preference-tilted deal -----------------------------------------
 
     def test_deal_admits_favored_and_deals_all_tickets(self):
