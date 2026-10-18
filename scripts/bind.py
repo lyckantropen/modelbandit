@@ -416,6 +416,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
+    pool_k = config.deal.eligibility_top_k
     ranked_by_domain: dict[str, list[str]] = {}
     share_by_domain: dict[str, dict] = {}
     all_ranked: set[str] = set()
@@ -425,6 +426,15 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         ranked_by_domain[name] = [mid for mid, _ in
                                   sorted(share.items(), key=lambda kv: -kv[1])[:top]]
         all_ranked.update(ranked_by_domain[name])
+    # The deal's players: the eligibility top-K of each domain, plus ranked
+    # models the user favors (weight > 1) below the cut — the same pool
+    # plan_deal admits. Coverage is judged only for those.
+    eligible = set()
+    for name, ranked in ranked_by_domain.items():
+        table = domain_weights(signals, name, config.factors)
+        eligible.update(ranked[:pool_k])
+        eligible.update(mid for mid in ranked[pool_k:]
+                        if weight_for(mid, table) > 1.0)
 
     gaps = sorted(mid for mid in all_ranked if not hint_for(mid, summaries))
     stale = sorted(k for k in summaries
@@ -439,7 +449,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         for name, ranked in ranked_by_domain.items():
             if name in fits:
                 continue
-            hit = next((mid for mid in ranked if mid.startswith(key)), None)
+            hit = next((mid for mid in ranked
+                        if mid.startswith(key) and mid in eligible), None)
             if hit:
                 coverage.append(f"{key} ranks in {name} ({hit}) but has no fit there")
     age = policy_age_days(policy_path)
@@ -468,14 +479,22 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
 
     alpha, beta = config.alpha, config.beta
     thresholds = config.thresholds
-    pool_k = config.deal.eligibility_top_k
     print(f"\n## Score balance (top-{pool_k} pool, {basis} basis)")
     re_tune = False
+    judged = False
     for name in domains:
         pool = [(mid, s) for mid, s in
                 sorted(share_by_domain[name].items(), key=lambda kv: -kv[1])
                 if mid in models][:pool_k]
         if not pool:
+            continue
+        if len(pool) < 3:
+            # Below three candidates the balance criterion has nothing to
+            # judge: a one-candidate pool is 100% top mass by definition,
+            # not a tuning failure. Report and never trip the verdict.
+            print(f"- {name}: {len(pool)} candidate"
+                  f"{'s' if len(pool) != 1 else ''} — balance not judgeable "
+                  f"(needs 3+)")
             continue
         in_tok, out_tok, cached = PROFILES[DOMAIN_PROFILE.get(name, "agentic")]
         costs = {}
@@ -489,9 +508,16 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         ok = (thresholds["top1_min"] <= t1 <= thresholds["top1_max"]
               and t2 <= thresholds["top2_max"])
         re_tune = re_tune or not ok
+        judged = True
         print(f"- {name}: top-1 {t1:.0%}, top-2 {t2:.0%} "
               f"(limits {thresholds['top1_min']:.0%}–{thresholds['top1_max']:.0%} / "
               f"{thresholds['top2_max']:.0%}) — {'ok' if ok else 'OUT OF BALANCE'}")
+    if not judged and any(len([mid for mid, _ in
+                                sorted(share_by_domain[name].items(),
+                                       key=lambda kv: -kv[1]) if mid in models]
+                               [:pool_k]) >= 1 for name in domains):
+        # Every non-empty pool was thin: no domain's balance was measurable.
+        print("(no domain with 3+ candidates — balance not judgeable)")
 
     due = bool(gaps) or bool(stale) or bool(stale_signals) or bool(coverage) \
         or (age is not None and age > 30)

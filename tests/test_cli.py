@@ -84,7 +84,9 @@ def build_world():
 POLICY = {
     "baseline": {"id": "xiaomi/mimo-v2.6-pro", "notes": "anchor"},
     "hints": {
-        "deepseek/deepseek-v4-pro": "skipped on output cost",
+        "deepseek/deepseek-v4-pro": {"note": "skipped on output cost",
+                                     "fit": {"coding": "favor"},
+                                     "evidence": "validated"},
         "deepseek/deepseek-v4-flash": {"note": "felt good for bulk writing",
                                        "fit": {"writing": "favor"},
                                        "evidence": "validated"},
@@ -180,7 +182,8 @@ class CliTests(unittest.TestCase):
         stale = out[out.index("Stale signals"):out.index("Signal coverage gaps")]
         self.assertIn("gone/hinted", stale)
         gaps = out[out.index("Signal coverage gaps"):out.index("research cycle due")]
-        self.assertIn("ghost/unknown-20260101 ranks in writing", gaps)
+        self.assertIn("deepseek/deepseek-v4-pro ranks in writing", gaps)
+        self.assertNotIn("ghost/unknown-20260101", gaps)  # outside eligibility
         self.assertIn("research cycle due: yes", out)
 
     def test_signal_coverage_gap_closed_by_explicit_neutral(self):
@@ -191,6 +194,104 @@ class CliTests(unittest.TestCase):
         out, _, _, _ = self.run_cli("--check-policy")
         gaps = out[out.index("Signal coverage gaps"):out.index("research cycle due")]
         self.assertNotIn("ghost/unknown-20260101", gaps)
+
+    def test_thin_pool_balance_not_judgeable(self):
+        # A pool with fewer than three candidates has nothing to judge: a
+        # one-candidate pool is 100% top mass by definition, not a tuning
+        # failure. Balance says so and never trips the re-tune verdict.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=0.0)  # mass ~ shares as computed below
+        pol["domains"] = {"coding": ["math"]}  # single candidate in this domain
+        pol["hints"] = {
+            "ghost/unknown-20260101": {"note": "try it for code",
+                                       "fit": {"coding": "favor"},
+                                       "evidence": "validated"},
+            "gone/hinted": {"note": "vanished", "fit": {"writing": "favor"},
+                            "evidence": "validated"},
+        }
+        pol["summaries"] = {
+            "deepseek/deepseek-v4-pro-0813": "eol sibling summary",
+            "deepseek/deepseek-v4-pro": "eol summary",
+            "stale/model": "gone summary",
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, code, _ = self.run_cli("--check-policy")
+        self.assertIsNone(code)
+        balance = out[out.index("## Score balance"):]
+        self.assertIn("not judgeable", balance)       # says so instead of judging
+        self.assertNotIn("OUT OF BALANCE", balance)   # never a balance failure
+        self.assertIn("coefficient re-tune due: no", out)
+
+    def test_signal_coverage_gap_only_inside_eligibility_top_k(self):
+        # A coverage gap needs two things: silence about the domain the model
+        # ranks in, and a rank inside the eligibility top-K (a deal player).
+        # m4 is silent about writing and inside the cut -> gaps; m5 is equally
+        # silent but below the cut -> never gaps; m0-m3 name writing -> no gap.
+        pol = json.loads(json.dumps(POLICY))
+        pol["affinity"]["eligibility_top_k"] = 5
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["summaries"] = {}
+        pol["hints"] = {}
+        for i in range(4):
+            pol["hints"][f"m{i}/model"] = {"note": "n",
+                                           "fit": {"writing": "favor"},
+                                           "evidence": "validated"}
+        for i in (4, 5):
+            pol["hints"][f"m{i}/model"] = {"note": "n",
+                                           "fit": {"coding": "favor"},
+                                           "evidence": "validated"}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        world = build_world()
+        world["models"] += [make_model(f"m{i}/model", "0.000001", "0.000002",
+                                       "0.000001") for i in range(6)]
+        world["classifications"]["classifications"][0]["models"] = [
+            {"id": f"m{i}/model", "tag_usage_share": share}
+            for i, share in enumerate((0.3, 0.25, 0.2, 0.15, 0.08, 0.02))]
+        out, _, code, _ = self.run_cli("--check-policy", world=world)
+        self.assertIsNone(code)
+        gaps = out[out.index("Signal coverage gaps"):out.index("research cycle due")]
+        self.assertIn("m4/model ranks in writing", gaps)  # silent, in the cut
+        self.assertNotIn("m5/model", gaps)                # silent, below the cut
+        self.assertNotIn("m0/model", gaps)                # names writing
+        self.assertNotIn("m3/model", gaps)
+        self.assertIn("research cycle due: yes", out)
+
+    def test_five_candidate_pool_balance_behaves_as_before(self):
+        # A normal five-candidate pool is judged as before: measured top-1 /
+        # top-2 against the thresholds and the same OUT OF BALANCE verdict.
+        pol = json.loads(json.dumps(POLICY))
+        pol["affinity"]["eligibility_top_k"] = 5
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["summaries"] = {}
+        pol["hints"] = {
+            "m0/model": {"note": "n", "fit": {"writing": "favor"},
+                         "evidence": "validated"},
+            "m1/model": {"note": "n", "fit": {"writing": "favor"},
+                         "evidence": "validated"},
+            "m2/model": {"note": "n", "fit": {"writing": "favor"},
+                         "evidence": "validated"},
+            "m3/model": {"note": "n", "fit": {"writing": "favor"},
+                         "evidence": "validated"},
+            "m4/model": {"note": "n", "fit": {"writing": "favor"},
+                         "evidence": "validated"},
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        world = build_world()
+        world["models"] += [make_model(f"m{i}/model", "0.000001", "0.000002",
+                                       "0.000001") for i in range(5)]
+        world["classifications"]["classifications"][0]["models"] = [
+            {"id": f"m{i}/model", "tag_usage_share": share}
+            for i, share in enumerate((0.6, 0.2, 0.1, 0.06, 0.04))]
+        out, _, code, _ = self.run_cli("--check-policy", world=world)
+        self.assertIsNone(code)
+        balance = out[out.index("## Score balance"):]
+        self.assertIn("writing: top-1 60%, top-2 80%", balance)
+        self.assertIn("OUT OF BALANCE", balance)      # as before: 60/80 breaches
+        self.assertIn("coefficient re-tune due: yes", out)
+        self.assertNotIn("not judgeable", balance)    # five candidates are judgeable
 
     # --- preference-tilted deal -----------------------------------------
 
@@ -244,6 +345,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("| fit | adj |", out)
 
     def test_score_balance_section_and_retune_verdict(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["affinity"]["eligibility_top_k"] = 5  # 3 selectable writers -> judged
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
         out, _, _, _ = self.run_cli("--check-policy")
         block = out[out.index("## Score balance"):]
         self.assertIn("writing:", block)
