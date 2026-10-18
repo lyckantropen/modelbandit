@@ -6,7 +6,8 @@ description: Pick OpenRouter models by domain popularity and price them live. Us
 # OpenRouter Model Router
 
 Selection is popularity: what real traffic actually runs in the domain, not
-benchmarks, reputation, or curation. Prices are live; quality is not claimed.
+benchmarks, reputation, or curation. Eligibility stays popularity; the
+multi-ticket deal tilts by preference. Prices are live; quality is not claimed.
 The work also carries one effort coordinate — how hard the mind deliberates
 (`glance` / `measured` / `thorough` / `exhaustive`) — resolved to a rung on
 whatever the ranking picks.
@@ -24,17 +25,24 @@ whatever the ranking picks.
    Done when: candidates are ranked by their share of the domain's traffic,
    prices and data timestamp shown.
 
-3. **Pick by rank.** Rank 1 is the default pick. Budget pressure moves the pick
-   within the ranking toward cheaper rows — never outside it. A rank outside
-   the board's top models is not a candidate, whatever its qualities.
-   Done when: one pick is named, with the cheaper alternative shown if one
-   exists in the ranking.
+3. **Pick — or deal.** A single task gets rank 1 — unless the project already
+   has that model bound, in which case deliberately step down to the next rank:
+   switching models across a project is good for the project. A multi-ticket run
+   gets a deal instead of a monoculture — `bind.py --deal --seed <project-name>`
+   spreads tickets across the eligible pool by seeded draw from a
+   preference-blended distribution (`policy.json` `affinity`). Deterministic in
+   the seed: the same project replays the same deal. Budget pressure moves
+   within the ranking toward cheaper rows — never outside it.
+   Done when: a single task names one pick (with the cheaper alternative shown
+   if one exists in the ranking), or a batch names its deal with per-model
+   ticket counts and a combined projection.
 
 4. **Resolve the rung.** Effort intent binds to a position on the pick's
-   ladder: `glance`→floor, `measured`→default, `thorough`→above-default,
-   `exhaustive`→ceiling. Default is `medium` when the ladder names it, else the
-   middle rung rounded up; a rung the model lacks collapses to its nearest.
-   Done when: the rung is a real setting of the picked model.
+   ladder — each dealt model resolves its own: `glance`→floor,
+   `measured`→default, `thorough`→above-default, `exhaustive`→ceiling. Default
+   is `medium` when the ladder names it, else the middle rung rounded up; a rung
+   the model lacks collapses to its nearest.
+   Done when: the rung is a real setting of every picked model.
 
 5. **Project and decide.** Per-ticket cost and run total against the budget.
    Over budget means a cheaper rank or a lower rung — reasoning tokens bill as
@@ -43,9 +51,13 @@ whatever the ranking picks.
 
 6. **Offer to refresh stale policy.** Every run prints `policy.json`'s age in
    the header — check it. `--check-policy` adds the drift detail: ranked models
-   without summaries, summaries no longer ranked. When the policy is older than
-   one rankings window (~30 days) or the check reports drift, tell the user and
-   offer to run a summaries refresh; the procedure is `research/README.md`.
+   without summaries, summaries no longer ranked, stale fit keys, and signal
+   coverage gaps (a hint that favors or avoids a model in one domain while the
+   model ranks in another where the hint is silent). When the policy is older
+   than one rankings window (~30 days) or the check reports drift, tell the
+   user and offer to run a summaries refresh; the procedure is
+   `research/README.md`. Signal drift is taste maintenance: report it, never
+   fix it — the user edits fit and evidence.
    Done when: a due policy has been surfaced to the user with an offer to
    update — never silently ignored.
 
@@ -60,10 +72,24 @@ whatever the ranking picks.
   quality. The boards carry only each tag's top models, so the long tail is
   invisible and a miss there means "unranked", not "bad".
 
-- **Hints** — tentative user observations in `policy.json`: tastes, suspicions,
-  early trials. Weighed, not obeyed — a hint may contradict the crowd or age
-  out. Shown beside the ranking; never a reordering force. Selection stays
-  popularity.
+- **Hints** — user observations in `policy.json`, structured: a `note` (shown
+  beside the ranking), `fit` (favor/avoid, per domain), and `evidence`
+  (validated/suspected). Weighed, not obeyed — a hint may contradict the crowd
+  or age out. Shown beside the ranking; never a reordering force. Missing fit
+  means neutral: a hint without a fit for the domain tilts nothing.
+
+- **Deal (multi-ticket diversity)** — a project that runs one model for
+  everything carries one model's failure modes, so batches are spread across
+  the popular candidates. Eligibility stays popularity: the top-K selectable
+  models (`affinity.eligibility_top_k`), plus favored models ranked below the
+  cut if `admit_favored_outside_top_k` is set — unranked or unresolved models
+  never play. The draw blends popularity and preference:
+  `w = (1−λ)·pop + λ·pref`, λ = `affinity.blend_weight`, seeded per ticket for
+  a reproducible deal. **Affinity** is derived at run time, never stored: a
+  hint's fit for the domain and its evidence map through `affinity.factors`
+  (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
+  avoid/suspected ×0.5). Longest prefix wins. The deal is the only place taste
+  acts — the ranking itself is never reordered.
 
 - **Token profiles** — cost is output-weighted for authoring: a `.md` research
   note is mostly completion tokens (authoring: 20K in / 12K out / 40% cached),

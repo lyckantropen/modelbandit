@@ -34,20 +34,24 @@ interface is a prompt — two shapes cover most use.
 
 The agent resolves the domain (here: writing), binds the effort rung, shows
 the popularity ranking with hints and research summaries beside it, projects
-the run ("$0.036 worst / $0.003 floor") — and flags whether `policy.json` is
-due for a research refresh.
+the run ("$0.036 worst / $0.003 floor") — stepping down the ranking if the
+project already runs rank 1 — and flags whether `policy.json` is due for a
+research refresh.
 
 **A set of tickets** — one binding per domain, whole-run budget:
 
 > Work through the tickets in <directory>. Before starting, use
 > the openrouter-model-router skill to plan model spend: group the tickets by domain
-> (research, writing, coding, orchestration, ops), bind one model and effort
-> rung per group, project the total against a $5 budget, and stop and tell me
-> if the projection goes over.
+> (research, writing, coding, orchestration, ops), deal each group's tickets
+> across the popular models (preference-tilted), project the total against a $5
+> budget, and stop and tell me if the projection goes over.
 
-The agent ranks candidates per group, binds each, and reports a projection
-like "30 tickets: $1.08 worst / $0.10 floor" before any spend — moving down
-the ranking or the rung if the budget binds.
+The agent ranks candidates per group, deals the tickets (`--deal`), and reports
+a projection like "30 tickets: $1.08 worst / $0.10 floor" before any spend —
+moving down the ranking or the rung if the budget binds. The deal spreads a
+batch across the popular candidates instead of running one model for
+everything: eligibility stays popularity, the deal tilts by preference
+(`policy.json` `affinity`), and the seed makes the plan reproducible.
 
 ### Directly
 
@@ -62,6 +66,10 @@ python3 scripts/bind.py --domain writing --tickets 30 --budget 2
 
 # effort intent binds to a rung on the picked model's ladder
 python3 scripts/bind.py --domain research --effort thorough
+
+# multi-ticket runs: deal the tickets across the popular pool,
+# preference-tilted and reproducible per project seed
+python3 scripts/bind.py --domain writing --tickets 12 --deal --seed my-project
 
 # price at the floor instead of the budget-safe worst endpoint
 python3 scripts/bind.py --domain coding --pricing-basis best

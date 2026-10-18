@@ -83,13 +83,30 @@ def build_world():
 
 POLICY = {
     "baseline": {"id": "xiaomi/mimo-v2.6-pro", "notes": "anchor"},
-    "hints": {"deepseek/deepseek-v4-pro": "skipped on output cost"},
+    "hints": {
+        "deepseek/deepseek-v4-pro": "skipped on output cost",
+        "deepseek/deepseek-v4-flash": {"note": "felt good for bulk writing",
+                                       "fit": {"writing": "favor"},
+                                       "evidence": "validated"},
+        "ghost/unknown-20260101": {"note": "try it for code",
+                                   "fit": {"coding": "favor"},
+                                   "evidence": "validated"},
+        "gone/hinted": {"note": "vanished", "fit": {"writing": "favor"},
+                        "evidence": "validated"},
+    },
     "summaries": {"deepseek/deepseek-v4-pro-0813": "eol sibling summary",
                   "deepseek/deepseek-v4-pro": "eol summary",
                   "stale/model": "gone summary"},
     "domains": {
         "writing": ["content_writing", "roleplay_fiction", "gone_tag"],
         "coding": ["math"],
+    },
+    "affinity": {
+        "blend_weight": 0.6,
+        "eligibility_top_k": 2,
+        "admit_favored_outside_top_k": True,
+        "factors": {"favor_validated": 3.0, "favor_suspected": 2.0,
+                    "avoid_validated": 0.3, "avoid_suspected": 0.5},
     },
 }
 
@@ -154,6 +171,39 @@ class CliTests(unittest.TestCase):
         self.assertIn("stale/model", stale)
         self.assertIn("not in model list", stale)
         self.assertIn("research cycle due: yes", out)
+
+    def test_check_policy_reports_signal_drift(self):
+        out, _, code, _ = self.run_cli("--check-policy")
+        self.assertIsNone(code)
+        stale = out[out.index("Stale signals"):out.index("Signal coverage gaps")]
+        self.assertIn("gone/hinted", stale)
+        gaps = out[out.index("Signal coverage gaps"):out.index("research cycle due")]
+        self.assertIn("ghost/unknown-20260101 ranks in writing", gaps)
+        self.assertIn("research cycle due: yes", out)
+
+    # --- preference-tilted deal -----------------------------------------
+
+    def test_deal_admits_favored_and_deals_all_tickets(self):
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
+                                       "--deal", "--seed", "proj")
+        self.assertIsNone(code)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("eligibility stays popularity", block)
+        # rank 3 on the board, admitted because the user favors it (pref 3.0)
+        self.assertIn("deepseek/deepseek-v4-flash", block)
+        self.assertIn("| 3.0 |", block)
+        rows = [ln for ln in block.splitlines()
+                if ln.startswith("| ") and ln.split("|")[1].strip().isdigit()]
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(sum(int(ln.split("|")[6].strip()) for ln in rows), 12)
+        self.assertIn("projection at 12 ticket(s)", out)
+
+    def test_deal_is_deterministic_per_seed(self):
+        args = ("--domain", "writing", "--tickets", "12", "--deal")
+        out1 = self.run_cli(*args, "--seed", "proj")[0]
+        out2 = self.run_cli(*args, "--seed", "proj")[0]
+        self.assertEqual(out1[out1.index("deal (seed"):],
+                         out2[out2.index("deal (seed"):])
 
     def test_missing_domain_exits(self):
         _, _, code, _ = self.run_cli()

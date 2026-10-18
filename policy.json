@@ -1,7 +1,7 @@
 {
   "baseline": {
     "id": "xiaomi/mimo-v2.6-pro",
-    "notes": "Price anchor and personal benchmark. Not a selection input: selection is popularity within a domain."
+    "notes": "Price anchor and personal benchmark. Eligibility stays popularity within a domain; the multi-ticket deal tilts by preference (see affinity)."
   },
   "hints": {
     "example/model-id": {
@@ -50,5 +50,17 @@
       "code:devops_config",
       "code:shell_execution"
     ]
+  },
+  "affinity": {
+    "notes": "Derivation policy for the multi-ticket deal, not stored weights: a hint's fit (favor/avoid, per domain) and evidence (validated/suspected) map to a multiplier through factors at run time. Eligibility stays popularity; the deal tilts by preference.",
+    "blend_weight": 0.6,
+    "eligibility_top_k": 5,
+    "admit_favored_outside_top_k": true,
+    "factors": {
+      "favor_validated": 3.0,
+      "favor_suspected": 2.0,
+      "avoid_validated": 0.3,
+      "avoid_suspected": 0.5
+    }
   }
 }

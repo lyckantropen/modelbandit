@@ -16,6 +16,7 @@ import argparse
 import collections
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -186,12 +187,94 @@ def price_model(model: dict, eps: list[dict], in_tok: int, out_tok: int,
 
 
 def hint_for(mid: str, hints: dict) -> str | None:
-    """Longest matching prefix wins so family hints cover dated slugs."""
+    """Longest matching prefix wins so family hints cover dated slugs.
+    Entries are structured ({note, fit, evidence}) or plain notes."""
     best = None
     for key, note in hints.items():
         if mid.startswith(key) and (best is None or len(key) > len(best[0])):
             best = (key, note)
-    return best[1] if best else None
+    if not best:
+        return None
+    entry = best[1]
+    return entry.get("note", "") if isinstance(entry, dict) else entry
+
+
+DEFAULT_FACTORS = {"favor_validated": 3.0, "favor_suspected": 2.0,
+                   "avoid_validated": 0.3, "avoid_suspected": 0.5}
+
+
+def domain_weights(hints: dict, domain: str, factors: dict) -> dict[str, float]:
+    """Derive one domain's affinity table from structured hints.
+
+    A hint carries fit ({domain: favor|avoid}) and evidence
+    (validated|suspected); the multiplier is factors[f"{fit}_{evidence}"].
+    Nothing is stored per model — hints without a fit for this domain are
+    neutral and stay out of the table (missing fit = neutral)."""
+    out = {}
+    for key, entry in hints.items():
+        if not isinstance(entry, dict):
+            continue
+        fit = entry.get("fit", {}).get(domain)
+        if fit not in ("favor", "avoid"):
+            continue
+        evidence = entry.get("evidence", "suspected")
+        out[key] = float(factors.get(f"{fit}_{evidence}",
+                                     DEFAULT_FACTORS.get(f"{fit}_{evidence}", 1.0)))
+    return out
+
+
+def weight_for(mid: str, table: dict) -> float:
+    """Longest matching prefix wins (same semantics as hint_for); 1.0 = neutral."""
+    best = None
+    for key, w in table.items():
+        if mid.startswith(key) and (best is None or len(key) > len(best[0])):
+            best = (key, w)
+    return best[1] if best else 1.0
+
+
+def plan_deal(share: dict, models: dict, aff: dict, *, blend_weight: float,
+              top_k: int, admit: bool, seed: str, tickets: int) -> list[dict]:
+    """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
+
+    Eligibility stays popularity — the top_k selectable models. When admit is
+    set, ranked models the user favors (weight > 1) join the pool even below
+    the cut; popularity remains the floor, so unranked or unresolved models
+    never play. The draw blends popularity and preference:
+
+        w = (1 - blend_weight) * pop + blend_weight * pref   (each normalized)
+
+    Deterministic in seed. Returns one row per pool model:
+    {"mid", "share", "pref", "draw", "tickets"}.
+    """
+    ranked = [(mid, s) for mid, s in sorted(share.items(), key=lambda kv: -kv[1])
+              if mid in models]
+    pool = ranked[:top_k]
+    if admit:
+        in_pool = {mid for mid, _ in pool}
+        pool += [(mid, s) for mid, s in ranked[top_k:]
+                 if mid not in in_pool and weight_for(mid, aff) > 1.0]
+    if not pool:
+        return []
+    pops = [s for _, s in pool]
+    prefs = [weight_for(mid, aff) for mid, _ in pool]
+    pt, at = sum(pops) or 1.0, sum(prefs) or 1.0
+    draws = [(1 - blend_weight) * (p / pt) + blend_weight * (a / at)
+             for p, a in zip(pops, prefs)]
+    dt = sum(draws) or 1.0
+    draws = [d / dt for d in draws]
+    counts = [0] * len(pool)
+    cum, run = [], 0.0
+    for d in draws:
+        run += d
+        cum.append(run)
+    for i in range(tickets):
+        r = random.Random(f"{seed}::{i}").random() * run
+        for j, c in enumerate(cum):
+            if r <= c:
+                counts[j] += 1
+                break
+    return [{"mid": mid, "share": s, "pref": pr, "draw": d, "tickets": n}
+            for (mid, s), pr, d, n in zip(pool, prefs, draws, counts)]
 
 
 def policy_age_days(policy_path: str) -> int | None:
@@ -219,19 +302,34 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
 
 
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
-                     summaries: dict, top: int, policy_path: str) -> None:
-    ranked_domains: dict[str, str] = {}
+                     policy: dict, top: int, policy_path: str) -> None:
+    summaries = policy.get("summaries", {})
+    signals = {k: v for k, v in policy.get("hints", {}).items()
+               if isinstance(v, dict) and v.get("fit")}
+    ranked_by_domain: dict[str, list[str]] = {}
     all_ranked: set[str] = set()
     for name, tags in domains.items():
         share, _, _ = domain_candidates(classif, tags, models, by_canon)
-        for mid, _ in sorted(share.items(), key=lambda kv: -kv[1])[:top]:
-            ranked_domains.setdefault(mid, "")
-            ranked_domains[mid] += f"{name}, "
-            all_ranked.add(mid)
+        ranked_by_domain[name] = [mid for mid, _ in
+                                  sorted(share.items(), key=lambda kv: -kv[1])[:top]]
+        all_ranked.update(ranked_by_domain[name])
 
     gaps = sorted(mid for mid in all_ranked if not hint_for(mid, summaries))
     stale = sorted(k for k in summaries
                    if not any(mid.startswith(k) for mid in all_ranked))
+    stale_signals = sorted(k for k in signals
+                           if not any(mid.startswith(k) for mid in all_ranked))
+    coverage = []
+    for key, entry in signals.items():
+        fits = entry.get("fit", {})
+        if not any(v in ("favor", "avoid") for v in fits.values()):
+            continue
+        for name, ranked in ranked_by_domain.items():
+            if name in fits:
+                continue
+            hit = next((mid for mid in ranked if mid.startswith(key)), None)
+            if hit:
+                coverage.append(f"{key} ranks in {name} ({hit}) but has no fit there")
     age = policy_age_days(policy_path)
 
     print("# Policy check\n")
@@ -239,21 +337,34 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         else "unknown (file missing)"
     print(f"policy.json last modified: {age_txt}\n")
 
+    doms_of = {mid: ", ".join(n for n, r in ranked_by_domain.items() if mid in r)
+               for mid in all_ranked}
     print("## Research gaps (ranked without summary)")
     for mid in gaps or ["— none"]:
-        doms = ranked_domains.get(mid, "").rstrip(", ")
+        doms = doms_of.get(mid, "")
         print(f"- {mid}" + (f" ({doms})" if doms else ""))
     print("\n## Stale summaries (no current rank)")
     for key in stale or ["— none"]:
         gone = "" if any(m.startswith(key) for m in models) else " — not in model list"
         print(f"- {key}{gone}")
+    print("\n## Stale signals (fit keys with no current rank)")
+    for key in stale_signals or ["— none"]:
+        print(f"- {key}")
+    print("\n## Signal coverage gaps (opinion elsewhere, silent here)")
+    for line in sorted(coverage) or ["— none"]:
+        print(f"- {line}")
 
-    due = bool(gaps) or bool(stale) or (age is not None and age > 30)
+    due = bool(gaps) or bool(stale) or bool(stale_signals) or bool(coverage) \
+        or (age is not None and age > 30)
     reasons = []
     if gaps:
         reasons.append(f"{len(gaps)} gap{'' if len(gaps) == 1 else 's'}")
     if stale:
         reasons.append(f"{len(stale)} stale")
+    if stale_signals:
+        reasons.append(f"{len(stale_signals)} stale signal{'' if len(stale_signals) == 1 else 's'}")
+    if coverage:
+        reasons.append(f"{len(coverage)} signal gap{'' if len(coverage) == 1 else 's'}")
     if age is not None and age > 30:
         reasons.append(f"policy {age} days old")
     print(f"\nresearch cycle due: {'yes (' + ', '.join(reasons) + ')' if due else 'no'}")
@@ -280,6 +391,11 @@ def main() -> None:
     ap.add_argument("--cached-share", type=float,
                     help="override profile cached share of input (0..1)")
     ap.add_argument("--tickets", type=int, default=1, help="runs to project for")
+    ap.add_argument("--deal", action="store_true",
+                    help="deal tickets across the eligible pool by seeded draw "
+                         "from the preference-blended distribution")
+    ap.add_argument("--seed", default="bind",
+                    help="deal seed for reproducibility; use the project name")
     ap.add_argument("--budget", type=float, help="run budget in USD")
     ap.add_argument("--top", type=int, default=8, help="ranking rows to show")
     ap.add_argument("--policy", default=DEFAULT_POLICY,
@@ -316,7 +432,7 @@ def main() -> None:
 
     if args.check_policy:
         run_check_policy(models, by_canon, classif, domains,
-                         policy.get("summaries", {}), args.top, args.policy)
+                         policy, args.top, args.policy)
         return
 
     tags = domains[args.domain]
@@ -370,6 +486,7 @@ def main() -> None:
     pick = None
     cheapest = None
     floor_total = 0.0
+    priced = {}
     for i, (mid, s) in enumerate(ranked, 1):
         m = models.get(mid)
         if not m:
@@ -378,6 +495,7 @@ def main() -> None:
             continue
         pr = price_model(m, endpoint_pricings(mid, args.refresh),
                          in_tok, out_tok, cached, mult)
+        priced[mid] = pr
         per = pr[args.pricing_basis]
         delta = f"{per / base_per:.2f}x" if base_per else "—"
         spread = "" if pr["n_eps"] <= 1 else \
@@ -400,8 +518,9 @@ def main() -> None:
         print(f"\nnote: leaderboard rows resolved without canonical match "
               f"(price unverified or unpriced): {', '.join(sorted(odd))}")
 
-    for kind, header in (("hints", "hints (advisory; selection stays popularity)"),
-                         ("summaries", "summaries (context only; selection stays popularity)")):
+    for kind, header in (("hints", "hints (advisory; eligibility stays popularity "
+                                   "— the deal tilts by preference)"),
+                         ("summaries", "summaries (context only; same rule)")):
         notes = policy.get(kind, {})
         shown = [(mid, hint_for(mid, notes)) for mid, _ in ranked]
         shown = [(mid, note) for mid, note in shown if note]
@@ -422,7 +541,37 @@ def main() -> None:
     if cheapest and cheapest[0] != pick[0]:
         print(f"cheapest shown: {cheapest[0]} at ${cheapest[1]:.4f}/ticket "
               f"(budget pressure moves within the ranking, by price)")
-    total = pick[1] * args.tickets
+
+    if args.deal:
+        aff_conf = policy.get("affinity", {})
+        blend_weight = float(aff_conf.get("blend_weight", 0.5))
+        rows = plan_deal(share, models,
+                         domain_weights(policy.get("hints", {}), args.domain,
+                                        aff_conf.get("factors", {})),
+                         blend_weight=blend_weight,
+                         top_k=int(aff_conf.get("eligibility_top_k", 5)),
+                         admit=bool(aff_conf.get("admit_favored_outside_top_k", True)),
+                         seed=args.seed, tickets=args.tickets)
+        print(f"\ndeal (seed '{args.seed}', blend {blend_weight} from policy "
+              f"affinity; eligibility stays popularity — the deal tilts by "
+              f"preference):")
+        print("| # | model | pop% | pref | draw% | tickets | $/ticket | subtotal |")
+        print("|---|---|---|---|---|---|---|---|")
+        total = floor_total = 0.0
+        for i, row in enumerate(rows, 1):
+            pr = priced.get(row["mid"])
+            if pr is None:
+                pr = price_model(models[row["mid"]],
+                                 endpoint_pricings(row["mid"], args.refresh),
+                                 in_tok, out_tok, cached, mult)
+            per = pr[args.pricing_basis]
+            total += per * row["tickets"]
+            floor_total += pr["best"] * row["tickets"]
+            print(f"| {i} | {row['mid']} | {row['share']:.2%} | {row['pref']:.1f} | "
+                  f"{row['draw']:.2%} | {row['tickets']} | ${per:.4f} | "
+                  f"${per * row['tickets']:.4f} |")
+    else:
+        total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "
           f"(floor ${floor_total:.2f})"
           + (f" | baseline anchor: ${base_per * args.tickets:.2f}" if base_per else ""))

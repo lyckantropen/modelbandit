@@ -39,7 +39,10 @@ the trigger, this is the procedure.
   that change a decision. Prices and index numbers are dated snapshots —
   date them.
 - Delete summaries that are stale beyond use; keep dated exclusions.
-- **Never touch `hints`** in a refresh: those are user taste, not research.
+- **Never write `hints`** in a refresh: fit and evidence are user taste, not
+  research. Do report what `--check-policy` says about them — stale fit keys
+  and signal coverage gaps — and the user edits the taste. A refresh reconciles
+  coverage; it never invents preference.
 
 ## 4. Close the loop
 
