@@ -49,7 +49,28 @@ The agent ranks candidates per group, binds each, and reports a projection
 like "30 tickets: $1.08 worst / $0.10 floor" before any spend — moving down
 the ranking or the rung if the budget binds.
 
-Mechanics: `python3 scripts/bind.py --help`. Policy: `SKILL.md`.
+### Directly
+
+The mechanism is one stdlib script; `--help` is the full reference.
+
+```bash
+# what domains exist and which leaderboard tags they map to
+python3 scripts/bind.py --list-domains
+
+# rank candidates for a domain, project 30 tickets against a budget
+python3 scripts/bind.py --domain writing --tickets 30 --budget 2
+
+# effort intent binds to a rung on the picked model's ladder
+python3 scripts/bind.py --domain research --effort thorough
+
+# price at the floor instead of the budget-safe worst endpoint
+python3 scripts/bind.py --domain coding --pricing-basis best
+
+# summary drift and policy age
+python3 scripts/bind.py --check-policy
+```
+
+Policy: `SKILL.md`.
 
 ## Data
 
