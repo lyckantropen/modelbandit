@@ -65,7 +65,6 @@
     "notes": "Derivation policy for the multi-ticket deal, not stored weights: a hint's fit (favor/avoid, per domain) and evidence (validated/suspected) map to a multiplier through factors at run time. Eligibility stays popularity; the deal tilts by preference.",
     "blend_weight": 0.6,
     "eligibility_top_k": 5,
-    "admit_favored_outside_top_k": true,
     "factors": {
       "favor_validated": 3.0,
       "favor_suspected": 2.0,

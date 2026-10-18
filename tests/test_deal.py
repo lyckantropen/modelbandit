@@ -13,10 +13,25 @@ import bind  # noqa: E402
 
 POOL = {"a/model-1": 6.0, "b/model-2": 3.0, "c/model-3": 1.0}
 MODELS = {mid: {} for mid in POOL}
+FACTORS = {"favor_validated": 3.0, "favor_suspected": 2.0,
+           "avoid_validated": 0.3, "avoid_suspected": 0.5}
+POLICY_CONFIG = {
+    "scoring": {
+        "alpha": 0.7,
+        "beta": 1.0,
+        "thresholds": {"top1_min": 0.2, "top1_max": 0.5, "top2_max": 0.75},
+    },
+    "affinity": {
+        "blend_weight": 0.6,
+        "eligibility_top_k": 5,
+        "factors": {"favor_validated": 3.0, "favor_suspected": 2.0,
+                    "avoid_validated": 0.3, "avoid_suspected": 0.5},
+    },
+}
 
 
 def plan(aff=None, **kw):
-    params = dict(blend_weight=0.6, top_k=3, admit=False, seed="s", tickets=100)
+    params = dict(blend_weight=0.6, top_k=3, seed="s", tickets=100)
     params.update(kw)
     weights = params.pop("weights", None)
     return bind.plan_deal(POOL, MODELS, aff or {},
@@ -35,6 +50,26 @@ class WeightTests(unittest.TestCase):
                                          {"z-ai/glm-5.3": 3.0}), 1.0)
 
 
+class PolicyConfigTests(unittest.TestCase):
+    def test_missing_scoring_block_fails_with_key(self):
+        policy = dict(POLICY_CONFIG)
+        del policy["scoring"]
+        with self.assertRaisesRegex(SystemExit, "scoring"):
+            bind.load_policy_config(policy)
+
+    def test_missing_factors_map_fails_with_key(self):
+        policy = {**POLICY_CONFIG, "affinity": dict(POLICY_CONFIG["affinity"])}
+        del policy["affinity"]["factors"]
+        with self.assertRaisesRegex(SystemExit, "affinity.factors"):
+            bind.load_policy_config(policy)
+
+    def test_missing_blend_weight_fails_with_key(self):
+        policy = {**POLICY_CONFIG, "affinity": dict(POLICY_CONFIG["affinity"])}
+        del policy["affinity"]["blend_weight"]
+        with self.assertRaisesRegex(SystemExit, "affinity.blend_weight"):
+            bind.load_policy_config(policy)
+
+
 class DerivationTests(unittest.TestCase):
     """Affinity is derived from structured hints, never stored as weights."""
 
@@ -42,30 +77,30 @@ class DerivationTests(unittest.TestCase):
         hints = {"z-ai/glm-5.3": {"note": "n", "fit": {"writing": "favor"},
                                   "evidence": "validated"}}
         self.assertEqual(bind.domain_weights(hints, "writing",
-                                             bind.DEFAULT_FACTORS),
+                                             FACTORS),
                          {"z-ai/glm-5.3": 3.0})
 
     def test_missing_fit_is_neutral(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "favor"},
                          "evidence": "validated"}}
         self.assertEqual(bind.domain_weights(hints, "coding",
-                                             bind.DEFAULT_FACTORS), {})
+                                             FACTORS), {})
 
     def test_suspected_avoid_derives_weaker_avoidance(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "avoid"},
                          "evidence": "suspected"}}
         self.assertEqual(bind.domain_weights(hints, "writing",
-                                             bind.DEFAULT_FACTORS)["a/m"], 0.5)
+                                             FACTORS)["a/m"], 0.5)
 
     def test_plain_string_hint_is_ignored(self):
         self.assertEqual(bind.domain_weights({"a/m": "just a note"}, "writing",
-                                             bind.DEFAULT_FACTORS), {})
+                                             FACTORS), {})
 
     def test_explicit_neutral_derives_no_weight(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "neutral"},
                          "evidence": "validated"}}
         self.assertEqual(bind.domain_weights(hints, "writing",
-                                             bind.DEFAULT_FACTORS), {})
+                                             FACTORS), {})
 
     def test_policy_factors_override(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "favor"},
@@ -103,23 +138,23 @@ class BlendTests(unittest.TestCase):
 
 class AdmissionTests(unittest.TestCase):
     def test_favored_model_below_cut_is_admitted(self):
-        rows = plan({"c/model-3": 3.0}, top_k=1, admit=True)
+        rows = plan({"c/model-3": 3.0}, top_k=1)
         self.assertEqual([r["mid"] for r in rows], ["a/model-1", "c/model-3"])
 
     def test_unfavored_model_below_cut_stays_out(self):
-        rows = plan({}, top_k=1, admit=True)
+        rows = plan({}, top_k=1)
         self.assertEqual([r["mid"] for r in rows], ["a/model-1"])
 
     def test_unranked_model_never_plays(self):
         aff = {"ghost/never-classified": 9.0}
-        rows = plan(aff, top_k=1, admit=True)
+        rows = plan(aff, top_k=1)
         self.assertNotIn("ghost/never-classified", [r["mid"] for r in rows])
 
     def test_unresolved_row_never_plays(self):
         share = dict(POOL, **{"ghost/unresolved": 100.0})
         rows = bind.plan_deal(share, MODELS, {"ghost/unresolved": 9.0},
                               bind.DealParameters(blend_weight=0.6, top_k=2,
-                                                  admit=True, seed="s",
+                                                  seed="s",
                                                   tickets=10))
         self.assertNotIn("ghost/unresolved", [r["mid"] for r in rows])
 
@@ -130,7 +165,7 @@ class DrawTests(unittest.TestCase):
         weights = {"a/1": 0.1, "b/2": 10.0}
         rows = bind.plan_deal(share, {m: {} for m in share}, {},
                               bind.DealParameters(blend_weight=0.0, top_k=2,
-                                                  admit=False, seed="s",
+                                                  seed="s",
                                                   tickets=100,
                                                   fit_adjusted_task_scores=weights))
         draws = {r["mid"]: r["draw"] for r in rows}
@@ -149,7 +184,7 @@ class DrawTests(unittest.TestCase):
     def test_empty_pool(self):
         self.assertEqual(bind.plan_deal(
             {}, {}, {}, bind.DealParameters(blend_weight=0.6, top_k=5,
-                                            admit=True, seed="s",
+                                            seed="s",
                                             tickets=12)), [])
 
 

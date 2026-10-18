@@ -101,11 +101,12 @@ POLICY = {
         "writing": ["content_writing", "roleplay_fiction", "gone_tag"],
         "coding": ["math"],
     },
-    "scoring": {"alpha": 1.0, "beta": 0.0},
+    "scoring": {"alpha": 1.0, "beta": 0.0,
+                "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
+                               "top2_max": 0.75}},
     "affinity": {
         "blend_weight": 0.6,
         "eligibility_top_k": 2,
-        "admit_favored_outside_top_k": True,
         "factors": {"favor_validated": 3.0, "favor_suspected": 2.0,
                     "avoid_validated": 0.3, "avoid_suspected": 0.5},
     },
@@ -215,13 +216,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(out1[out1.index("deal (seed"):],
                          out2[out2.index("deal (seed"):])
 
+    def test_missing_scoring_block_exits_with_key(self):
+        pol = json.loads(json.dumps(POLICY))
+        del pol["scoring"]
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        _, _, code, calls = self.run_cli("--domain", "writing")
+        self.assertIn("scoring", code)
+        self.assertEqual(calls, [])
+
     def test_score_orders_by_popularity_priced_at_cost(self):
         pol = json.loads(json.dumps(POLICY))
-        del pol["scoring"]  # defaults: alpha 0.7, beta 1.0
+        pol["scoring"].update(alpha=0.7, beta=1.0)
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
         out, _, _, _ = self.run_cli("--domain", "writing")
-        body = out[out.index("| # |"):]
+        body = out[out.index("| # |") :]
         # v4-pro is ~13x cheaper per ticket than the share leader -> tops the order
         self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro\n", out)
         self.assertLess(body.index("deepseek/deepseek-v4-pro |"),

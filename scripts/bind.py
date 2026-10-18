@@ -208,10 +208,6 @@ def hint_for(mid: str, hints: dict) -> str | None:
     return entry.get("note", "") if isinstance(entry, dict) else entry
 
 
-DEFAULT_FACTORS = {"favor_validated": 3.0, "favor_suspected": 2.0,
-                   "avoid_validated": 0.3, "avoid_suspected": 0.5}
-
-
 def domain_weights(hints: dict, domain: str, factors: dict) -> dict[str, float]:
     """Derive one domain's affinity table from structured hints.
 
@@ -227,31 +223,20 @@ def domain_weights(hints: dict, domain: str, factors: dict) -> dict[str, float]:
         if fit not in ("favor", "avoid"):
             continue
         evidence = entry.get("evidence", "suspected")
-        out[key] = float(factors.get(f"{fit}_{evidence}",
-                                     DEFAULT_FACTORS.get(f"{fit}_{evidence}", 1.0)))
+        out[key] = float(factors[f"{fit}_{evidence}"])
     return out
-
-
-# Task order: popularity share^alpha over priced cost^beta. The exponent ratio
-# decides the ordering, their scale the sharpness. Tuned in policy.json
-# `scoring` against the balance thresholds (see mass_balance).
-DEFAULT_ALPHA = 0.7
-DEFAULT_BETA = 1.0
-DEFAULT_THRESHOLDS = {"top1_min": 0.2, "top1_max": 0.5, "top2_max": 0.75}
 
 
 @dataclasses.dataclass(frozen=True)
 class DealPolicy:
     blend_weight: float
     eligibility_top_k: int
-    admit_favored_outside_top_k: bool
 
 
 @dataclasses.dataclass(frozen=True)
 class DealParameters:
     blend_weight: float
     top_k: int
-    admit: bool
     seed: str
     tickets: int
     fit_adjusted_task_scores: dict | None = None
@@ -268,18 +253,33 @@ class PolicyConfig:
 
 def load_policy_config(policy: dict) -> PolicyConfig:
     """Unpack scoring and deal policy values once for all policy paths."""
-    scoring = policy.get("scoring", {})
-    affinity = policy.get("affinity", {})
+    def required(mapping: dict, key: str, path: str):
+        if not isinstance(mapping, dict) or key not in mapping:
+            raise SystemExit(f"policy missing required key: {path}")
+        return mapping[key]
+
+    scoring = required(policy, "scoring", "scoring")
+    affinity = required(policy, "affinity", "affinity")
+    scoring_thresholds = required(scoring, "thresholds", "scoring.thresholds")
+    factor_values = required(affinity, "factors", "affinity.factors")
+    threshold_keys = ("top1_min", "top1_max", "top2_max")
+    factor_keys = ("favor_validated", "favor_suspected",
+                   "avoid_validated", "avoid_suspected")
+    thresholds = {key: float(required(scoring_thresholds, key,
+                                      f"scoring.thresholds.{key}"))
+                  for key in threshold_keys}
+    factors = {key: float(required(factor_values, key, f"affinity.factors.{key}"))
+               for key in factor_keys}
     return PolicyConfig(
-        alpha=float(scoring.get("alpha", DEFAULT_ALPHA)),
-        beta=float(scoring.get("beta", DEFAULT_BETA)),
-        thresholds={**DEFAULT_THRESHOLDS, **scoring.get("thresholds", {})},
-        factors=affinity.get("factors", {}),
+        alpha=float(required(scoring, "alpha", "scoring.alpha")),
+        beta=float(required(scoring, "beta", "scoring.beta")),
+        thresholds=thresholds,
+        factors=factors,
         deal=DealPolicy(
-            blend_weight=float(affinity.get("blend_weight", 0.5)),
-            eligibility_top_k=int(affinity.get("eligibility_top_k", 5)),
-            admit_favored_outside_top_k=bool(
-                affinity.get("admit_favored_outside_top_k", True)),
+            blend_weight=float(required(affinity, "blend_weight",
+                                        "affinity.blend_weight")),
+            eligibility_top_k=int(required(affinity, "eligibility_top_k",
+                                           "affinity.eligibility_top_k")),
         ),
     )
 
@@ -340,10 +340,9 @@ def plan_deal(share: dict, models: dict, aff: dict,
               parameters: DealParameters) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
-    Eligibility stays popularity — the top_k selectable models. When admit is
-    set, ranked models the user favors (weight > 1) join the pool even below
-    the cut; popularity remains the floor, so unranked or unresolved models
-    never play. The draw blends the task baseline and preference:
+    Eligibility stays popularity — the top_k selectable models, plus ranked
+    models the user favors (weight > 1) below the cut. Unranked or unresolved
+    models never play. The draw blends the task baseline and preference:
 
         draw = (1 - blend_weight) * task_score + blend_weight * pref
         (each normalized)
@@ -354,17 +353,15 @@ def plan_deal(share: dict, models: dict, aff: dict,
     """
     blend_weight = parameters.blend_weight
     top_k = parameters.top_k
-    admit = parameters.admit
     seed = parameters.seed
     tickets = parameters.tickets
     fit_adjusted_task_scores = parameters.fit_adjusted_task_scores
     ranked = [(mid, s) for mid, s in sorted(share.items(), key=lambda kv: -kv[1])
               if mid in models]
     pool = ranked[:top_k]
-    if admit:
-        in_pool = {mid for mid, _ in pool}
-        pool += [(mid, s) for mid, s in ranked[top_k:]
-                 if mid not in in_pool and weight_for(mid, aff) > 1.0]
+    in_pool = {mid for mid, _ in pool}
+    pool += [(mid, s) for mid, s in ranked[top_k:]
+             if mid not in in_pool and weight_for(mid, aff) > 1.0]
     if not pool:
         return []
     bases = [(fit_adjusted_task_scores or {}).get(mid, s) for mid, s in pool]
@@ -553,6 +550,7 @@ def main() -> None:
     if os.path.exists(args.policy):
         with open(args.policy) as f:
             policy = json.load(f)
+    config = load_policy_config(policy)
     domains = policy.get("domains", {})
 
     if args.list_domains:
@@ -575,8 +573,6 @@ def main() -> None:
 
     classif = fetch_json(CLASS_URL, "classifications.json", auth=True,
                          refresh=args.refresh)["data"]
-    config = load_policy_config(policy)
-
     if args.check_policy:
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
@@ -727,7 +723,6 @@ def main() -> None:
         deal_parameters = DealParameters(
             blend_weight=config.deal.blend_weight,
             top_k=config.deal.eligibility_top_k,
-            admit=config.deal.admit_favored_outside_top_k,
             seed=args.seed,
             tickets=args.tickets,
             fit_adjusted_task_scores=fit_adjusted_task_scores,

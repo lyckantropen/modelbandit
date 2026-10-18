@@ -107,8 +107,8 @@ to a rung on each candidate's ladder.
   everything carries one model's failure modes, so batches are spread across
   the popular candidates. Eligibility stays popularity: the top-K selectable
   models (`affinity.eligibility_top_k`), plus favored models ranked below the
-  cut if `admit_favored_outside_top_k` is set — unranked or unresolved models
-  never play. The draw blends the fit-adjusted task score and preference:
+  cut — unranked or unresolved models never play. The draw blends the
+  fit-adjusted task score and preference:
   `w = (1−λ)·score + λ·pref`, λ = `affinity.blend_weight`, seeded per ticket
   for a reproducible deal. **Affinity** is derived at run time, never stored: a
   hint's fit for the domain and its evidence map through `affinity.factors`
