@@ -20,19 +20,32 @@ ln -s ~/openrouter-model-router ~/.agents/skills/openrouter-model-router
 
 ## Usage
 
-```bash
-# what domains exist and which leaderboard tags they map to
-python3 scripts/bind.py --list-domains
+The skill fires on model-choice questions; name it (`$openrouter-model-router`)
+to be sure. The natural interface is a prompt — two shapes cover most use.
 
-# rank candidates for a domain, project 30 tickets against a budget
-python3 scripts/bind.py --domain writing --tickets 30 --budget 2
+**Single task** — one piece of work, picked and costed before spending:
 
-# effort intent binds to a rung on the picked model's ladder
-python3 scripts/bind.py --domain research --effort thorough
+> I need to write a .md research note on <topic>, roughly 1500 words. Using
+> $openrouter-model-router: pick the model for this, weigh the hints and
+> summaries against the ranking, and tell me what the run will cost before
+> starting.
 
-# price at the floor instead of the budget-safe worst endpoint
-python3 scripts/bind.py --domain coding --pricing-basis best
-```
+The agent resolves the domain (here: writing), binds the effort rung, shows
+the popularity ranking with hints and research summaries beside it, projects
+the run ("$0.036 worst / $0.003 floor") — and flags whether `policy.json` is
+due for a research refresh.
+
+**A set of tickets** — one binding per domain, whole-run budget:
+
+> Work through the tickets in <directory>. Before starting, use
+> $openrouter-model-router to plan model spend: group the tickets by domain
+> (research, writing, coding, orchestration, ops), bind one model and effort
+> rung per group, project the total against a $5 budget, and stop and tell me
+> if the projection goes over.
+
+The agent ranks candidates per group, binds each, and reports a projection
+like "30 tickets: $1.08 worst / $0.10 floor" before any spend — moving down
+the ranking or the rung if the budget binds.
 
 Mechanics: `python3 scripts/bind.py --help`. Policy: `SKILL.md`.
 
