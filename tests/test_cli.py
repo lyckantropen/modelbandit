@@ -317,6 +317,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(out1[out1.index("deal (seed"):],
                          out2[out2.index("deal (seed"):])
 
+    def test_deal_below_cut_favorite_scores_at_score_scale(self):
+        # --top 2 prices two rows; the deal still plays v4-flash, admitted
+        # below the cut on the user's favor. Its base is its fit-adjusted task
+        # score — 0.005 share / $0.01456 = 0.34 — never its 0.5% share.
+        # Hand-computed (alpha=1, beta=1, blend 0.6, pref 3.0, floor $0.00772):
+        #   score 0813 0.06/0.0984 = 0.6098, v4-pro 0.025/0.00772 = 3.2383,
+        #   v4-flash 0.005/0.01456 = 0.3434; prefs 1, 1, 3
+        #   draw flash = 0.4*(0.3434/4.1915) + 0.6*(3/5) = 39.28%
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, code, _ = self.run_cli("--domain", "writing", "--top", "2",
+                                       "--tickets", "12", "--deal",
+                                       "--seed", "proj")
+        self.assertIsNone(code)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        flash = next(ln for ln in block.splitlines() if "v4-flash" in ln)
+        cols = [c.strip() for c in flash.split("|")]
+        self.assertEqual(cols[4], "0.34")     # score, not the 0.01 share
+        self.assertEqual(cols[6], "39.28%")   # draw from score + preference
+        self.assertEqual(sum(int(ln.split("|")[7].strip())
+                             for ln in block.splitlines()
+                             if ln.startswith("| ")
+                             and ln.split("|")[1].strip().isdigit()), 12)
+
     def test_missing_scoring_block_exits_with_key(self):
         pol = json.loads(json.dumps(POLICY))
         del pol["scoring"]

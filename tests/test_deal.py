@@ -13,6 +13,9 @@ import bind  # noqa: E402
 
 POOL = {"a/model-1": 6.0, "b/model-2": 3.0, "c/model-3": 1.0}
 MODELS = {mid: {} for mid in POOL}
+# Score-scale bases for the fixture pool: task scores live at 1-10, popularity
+# shares at 0.0x. The deal must never pass one off as the other.
+SCORES = {"a/model-1": 8.0, "b/model-2": 3.5, "c/model-3": 1.2}
 FACTORS = {"favor_validated": 3.0, "favor_suspected": 2.0,
            "avoid_validated": 0.3, "avoid_suspected": 0.5}
 POLICY_CONFIG = {
@@ -33,7 +36,7 @@ POLICY_CONFIG = {
 def plan(aff=None, **kw):
     params = dict(blend_weight=0.6, top_k=3, seed="s", tickets=100)
     params.update(kw)
-    weights = params.pop("weights", None)
+    weights = params.pop("weights", SCORES)
     return bind.plan_deal(POOL, MODELS, aff or {},
                           bind.DealParameters(fit_adjusted_task_scores=weights,
                                               **params))
@@ -110,12 +113,14 @@ class DerivationTests(unittest.TestCase):
 
 
 class BlendTests(unittest.TestCase):
-    def test_zero_blend_is_pure_popularity(self):
+    def test_zero_blend_is_pure_task_score(self):
+        # λ=0 leaves only the task baseline — the fit-adjusted score, which is
+        # what popularity becomes once priced at cost, not the raw share.
         rows = plan(blend_weight=0.0)
         got = {r["mid"]: r["draw"] for r in rows}
-        self.assertAlmostEqual(got["a/model-1"], 0.6)
-        self.assertAlmostEqual(got["b/model-2"], 0.3)
-        self.assertAlmostEqual(got["c/model-3"], 0.1)
+        total = sum(SCORES.values())
+        for mid, score in SCORES.items():
+            self.assertAlmostEqual(got[mid], score / total)
 
     def test_full_blend_is_pure_preference(self):
         rows = plan({"a/model-1": 1.0, "b/model-2": 2.0, "c/model-3": 7.0},
@@ -155,8 +160,47 @@ class AdmissionTests(unittest.TestCase):
         rows = bind.plan_deal(share, MODELS, {"ghost/unresolved": 9.0},
                               bind.DealParameters(blend_weight=0.6, top_k=2,
                                                   seed="s",
-                                                  tickets=10))
+                                                  tickets=10,
+                                                  fit_adjusted_task_scores=SCORES))
         self.assertNotIn("ghost/unresolved", [r["mid"] for r in rows])
+
+
+class EligibilityPoolTests(unittest.TestCase):
+    """One pool construction for the candidate table and the deal."""
+
+    def test_top_k_plus_favored_below_cut(self):
+        rows = bind.eligibility_pool(POOL, MODELS, {"c/model-3": 3.0}, 2)
+        self.assertEqual([mid for mid, _ in rows],
+                         ["a/model-1", "b/model-2", "c/model-3"])
+
+    def test_unfavored_below_cut_and_unresolved_stay_out(self):
+        share = dict(POOL, **{"ghost/unresolved": 100.0})
+        rows = bind.eligibility_pool(share, MODELS,
+                                     {"ghost/unresolved": 9.0}, 1)
+        self.assertEqual([mid for mid, _ in rows], ["a/model-1"])
+
+
+class BaseScaleTests(unittest.TestCase):
+    """Every pool member blends at its fit-adjusted task score, never share."""
+
+    def test_admitted_below_cut_favorite_blends_at_score_scale(self):
+        # top_k=1 leaves only a/model-1 on the cut; c/model-3 is admitted by
+        # the user's favor (pref 3.0). Its base is its score (2.0), not its
+        # 1.0 share — share scale would let preference carry it almost alone.
+        scores = {"a/model-1": 6.0, "c/model-3": 2.0}
+        rows = plan({"c/model-3": 3.0}, top_k=1, weights=scores)
+        row = next(r for r in rows if r["mid"] == "c/model-3")
+        self.assertEqual(row["base"], 2.0)
+        # draw = 0.4 * score share + 0.6 * preference share
+        self.assertAlmostEqual(row["draw"],
+                               0.4 * (2.0 / 8.0) + 0.6 * (3.0 / 4.0))
+        self.assertAlmostEqual(sum(r["draw"] for r in rows), 1.0)
+
+    def test_missing_pool_score_is_never_substituted_with_share(self):
+        # A caller that scored only the table's top rows must not leave an
+        # admitted below-cut favorite blending at raw-share scale.
+        with self.assertRaisesRegex(SystemExit, "c/model-3"):
+            plan({"c/model-3": 3.0}, top_k=1, weights={"a/model-1": 6.0})
 
 
 class DrawTests(unittest.TestCase):

@@ -337,6 +337,13 @@ def adjusted_score(score: float, fit: float | None) -> float:
     return score * (5.0 if fit is None else fit) / 5.0
 
 
+def standing(share: float, cost: float, fit: float | None,
+             alpha: float, beta: float) -> float:
+    """The task order's number for one candidate: its fit-adjusted task score.
+    The one scoring path shared by the candidate table and the deal."""
+    return adjusted_score(task_score(share, cost, alpha, beta), fit)
+
+
 def parse_fit(spec: str) -> dict:
     """'mid=score,mid=score' -> {prefix: clamped 0-5 float}."""
     out = {}
@@ -364,36 +371,64 @@ def weight_for(mid: str, table: dict) -> float:
     return match[1] if match is not None else 1.0
 
 
+def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
+    """Share-ranked selectable models: the popularity order every pool starts
+    from. Unranked or unresolved models never play, so they drop out here."""
+    return [(mid, s) for mid, s in sorted(share.items(), key=lambda kv: -kv[1])
+            if mid in models]
+
+
+def eligibility_pool(share: dict, models: dict, aff: dict,
+                     top_k: int) -> list[tuple[str, float]]:
+    """The deal's players, computed once for every consumer.
+
+    Eligibility stays popularity: the top_k selectable models, plus ranked
+    models the user favors (weight > 1) below the cut. Returns [(mid, share)]
+    in popularity order; the candidate table prices these same players.
+    """
+    ranked = popularity_ranking(share, models)
+    return ranked[:top_k] + [(mid, s) for mid, s in ranked[top_k:]
+                             if weight_for(mid, aff) > 1.0]
+
+
+def blend_bases(pool: list[tuple[str, float]],
+                fit_adjusted_task_scores: dict | None) -> list[float]:
+    """Each pool member's blend base: its fit-adjusted task score.
+
+    Raw share is orders of magnitude below score scale, so substituting it for
+    a missing entry would hand the model to the preference term alone. A pool
+    member without a score is a caller bug and stops the deal instead.
+    """
+    scores = fit_adjusted_task_scores or {}
+    missing = [mid for mid, _ in pool if mid not in scores]
+    if missing:
+        raise SystemExit("deal pool member(s) without a fit-adjusted task "
+                         f"score: {', '.join(missing)}")
+    return [scores[mid] for mid, _ in pool]
+
 
 def plan_deal(share: dict, models: dict, aff: dict,
               parameters: DealParameters) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
-    Eligibility stays popularity — the top_k selectable models, plus ranked
-    models the user favors (weight > 1) below the cut. Unranked or unresolved
-    models never play. The draw blends the task baseline and preference:
+    Eligibility is popularity (eligibility_pool). The draw blends the task
+    baseline and preference:
 
         draw = (1 - blend_weight) * task_score + blend_weight * pref
         (each normalized)
 
-    where the base is the per-model fit-adjusted task score (falls back to
-    popularity share). Deterministic in seed. Returns one row per pool model:
-    {"mid", "share", "pref", "draw", "tickets"}.
+    where every pool member's base is its fit-adjusted task score, supplied
+    for the whole pool by the caller (blend_bases). Deterministic in seed.
+    Returns one row per pool model:
+    {"mid", "share", "base", "pref", "draw", "tickets"}.
     """
     blend_weight = parameters.blend_weight
-    top_k = parameters.top_k
     seed = parameters.seed
     tickets = parameters.tickets
-    fit_adjusted_task_scores = parameters.fit_adjusted_task_scores
-    ranked = [(mid, s) for mid, s in sorted(share.items(), key=lambda kv: -kv[1])
-              if mid in models]
-    pool = ranked[:top_k]
-    in_pool = {mid for mid, _ in pool}
-    pool += [(mid, s) for mid, s in ranked[top_k:]
-             if mid not in in_pool and weight_for(mid, aff) > 1.0]
+    pool = eligibility_pool(share, models, aff, parameters.top_k)
     if not pool:
         return []
-    bases = [(fit_adjusted_task_scores or {}).get(mid, s) for mid, s in pool]
+    bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
     prefs = [weight_for(mid, aff) for mid, _ in pool]
     pt, at = sum(bases) or 1.0, sum(prefs) or 1.0
     draws = [(1 - blend_weight) * (p / pt) + blend_weight * (a / at)
@@ -411,8 +446,10 @@ def plan_deal(share: dict, models: dict, aff: dict,
             if r <= c:
                 counts[j] += 1
                 break
-    return [{"mid": mid, "share": s, "pref": pr, "draw": d, "tickets": n}
-            for (mid, s), pr, d, n in zip(pool, prefs, draws, counts)]
+    return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
+             "tickets": n}
+            for (mid, s), b, pr, d, n
+            in zip(pool, bases, prefs, draws, counts)]
 
 
 def policy_age_days(policy_path: str) -> int | None:
@@ -459,11 +496,11 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     # models the user favors (weight > 1) below the cut — the same pool
     # plan_deal admits. Coverage is judged only for those.
     eligible = set()
-    for name, ranked in ranked_by_domain.items():
+    for name in domains:
         table = domain_weights(signals, name, config.factors)
-        eligible.update(ranked[:pool_k])
-        eligible.update(mid for mid in ranked[pool_k:]
-                        if weight_for(mid, table) > 1.0)
+        eligible.update(mid for mid, _ in
+                        eligibility_pool(share_by_domain[name], models,
+                                         table, pool_k))
 
     gaps = sorted(mid for mid in all_ranked if not hint_for(mid, summaries))
     stale = sorted(k for k in summaries
@@ -512,9 +549,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     re_tune = False
     judged = False
     for name in domains:
-        pool = [(mid, s) for mid, s in
-                sorted(share_by_domain[name].items(), key=lambda kv: -kv[1])
-                if mid in models][:pool_k]
+        pool = popularity_ranking(share_by_domain[name], models)[:pool_k]
         if not pool:
             continue
         if len(pool) < 3:
@@ -542,10 +577,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         print(f"- {name}: top-1 {t1:.0%}, top-2 {t2:.0%} "
               f"(limits {thresholds['top1_min']:.0%}–{thresholds['top1_max']:.0%} / "
               f"{thresholds['top2_max']:.0%}) — {'ok' if ok else 'OUT OF BALANCE'}")
-    if not judged and any(len([mid for mid, _ in
-                                sorted(share_by_domain[name].items(),
-                                       key=lambda kv: -kv[1]) if mid in models]
-                               [:pool_k]) >= 1 for name in domains):
+    if not judged and any(popularity_ranking(share_by_domain[name], models)[:pool_k]
+                          for name in domains):
         # Every non-empty pool was thin: no domain's balance was measurable.
         print("(no domain with 3+ candidates — balance not judgeable)")
 
@@ -684,6 +717,12 @@ def main() -> None:
           f"{classif.get('as_of', '?')}\n")
     fit_map = parse_fit(args.fit) if args.fit else {}
     alpha, beta = config.alpha, config.beta
+    aff = domain_weights(policy.get("hints", {}), args.domain, config.factors)
+    # One eligibility pool: the deal plays it, and this run prices it, so a
+    # favored model below --top still scores at the same scale as the rows
+    # above it.
+    pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k)
+            if args.deal else [])
 
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
           + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
@@ -691,9 +730,11 @@ def main() -> None:
     print("|---" * (10 + (2 if fit_map else 0)) + "|")
 
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
+    table_mids = {mid for mid, _ in ranked}
     priced = {}
     pers = {}
-    for mid, s in ranked:
+    for mid, s in ranked + [(mid, s) for mid, s in pool
+                            if mid not in table_mids]:
         m = models.get(mid)
         if not m:
             continue
@@ -712,7 +753,7 @@ def main() -> None:
         sc = task_score(s, eff_costs[mid], alpha, beta)
         fit = fit_for(mid, fit_map)
         rows_out.append((mid, s, models[mid], pr, sc, fit,
-                         adjusted_score(sc, fit)))
+                         standing(s, eff_costs[mid], fit, alpha, beta)))
     rows_out.sort(key=lambda r: -r[6])
 
     pick = None
@@ -782,8 +823,11 @@ def main() -> None:
               f"(budget pressure moves within the ranking, by price)")
 
     if args.deal:
+        # Every pool member's base is the table's own scoring number: the
+        # fit-adjusted task score, at score scale for the whole pool.
         fit_adjusted_task_scores = {
-            mid: adj for mid, s, m, pr, sc, fit, adj in rows_out}
+            mid: standing(s, eff_costs[mid], fit_for(mid, fit_map), alpha, beta)
+            for mid, s in pool}
         deal_parameters = DealParameters(
             blend_weight=config.deal.blend_weight,
             top_k=config.deal.eligibility_top_k,
@@ -791,10 +835,7 @@ def main() -> None:
             tickets=args.tickets,
             fit_adjusted_task_scores=fit_adjusted_task_scores,
         )
-        rows = plan_deal(share, models,
-                         domain_weights(policy.get("hints", {}), args.domain,
-                                        config.factors),
-                         parameters=deal_parameters)
+        rows = plan_deal(share, models, aff, parameters=deal_parameters)
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
@@ -813,7 +854,7 @@ def main() -> None:
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
             print(f"| {i} | {row['mid']} | {row['share']:.2%} | "
-                  f"{fit_adjusted_task_scores.get(row['mid'], row['share']):.2f} | "
+                  f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
     else:
