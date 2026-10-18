@@ -18,7 +18,10 @@ MODELS = {mid: {} for mid in POOL}
 def plan(aff=None, **kw):
     params = dict(blend_weight=0.6, top_k=3, admit=False, seed="s", tickets=100)
     params.update(kw)
-    return bind.plan_deal(POOL, MODELS, aff or {}, **params)
+    weights = params.pop("weights", None)
+    return bind.plan_deal(POOL, MODELS, aff or {},
+                          bind.DealParameters(fit_adjusted_task_scores=weights,
+                                              **params))
 
 
 class WeightTests(unittest.TestCase):
@@ -115,8 +118,9 @@ class AdmissionTests(unittest.TestCase):
     def test_unresolved_row_never_plays(self):
         share = dict(POOL, **{"ghost/unresolved": 100.0})
         rows = bind.plan_deal(share, MODELS, {"ghost/unresolved": 9.0},
-                              blend_weight=0.6, top_k=2, admit=True,
-                              seed="s", tickets=10)
+                              bind.DealParameters(blend_weight=0.6, top_k=2,
+                                                  admit=True, seed="s",
+                                                  tickets=10))
         self.assertNotIn("ghost/unresolved", [r["mid"] for r in rows])
 
 
@@ -125,8 +129,10 @@ class DrawTests(unittest.TestCase):
         share = {"a/1": 9.0, "b/2": 1.0}
         weights = {"a/1": 0.1, "b/2": 10.0}
         rows = bind.plan_deal(share, {m: {} for m in share}, {},
-                              blend_weight=0.0, top_k=2, admit=False,
-                              seed="s", tickets=100, weights=weights)
+                              bind.DealParameters(blend_weight=0.0, top_k=2,
+                                                  admit=False, seed="s",
+                                                  tickets=100,
+                                                  fit_adjusted_task_scores=weights))
         draws = {r["mid"]: r["draw"] for r in rows}
         self.assertLess(draws["a/1"], draws["b/2"])  # weight, not share
 
@@ -141,9 +147,10 @@ class DrawTests(unittest.TestCase):
             self.assertEqual(sum(r["tickets"] for r in rows), 12)
 
     def test_empty_pool(self):
-        self.assertEqual(bind.plan_deal({}, {}, {}, blend_weight=0.6,
-                                        top_k=5, admit=True, seed="s",
-                                        tickets=12), [])
+        self.assertEqual(bind.plan_deal(
+            {}, {}, {}, bind.DealParameters(blend_weight=0.6, top_k=5,
+                                            admit=True, seed="s",
+                                            tickets=12)), [])
 
 
 if __name__ == "__main__":

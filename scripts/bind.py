@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import json
 import os
 import random
@@ -186,16 +187,24 @@ def price_model(model: dict, eps: list[dict], in_tok: int, out_tok: int,
             "out_min": min(outs), "out_max": max(outs), "n_eps": len(eps)}
 
 
-def hint_for(mid: str, hints: dict) -> str | None:
-    """Longest matching prefix wins so family hints cover dated slugs.
-    Entries are structured ({note, fit, evidence}) or plain notes."""
+def longest_prefix_match(mid: str, values: dict) -> tuple[str, object] | None:
+    """Return the value for the longest key that prefixes ``mid``.
+
+    A tie retains mapping iteration order, matching the prior lookup behavior.
+    """
     best = None
-    for key, note in hints.items():
+    for key, value in values.items():
         if mid.startswith(key) and (best is None or len(key) > len(best[0])):
-            best = (key, note)
-    if not best:
+            best = (key, value)
+    return best
+
+
+def hint_for(mid: str, hints: dict) -> str | None:
+    """Entries are structured ({note, fit, evidence}) or plain notes."""
+    match = longest_prefix_match(mid, hints)
+    if match is None:
         return None
-    entry = best[1]
+    entry = match[1]
     return entry.get("note", "") if isinstance(entry, dict) else entry
 
 
@@ -231,6 +240,50 @@ DEFAULT_BETA = 1.0
 DEFAULT_THRESHOLDS = {"top1_min": 0.2, "top1_max": 0.5, "top2_max": 0.75}
 
 
+@dataclasses.dataclass(frozen=True)
+class DealPolicy:
+    blend_weight: float
+    eligibility_top_k: int
+    admit_favored_outside_top_k: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class DealParameters:
+    blend_weight: float
+    top_k: int
+    admit: bool
+    seed: str
+    tickets: int
+    fit_adjusted_task_scores: dict | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class PolicyConfig:
+    alpha: float
+    beta: float
+    thresholds: dict
+    factors: dict
+    deal: DealPolicy
+
+
+def load_policy_config(policy: dict) -> PolicyConfig:
+    """Unpack scoring and deal policy values once for all policy paths."""
+    scoring = policy.get("scoring", {})
+    affinity = policy.get("affinity", {})
+    return PolicyConfig(
+        alpha=float(scoring.get("alpha", DEFAULT_ALPHA)),
+        beta=float(scoring.get("beta", DEFAULT_BETA)),
+        thresholds={**DEFAULT_THRESHOLDS, **scoring.get("thresholds", {})},
+        factors=affinity.get("factors", {}),
+        deal=DealPolicy(
+            blend_weight=float(affinity.get("blend_weight", 0.5)),
+            eligibility_top_k=int(affinity.get("eligibility_top_k", 5)),
+            admit_favored_outside_top_k=bool(
+                affinity.get("admit_favored_outside_top_k", True)),
+        ),
+    )
+
+
 def task_score(share: float, cost: float, alpha: float, beta: float) -> float:
     """share^alpha / cost^beta. cost must already be floored (see
     effective_costs) so free models cannot win on division alone."""
@@ -245,13 +298,9 @@ def effective_costs(costs: dict) -> dict:
 
 
 def fit_for(mid: str, fit_map: dict) -> float | None:
-    """The agent's task-fit judgment for a model (0-5). Longest prefix wins;
-    None means unscored (no judgment, no penalty)."""
-    best = None
-    for key, v in fit_map.items():
-        if mid.startswith(key) and (best is None or len(key) > len(best[0])):
-            best = (key, v)
-    return best[1] if best else None
+    """The task-fit judgment (0-5); None means unscored, with no penalty."""
+    match = longest_prefix_match(mid, fit_map)
+    return match[1] if match is not None else None
 
 
 def adjusted_score(score: float, fit: float | None) -> float:
@@ -281,17 +330,14 @@ def mass_balance(masses: list) -> tuple[float, float]:
 
 
 def weight_for(mid: str, table: dict) -> float:
-    """Longest matching prefix wins (same semantics as hint_for); 1.0 = neutral."""
-    best = None
-    for key, w in table.items():
-        if mid.startswith(key) and (best is None or len(key) > len(best[0])):
-            best = (key, w)
-    return best[1] if best else 1.0
+    """Longest matching affinity prefix wins; 1.0 = neutral."""
+    match = longest_prefix_match(mid, table)
+    return match[1] if match is not None else 1.0
 
 
-def plan_deal(share: dict, models: dict, aff: dict, *, blend_weight: float,
-              top_k: int, admit: bool, seed: str, tickets: int,
-              weights: dict | None = None) -> list[dict]:
+
+def plan_deal(share: dict, models: dict, aff: dict,
+              parameters: DealParameters) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility stays popularity — the top_k selectable models. When admit is
@@ -299,12 +345,19 @@ def plan_deal(share: dict, models: dict, aff: dict, *, blend_weight: float,
     the cut; popularity remains the floor, so unranked or unresolved models
     never play. The draw blends the task baseline and preference:
 
-        w = (1 - blend_weight) * base + blend_weight * pref   (each normalized)
+        draw = (1 - blend_weight) * task_score + blend_weight * pref
+        (each normalized)
 
-    where base is the per-model weight (fit-adjusted task score; falls back to
+    where the base is the per-model fit-adjusted task score (falls back to
     popularity share). Deterministic in seed. Returns one row per pool model:
     {"mid", "share", "pref", "draw", "tickets"}.
     """
+    blend_weight = parameters.blend_weight
+    top_k = parameters.top_k
+    admit = parameters.admit
+    seed = parameters.seed
+    tickets = parameters.tickets
+    fit_adjusted_task_scores = parameters.fit_adjusted_task_scores
     ranked = [(mid, s) for mid, s in sorted(share.items(), key=lambda kv: -kv[1])
               if mid in models]
     pool = ranked[:top_k]
@@ -314,11 +367,11 @@ def plan_deal(share: dict, models: dict, aff: dict, *, blend_weight: float,
                  if mid not in in_pool and weight_for(mid, aff) > 1.0]
     if not pool:
         return []
-    base = [(weights or {}).get(mid, s) for mid, s in pool]
+    bases = [(fit_adjusted_task_scores or {}).get(mid, s) for mid, s in pool]
     prefs = [weight_for(mid, aff) for mid, _ in pool]
-    pt, at = sum(base) or 1.0, sum(prefs) or 1.0
+    pt, at = sum(bases) or 1.0, sum(prefs) or 1.0
     draws = [(1 - blend_weight) * (p / pt) + blend_weight * (a / at)
-             for p, a in zip(base, prefs)]
+             for p, a in zip(bases, prefs)]
     dt = sum(draws) or 1.0
     draws = [d / dt for d in draws]
     counts = [0] * len(pool)
@@ -362,7 +415,7 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
 
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
-                     mult: float, basis: str) -> None:
+                     mult: float, basis: str, config: PolicyConfig) -> None:
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -416,11 +469,9 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     for line in sorted(coverage) or ["— none"]:
         print(f"- {line}")
 
-    sc_conf = policy.get("scoring", {})
-    alpha = float(sc_conf.get("alpha", DEFAULT_ALPHA))
-    beta = float(sc_conf.get("beta", DEFAULT_BETA))
-    th = {**DEFAULT_THRESHOLDS, **sc_conf.get("thresholds", {})}
-    pool_k = int(policy.get("affinity", {}).get("eligibility_top_k", 5))
+    alpha, beta = config.alpha, config.beta
+    thresholds = config.thresholds
+    pool_k = config.deal.eligibility_top_k
     print(f"\n## Score balance (top-{pool_k} pool, {basis} basis)")
     re_tune = False
     for name in domains:
@@ -432,17 +483,18 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         in_tok, out_tok, cached = PROFILES[DOMAIN_PROFILE.get(name, "agentic")]
         costs = {}
         for mid, s in pool:
-            pr = price_model(models[mid], endpoint_pricings(mid, False),
-                             in_tok, out_tok, cached, mult)
-            costs[mid] = pr[basis]
+            pricing = price_model(models[mid], endpoint_pricings(mid, False),
+                                  in_tok, out_tok, cached, mult)
+            costs[mid] = pricing[basis]
         eff = effective_costs(costs)
         masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
         t1, t2 = mass_balance(masses)
-        ok = th["top1_min"] <= t1 <= th["top1_max"] and t2 <= th["top2_max"]
+        ok = (thresholds["top1_min"] <= t1 <= thresholds["top1_max"]
+              and t2 <= thresholds["top2_max"])
         re_tune = re_tune or not ok
         print(f"- {name}: top-1 {t1:.0%}, top-2 {t2:.0%} "
-              f"(limits {th['top1_min']:.0%}–{th['top1_max']:.0%} / "
-              f"{th['top2_max']:.0%}) — {'ok' if ok else 'OUT OF BALANCE'}")
+              f"(limits {thresholds['top1_min']:.0%}–{thresholds['top1_max']:.0%} / "
+              f"{thresholds['top2_max']:.0%}) — {'ok' if ok else 'OUT OF BALANCE'}")
 
     due = bool(gaps) or bool(stale) or bool(stale_signals) or bool(coverage) \
         or (age is not None and age > 30)
@@ -523,11 +575,13 @@ def main() -> None:
 
     classif = fetch_json(CLASS_URL, "classifications.json", auth=True,
                          refresh=args.refresh)["data"]
+    config = load_policy_config(policy)
 
     if args.check_policy:
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
-                         EFFORT_MULTIPLIERS[args.effort], args.pricing_basis)
+                         EFFORT_MULTIPLIERS[args.effort], args.pricing_basis,
+                         config)
         return
 
     tags = domains[args.domain]
@@ -557,8 +611,8 @@ def main() -> None:
         tokens_30d[key] += int(row["total_tokens"])
 
     mult = EFFORT_MULTIPLIERS[args.effort]
-    base = policy.get("baseline", {})
-    base_id = norm_id(base.get("id", ""))
+    baseline = policy.get("baseline", {})
+    base_id = norm_id(baseline.get("id", ""))
     base_per = None
     if base_id in models:
         bp = price_model(models[base_id],
@@ -574,9 +628,7 @@ def main() -> None:
           f"| source: OpenRouter (openrouter.ai/rankings), as of "
           f"{classif.get('as_of', '?')}\n")
     fit_map = parse_fit(args.fit) if args.fit else {}
-    sc_conf = policy.get("scoring", {})
-    alpha = float(sc_conf.get("alpha", DEFAULT_ALPHA))
-    beta = float(sc_conf.get("beta", DEFAULT_BETA))
+    alpha, beta = config.alpha, config.beta
 
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
           + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
@@ -670,18 +722,21 @@ def main() -> None:
               f"(budget pressure moves within the ranking, by price)")
 
     if args.deal:
-        aff_conf = policy.get("affinity", {})
-        blend_weight = float(aff_conf.get("blend_weight", 0.5))
-        adj_scores = {mid: adj for mid, s, m, pr, sc, fit, adj in rows_out}
+        fit_adjusted_task_scores = {
+            mid: adj for mid, s, m, pr, sc, fit, adj in rows_out}
+        deal_parameters = DealParameters(
+            blend_weight=config.deal.blend_weight,
+            top_k=config.deal.eligibility_top_k,
+            admit=config.deal.admit_favored_outside_top_k,
+            seed=args.seed,
+            tickets=args.tickets,
+            fit_adjusted_task_scores=fit_adjusted_task_scores,
+        )
         rows = plan_deal(share, models,
                          domain_weights(policy.get("hints", {}), args.domain,
-                                        aff_conf.get("factors", {})),
-                         blend_weight=blend_weight,
-                         top_k=int(aff_conf.get("eligibility_top_k", 5)),
-                         admit=bool(aff_conf.get("admit_favored_outside_top_k", True)),
-                         seed=args.seed, tickets=args.tickets,
-                         weights=adj_scores)
-        print(f"\ndeal (seed '{args.seed}', blend {blend_weight} from policy "
+                                        config.factors),
+                         parameters=deal_parameters)
+        print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
         print("| # | model | pop% | score | pref | draw% | tickets | $/ticket | "
@@ -698,7 +753,7 @@ def main() -> None:
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
             print(f"| {i} | {row['mid']} | {row['share']:.2%} | "
-                  f"{adj_scores.get(row['mid'], row['share']):.2f} | "
+                  f"{fit_adjusted_task_scores.get(row['mid'], row['share']):.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
     else:
