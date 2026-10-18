@@ -26,6 +26,11 @@ preference-tilted process. Exists so a project does not run one model for
 everything.
 _Avoid_: assignment plan, binding schedule
 
+**Ticket shape**
+A run's (domain, effort, token profile, `--fit`) combination. One deal deals
+one shape; same-shape tickets share one task-fit assessment by construction.
+_Avoid_: batch, group
+
 **Score**
 A model's per-task baseline value: popularity share to the α power over priced
 cost to the β power. Deterministic and taste-free; it orders candidates and

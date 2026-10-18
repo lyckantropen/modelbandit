@@ -55,6 +55,11 @@ to a rung on each candidate's ladder.
    scores (`policy.json` `affinity`). Deterministic in the seed: the same
    project replays the same deal. Budget pressure moves within the order
    toward cheaper rows — never outside the popularity set.
+   One invocation deals one ticket shape — a run's domain, effort, token
+   profile and `--fit` combination — so tickets of the same shape share one
+   task-fit assessment by construction: the step-4 judgments are made once for
+   the run and every ticket the deal draws inherits them. A run of a different
+   shape is a different invocation.
    Done when: a single task names one pick (score and fit both shown), or a
    batch names its deal with per-model ticket counts and a combined projection.
 

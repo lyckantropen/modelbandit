@@ -51,7 +51,12 @@ a projection like "30 tickets: $1.08 worst / $0.10 floor" before any spend —
 moving down the ranking or the rung if the budget binds. The deal spreads a
 batch across the popular candidates instead of running one model for
 everything: eligibility stays popularity, the deal tilts by preference
-(`policy.json` `affinity`), and the seed makes the plan reproducible.
+(`policy.json` `affinity`), and the seed makes the plan reproducible. One
+`bind.py --deal` invocation deals one ticket shape — a run's domain, effort,
+token profile and `--fit` combination — so tickets of the same shape share one
+task-fit assessment: the judgments are made once for the run and every ticket
+the deal draws inherits them. Groups that differ in any of the four are
+separate shapes, each dealt by its own invocation.
 
 ### Directly
 
