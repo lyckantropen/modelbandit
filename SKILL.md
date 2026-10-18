@@ -45,8 +45,7 @@ whatever the ranking picks.
    the header — check it. `--check-policy` adds the drift detail: ranked models
    without summaries, summaries no longer ranked. When the policy is older than
    one rankings window (~30 days) or the check reports drift, tell the user and
-   offer to run a summaries refresh (re-pull the current top models, re-research
-   the gaps and the dead entries, replace the summaries).
+   offer to run a summaries refresh; the procedure is `research/README.md`.
    Done when: a due policy has been surfaced to the user with an offer to
    update — never silently ignored.
 
