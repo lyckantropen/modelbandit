@@ -1,4 +1,4 @@
-"""Unit tests for price arithmetic, endpoint spread pricing, and verdicts."""
+"""Unit tests for price arithmetic, endpoint spread pricing, and user hints."""
 
 import os
 import sys
@@ -101,26 +101,26 @@ class PriceModelTests(unittest.TestCase):
         self.assertAlmostEqual(pr["out_max"], 8.0)
 
 
-class VerdictForTests(unittest.TestCase):
-    VERDICTS = {"z-ai/glm-5.3": "family", "z-ai/glm-5.3-flash": "flash"}
+class HintForTests(unittest.TestCase):
+    HINTS = {"z-ai/glm-5.3": "family", "z-ai/glm-5.3-flash": "flash"}
 
     def test_no_match(self):
-        self.assertIsNone(bind.verdict_for("anthropic/claude-x", self.VERDICTS))
+        self.assertIsNone(bind.hint_for("anthropic/claude-x", self.HINTS))
 
     def test_empty_verdicts(self):
-        self.assertIsNone(bind.verdict_for("z-ai/glm-5.3-flash", {}))
+        self.assertIsNone(bind.hint_for("z-ai/glm-5.3-flash", {}))
 
     def test_exact_match(self):
-        self.assertEqual(bind.verdict_for("z-ai/glm-5.3", self.VERDICTS), "family")
+        self.assertEqual(bind.hint_for("z-ai/glm-5.3", self.HINTS), "family")
 
     def test_prefix_match(self):
-        self.assertEqual(bind.verdict_for("z-ai/glm-5.3-prime", self.VERDICTS),
+        self.assertEqual(bind.hint_for("z-ai/glm-5.3-prime", self.HINTS),
                          "family")
 
     def test_longest_prefix_wins(self):
-        self.assertEqual(bind.verdict_for("z-ai/glm-5.3-flash", self.VERDICTS),
+        self.assertEqual(bind.hint_for("z-ai/glm-5.3-flash", self.HINTS),
                          "flash")
-        self.assertEqual(bind.verdict_for("z-ai/glm-5.3-flash-20260826", self.VERDICTS),
+        self.assertEqual(bind.hint_for("z-ai/glm-5.3-flash-20260826", self.HINTS),
                          "flash")
 
 

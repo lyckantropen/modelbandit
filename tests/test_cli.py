@@ -83,7 +83,7 @@ def build_world():
 
 POLICY = {
     "baseline": {"id": "xiaomi/mimo-v2.6-pro", "notes": "anchor"},
-    "verdicts": {"deepseek/deepseek-v4-pro": "skipped on output cost"},
+    "hints": {"deepseek/deepseek-v4-pro": "skipped on output cost"},
     "summaries": {"deepseek/deepseek-v4-pro-0813": "eol sibling summary",
                   "deepseek/deepseek-v4-pro": "eol summary"},
     "domains": {
@@ -241,15 +241,15 @@ class CliTests(unittest.TestCase):
 
     # --- verdicts, pick, projection, budget -----------------------------
 
-    def test_verdicts_annotate_by_prefix(self):
+    def test_hints_annotate_by_prefix(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
-        block = out[out.index("verdicts (context only"):]
+        block = out[out.index("hints (advisory"):]
         self.assertIn("deepseek/deepseek-v4-pro: skipped on output cost", block)
         self.assertIn("deepseek/deepseek-v4-pro-0813: skipped on output cost", block)
 
-    def test_verdicts_absent_when_no_match(self):
+    def test_hints_absent_when_no_match(self):
         out, _, _, _ = self.run_cli("--domain", "coding")
-        self.assertNotIn("verdicts (context only", out)
+        self.assertNotIn("hints (advisory", out)
 
     def test_summaries_annotate_by_longest_prefix(self):
         out, _, _, _ = self.run_cli("--domain", "writing")

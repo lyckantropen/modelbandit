@@ -52,9 +52,10 @@ whatever the ranking picks.
   quality. The boards carry only each tag's top models, so the long tail is
   invisible and a miss there means "unranked", not "bad".
 
-- **Verdicts** — user-validated observations in `policy.json`, shown beside the
-  ranking as context. They annotate rows — including dissenting taste against
-  the crowd — and never reorder them.
+- **Hints** — tentative user observations in `policy.json`: tastes, suspicions,
+  early trials. Weighed, not obeyed — a hint may contradict the crowd or age
+  out. Shown beside the ranking; never a reordering force. Selection stays
+  popularity.
 
 - **Token profiles** — cost is output-weighted for authoring: a `.md` research
   note is mostly completion tokens (authoring: 20K in / 12K out / 40% cached),

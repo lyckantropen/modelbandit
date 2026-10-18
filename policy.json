@@ -3,8 +3,14 @@
     "id": "xiaomi/mimo-v2.6-pro",
     "notes": "Price anchor and personal benchmark. Not a selection input: selection is popularity within a domain."
   },
-  "verdicts": {
-    "example/model-id": "EXAMPLE ENTRY - replace with your own verdict: one dated sentence, user-validated or suspected, advisory only."
+  "hints": {
+    "example/model-id": {
+      "note": "EXAMPLE ENTRY - replace with your own observation: one dated sentence, advisory only, shown beside the row and never reordering the ranking.",
+      "fit": {
+        "writing": "favor"
+      },
+      "evidence": "suspected"
+    }
   },
   "summaries": {
     "example/model-id": "EXAMPLE ENTRY - replace with a research summary: what the model is known for, its caveats, every claim cited. Summaries are produced and refreshed by the summaries-refresh procedure (research/README.md)."

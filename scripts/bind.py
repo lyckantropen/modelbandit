@@ -185,10 +185,10 @@ def price_model(model: dict, eps: list[dict], in_tok: int, out_tok: int,
             "out_min": min(outs), "out_max": max(outs), "n_eps": len(eps)}
 
 
-def verdict_for(mid: str, verdicts: dict) -> str | None:
-    """Longest matching prefix wins so family verdicts cover dated slugs."""
+def hint_for(mid: str, hints: dict) -> str | None:
+    """Longest matching prefix wins so family hints cover dated slugs."""
     best = None
-    for key, note in verdicts.items():
+    for key, note in hints.items():
         if mid.startswith(key) and (best is None or len(key) > len(best[0])):
             best = (key, note)
     return best[1] if best else None
@@ -302,7 +302,6 @@ def main() -> None:
     print("|---|---|---|---|---|---|---|---|")
 
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
-    verdicts = policy.get("verdicts", {})
     pick = None
     cheapest = None
     floor_total = 0.0
@@ -336,20 +335,15 @@ def main() -> None:
         print(f"\nnote: leaderboard rows resolved without canonical match "
               f"(price unverified or unpriced): {', '.join(sorted(odd))}")
 
-    shown = [(mid, verdict_for(mid, verdicts)) for mid, _ in ranked]
-    shown = [(mid, note) for mid, note in shown if note]
-    if shown:
-        print("\nverdicts (context only; selection stays popularity):")
-        for mid, note in shown:
-            print(f"  {mid}: {note}")
-
-    summaries = policy.get("summaries", {})
-    shown = [(mid, verdict_for(mid, summaries)) for mid, _ in ranked]
-    shown = [(mid, note) for mid, note in shown if note]
-    if shown:
-        print("\nsummaries (context only; selection stays popularity):")
-        for mid, note in shown:
-            print(f"  {mid}: {note}")
+    for kind, header in (("hints", "hints (advisory; selection stays popularity)"),
+                         ("summaries", "summaries (context only; selection stays popularity)")):
+        notes = policy.get(kind, {})
+        shown = [(mid, hint_for(mid, notes)) for mid, _ in ranked]
+        shown = [(mid, note) for mid, note in shown if note]
+        if shown:
+            print(f"\n{header}:")
+            for mid, note in shown:
+                print(f"  {mid}: {note}")
 
     if pick is None:
         raise SystemExit("domain has no ranked candidates in the model list")

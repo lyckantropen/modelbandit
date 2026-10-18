@@ -56,7 +56,7 @@ own output, carry: `Source: OpenRouter (openrouter.ai/rankings), as of <as_of>`.
 | --- | --- |
 | `baseline.id` | price anchor for Δ columns; not a selection input |
 | `domains` | five domains → leaderboard tags (a lens, not a partition) |
-| `verdicts` | user-validated notes, shown beside rows, never reordering |
+| `hints` | tentative user observations — advisory, shown beside rows, never reordering |
 
 Personal by design: this repo is private and the verdicts are taste.
 
