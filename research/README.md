@@ -6,7 +6,7 @@ the trigger, this is the procedure.
 
 ## 1. Scope the cycle
 
-- Run `python3 scripts/bind.py --check-policy --top 15` — 15 is the research
+- Run `python3 skills/openrouter-model-router/scripts/bind.py --check-policy --top 15` — 15 is the research
   depth; the default 8 is stricter than the research scope and over-reports
   stale.
 - **Gap models** (ranked, no summary) are what to research. **Stale summaries**

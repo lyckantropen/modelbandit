@@ -10,7 +10,8 @@ import unittest
 from contextlib import redirect_stderr
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
+                                "openrouter-model-router", "scripts"))
 import bind  # noqa: E402
 
 

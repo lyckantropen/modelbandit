@@ -1,8 +1,8 @@
 # openrouter-model-router
 
 Pick OpenRouter models by **domain popularity** and price them **live, per
-endpoint**. An agent skill (`SKILL.md`) whose mechanism is one stdlib-only
-Python script (`scripts/bind.py`) that also runs fine as a plain CLI.
+endpoint**. An agent skill (`skills/openrouter-model-router/SKILL.md`) whose mechanism is one stdlib-only
+Python script (`skills/openrouter-model-router/scripts/bind.py`) that also runs fine as a plain CLI.
 
 Selection is revealed preference — what real traffic actually runs in a domain
 (the OpenRouter Data API task-classification leaderboards and daily token
@@ -64,29 +64,29 @@ The mechanism is one stdlib script; `--help` is the full reference.
 
 ```bash
 # what domains exist and which leaderboard tags they map to
-python3 scripts/bind.py --list-domains
+python3 skills/openrouter-model-router/scripts/bind.py --list-domains
 
 # rank candidates for a domain, project 30 tickets against a budget
-python3 scripts/bind.py --domain writing --tickets 30 --budget 2
+python3 skills/openrouter-model-router/scripts/bind.py --domain writing --tickets 30 --budget 2
 
 # effort intent binds to a rung on the picked model's ladder
-python3 scripts/bind.py --domain research --effort thorough
+python3 skills/openrouter-model-router/scripts/bind.py --domain research --effort thorough
 
 # multi-ticket runs: deal the tickets across the popular pool,
 # preference-tilted and reproducible per project seed
-python3 scripts/bind.py --domain writing --tickets 12 --deal --seed my-project
+python3 skills/openrouter-model-router/scripts/bind.py --domain writing --tickets 12 --deal --seed my-project
 
 # agent's task-fit judgments (0-5) compose as score * fit/5
-python3 scripts/bind.py --domain writing --fit "z-ai/glm-5.3=4.5,openai/gpt-6-luna=1"
+python3 skills/openrouter-model-router/scripts/bind.py --domain writing --fit "z-ai/glm-5.3=4.5,openai/gpt-6-luna=1"
 
 # price at the floor instead of the budget-safe worst endpoint
-python3 scripts/bind.py --domain coding --pricing-basis best
+python3 skills/openrouter-model-router/scripts/bind.py --domain coding --pricing-basis best
 
 # summary drift and policy age
-python3 scripts/bind.py --check-policy
+python3 skills/openrouter-model-router/scripts/bind.py --check-policy
 ```
 
-Policy: `SKILL.md`.
+Policy: `skills/openrouter-model-router/SKILL.md`.
 
 ## Data
 

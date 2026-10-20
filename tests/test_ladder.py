@@ -4,7 +4,8 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
+                                "openrouter-model-router", "scripts"))
 import bind  # noqa: E402
 
 FULL = ["none", "low", "medium", "high", "xhigh", "max"]
