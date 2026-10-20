@@ -12,11 +12,30 @@ per 1M out). User verdicts annotate the ranking and never reorder it.
 
 ## Install
 
-Agent use — symlink (or copy) into your skills directory:
+With the skills installer (the installer itself needs Node.js 22.20+):
 
 ```bash
-ln -s ~/openrouter-model-router ~/.agents/skills/openrouter-model-router
+npx skills add lyckantropen/openrouter-model-router
 ```
+
+Requirements: Python 3 (3.10 and 3.13 tested), stdlib-only — no dependencies,
+no environment to provision.
+
+Consumer notes:
+
+- For reproducible remote installs, pin a git ref.
+- The installer sends anonymous telemetry; opt out with `DISABLE_TELEMETRY=1`
+  or `DO_NOT_TRACK=1`.
+
+Or, from your own checkout — clone anywhere, link from the checkout: a
+location-independent symlink from the skill subtree into your skills directory:
+
+```bash
+ln -s /path/to/openrouter-model-router/skills/openrouter-model-router ~/.agents/skills/openrouter-model-router
+```
+
+Existing installs: re-point the symlink at the new `skills/openrouter-model-router`
+subtree.
 
 ## Usage
 
@@ -62,27 +81,46 @@ separate shapes, each dealt by its own invocation.
 
 The mechanism is one stdlib script; `--help` is the full reference.
 
+What domains exist and which leaderboard tags they map to:
+
 ```bash
-# what domains exist and which leaderboard tags they map to
 python3 skills/openrouter-model-router/scripts/bind.py --list-domains
+```
 
-# rank candidates for a domain, project 30 tickets against a budget
+Rank candidates for a domain, project 30 tickets against a budget:
+
+```bash
 python3 skills/openrouter-model-router/scripts/bind.py --domain writing --tickets 30 --budget 2
+```
 
-# effort intent binds to a rung on the picked model's ladder
+Effort intent binds to a rung on the picked model's ladder:
+
+```bash
 python3 skills/openrouter-model-router/scripts/bind.py --domain research --effort thorough
+```
 
-# multi-ticket runs: deal the tickets across the popular pool,
-# preference-tilted and reproducible per project seed
+Multi-ticket runs deal the tickets across the popular pool, preference-tilted
+and reproducible per project seed:
+
+```bash
 python3 skills/openrouter-model-router/scripts/bind.py --domain writing --tickets 12 --deal --seed my-project
+```
 
-# agent's task-fit judgments (0-5) compose as score * fit/5
+The agent's task-fit judgments (0-5) compose as score * fit/5:
+
+```bash
 python3 skills/openrouter-model-router/scripts/bind.py --domain writing --fit "z-ai/glm-5.3=4.5,openai/gpt-6-luna=1"
+```
 
-# price at the floor instead of the budget-safe worst endpoint
+Price at the floor instead of the budget-safe worst endpoint:
+
+```bash
 python3 skills/openrouter-model-router/scripts/bind.py --domain coding --pricing-basis best
+```
 
-# summary drift and policy age
+Summary drift and policy age:
+
+```bash
 python3 skills/openrouter-model-router/scripts/bind.py --check-policy
 ```
 

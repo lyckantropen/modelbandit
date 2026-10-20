@@ -1,6 +1,7 @@
 ---
 name: openrouter-model-router
 description: Pick OpenRouter models by domain popularity and price them live. Use when choosing a model for a domain — research, writing, coding, orchestration, ops — when ranking candidates by what traffic actually runs, or when costing a batch of agent runs against a budget.
+compatibility: "Python 3, stdlib only — no dependencies, no environment to provision. The summaries-refresh procedure and the unit test suite live in the repository checkout (research/, tests/), not in this skill folder: with a skill-folder-only install the refresh offer reports what is due and where the procedure lives instead of running it."
 ---
 
 # OpenRouter Model Router
@@ -77,8 +78,12 @@ to a rung on each candidate's ladder.
    verdict is coefficient work; surface it with the same offer. When the policy
    is older than one rankings window (~30 days) or the check reports drift, tell
    the user and offer to run a summaries refresh; the procedure is
-   `research/README.md`. Signal drift is taste maintenance: report it, never
-   fix it — the user edits fit and evidence.
+   `research/README.md` in the repository checkout. With only the skill
+   folder installed (no checkout) the offer degrades: report what is due and
+   name the summaries-refresh procedure — it lives in the repository
+   checkout, beyond this skill folder — and never emit a path that cannot
+   resolve. Signal drift is taste maintenance: report it, never fix it — the
+   user edits fit and evidence.
    Done when: a due policy has been surfaced to the user with an offer to
    update — never silently ignored.
 
@@ -141,6 +146,8 @@ to a rung on each candidate's ladder.
   the table, carry "Source: OpenRouter (openrouter.ai/rankings), as of
   `<meta.as_of>`".
 
-- **Tests** — stdlib unittest; run `python3 -m unittest discover -s tests` from
-  the repo root before shipping any script change. `tests/live_smoke.py` is a
-  manual check against the real API.
+- **Tests** — repository-checkout material: the suite lives in `tests/` at the
+  repo root, beyond this skill folder. stdlib unittest; run
+  `python3 -m unittest discover -s tests` from the repo root before shipping
+  any script change. `tests/live_smoke.py` is a manual check against the real
+  API.

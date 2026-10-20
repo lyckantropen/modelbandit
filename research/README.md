@@ -1,7 +1,7 @@
 # Summaries refresh protocol
 
 How `policy.json` `summaries` are produced and kept current. Read this only
-when the skill offers a refresh and the user accepts — `SKILL.md` step 6 is
+when the skill offers a refresh and the user accepts — `SKILL.md` step 7 is
 the trigger, this is the procedure.
 
 ## 1. Scope the cycle
