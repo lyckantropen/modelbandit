@@ -77,8 +77,9 @@ to a rung on each candidate's ladder.
    balance against `scoring.thresholds` — a `coefficient re-tune due: yes`
    verdict is coefficient work; surface it with the same offer. When the policy
    is older than one rankings window (~30 days) or the check reports drift, tell
-   the user and offer to run a summaries refresh; the procedure is
-   `research/README.md` in the repository checkout. With only the skill
+   the user and offer to run a summaries refresh — the summaries-refresh
+   procedure; when you have the repository checkout, its path is
+   `research/README.md`. With only the skill
    folder installed (no checkout) the offer degrades: report what is due and
    name the summaries-refresh procedure — it lives in the repository
    checkout, beyond this skill folder — and never emit a path that cannot
