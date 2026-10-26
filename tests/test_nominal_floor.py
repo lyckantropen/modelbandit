@@ -1,10 +1,9 @@
-"""Unit tests for the Nominal floor: the score's cost term for Free routes.
+"""Unit tests for Free risk: the score's cost term for Free routes.
 
-The floor is a policy fact (`scoring.free_floor`, $/M output) turned into a
-ticket cost for the shape, then applied to every Free route in the pool — above
-zero so the cost term can never divide by zero, below every paid ticket so a
-Free route wins on fit and context instead of on arithmetic. Exposure does not
-move it: that is the Sensitive gate's business.
+Free risk is a policy fraction (`scoring.free_risk`) of the pool's cheapest
+paid ticket, applied to every Free route in the pool. It stays above zero and
+below that paid ticket. Exposure does not move it: that is the Sensitive gate's
+business.
 
 Fixture style follows test_score.py: plain dicts for the policy, literal
 expectations for the arithmetic.
@@ -19,9 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "openrouter-model-router", "scripts"))
 import bind  # noqa: E402
 
-# The default floor over the authoring profile (12,000 output tokens,
-# `measured` effort -> multiplier 1.0): 12,000 * $0.01/M = $0.00012/ticket.
-FLOOR = 0.00012
+FREE_RISK = 0.35
+CHEAPEST_PAID = 0.02
+FREE_COST = FREE_RISK * CHEAPEST_PAID
 
 POLICY = {
     "scoring": {"alpha": 1, "beta": 1,
@@ -44,44 +43,49 @@ def with_scoring(**values):
     return {**POLICY, "scoring": {**POLICY["scoring"], **values}}
 
 
-class NominalFloorPolicyTests(unittest.TestCase):
-    """scoring.free_floor is a policy fact: configurable, and an unusable
-    value stops the run instead of being clamped."""
+class FreeRiskPolicyTests(unittest.TestCase):
+    """scoring.free_risk is configurable and strictly between zero and one."""
 
-    def test_default_is_one_cent_per_million_output(self):
-        self.assertEqual(bind.load_policy_config(POLICY).free_floor, 0.01)
+    def test_default_is_35_percent(self):
+        self.assertEqual(bind.load_policy_config(POLICY).free_risk, 0.35)
 
-    def test_configured_floor_is_read(self):
-        config = bind.load_policy_config(with_scoring(free_floor=0.25))
-        self.assertEqual(config.free_floor, 0.25)
+    def test_configured_free_risk_is_read(self):
+        config = bind.load_policy_config(with_scoring(free_risk=0.25))
+        self.assertEqual(config.free_risk, 0.25)
 
-    def test_invalid_floor_fails_loudly(self):
-        for value in (0, -0.01, "free", None, [], float("inf"), float("nan")):
+    def test_free_risk_outside_open_unit_interval_fails_loudly(self):
+        for value in (0, 1, -0.01, 1.01, "free", None, [],
+                      float("inf"), float("nan")):
             with self.subTest(value=value), self.assertRaisesRegex(
-                    SystemExit, "scoring.free_floor"):
-                bind.load_policy_config(with_scoring(free_floor=value))
+                    SystemExit, "scoring.free_risk"):
+                bind.load_policy_config(with_scoring(free_risk=value))
 
 
 class NominalFloorCostTests(unittest.TestCase):
-    """The floor rate over a shape's output: a ticket cost for the score."""
+    """Free risk derives a ticket cost from the cheapest priced paid ticket."""
 
-    def test_prices_output_at_the_floor_rate(self):
-        self.assertAlmostEqual(bind.nominal_floor_cost(0.01, 12_000), 0.00012)
+    def test_nominal_floor_is_free_risk_times_cheapest_paid_ticket(self):
+        self.assertAlmostEqual(
+            bind.nominal_floor_cost(FREE_RISK, CHEAPEST_PAID), FREE_COST)
 
-    def test_effort_multiplier_scales_the_floor(self):
-        self.assertAlmostEqual(bind.nominal_floor_cost(0.01, 12_000, 6.0),
-                              0.00072)
+    def test_risk_fraction_stays_below_the_paid_ticket(self):
+        self.assertGreater(FREE_COST, 0.0)
+        self.assertLess(FREE_COST, CHEAPEST_PAID)
 
-    def test_floor_sits_below_a_cheap_paid_ticket(self):
-        # $1/M output is the cheap end of the paid pool; the floor is 100x
-        # under it — free can win, but not by more than the policy allows.
-        paid = bind.blended_from_pricing(
-            {"prompt": "0.0000001", "completion": "0.000001"},
-            20_000, 12_000, 0.4, 1.0)
-        self.assertLess(bind.nominal_floor_cost(0.01, 12_000), paid)
+    def test_effective_cost_uses_the_cheapest_paid_ticket_in_each_pool(self):
+        costs = {"free-a": 0.0, "paid-a": 0.08, "paid-b": 0.02}
+        effective = bind.effective_costs(costs, free_risk=FREE_RISK,
+                                         free={"free-a"})
+        self.assertEqual(effective["free-a"], FREE_COST)
+        self.assertEqual(effective["paid-a"], 0.08)
+        self.assertEqual(effective["paid-b"], CHEAPEST_PAID)
 
-    def test_no_output_tokens_prices_no_floor(self):
-        self.assertEqual(bind.nominal_floor_cost(0.01, 0), 0.0)
+    def test_invalid_risk_fails_at_the_scoring_seam(self):
+        for risk in (0, 1, -0.2, float("inf"), float("nan")):
+            with self.subTest(risk=risk), self.assertRaisesRegex(
+                    SystemExit, "free_risk"):
+                bind.effective_costs({"free": 0.0, "paid": 0.02},
+                                     free_risk=risk, free={"free"})
 
 
 class FreeRouteIdsTests(unittest.TestCase):
@@ -119,22 +123,23 @@ class FreeRouteIdsTests(unittest.TestCase):
 
 
 class FreeFloorScoreTests(unittest.TestCase):
-    """What the floor buys: a Free route outranks the same popularity at a
-    paid price, and never divides by zero."""
+    """Free's standing uses its risk-priced ticket, never zero cost."""
 
-    def test_free_route_scores_above_the_same_share_at_a_paid_price(self):
-        free = bind.task_score(0.01, FLOOR, 0.7, 1.0)
-        paid = bind.task_score(0.01, 0.02, 0.7, 1.0)
-        self.assertGreater(free, paid)
+    def test_raising_free_risk_lowers_free_standing_monotonically(self):
+        cheap_risk_cost = bind.nominal_floor_cost(0.2, 0.02)
+        high_risk_cost = bind.nominal_floor_cost(0.6, 0.02)
+        cheap_risk_score = bind.task_score(0.01, cheap_risk_cost, 0.7, 1.0)
+        high_risk_score = bind.task_score(0.01, high_risk_cost, 0.7, 1.0)
+        self.assertGreater(cheap_risk_score, high_risk_score)
 
-    def test_floor_keeps_the_cost_term_above_zero(self):
+    def test_free_risk_keeps_the_cost_term_above_zero(self):
         # The cost term is the denominator: a zero there is a division by
         # zero, so a Free route always prices above it.
         eff = bind.effective_costs({"vendor/model:free": 0.0, "paid": 0.02},
-                                   free_floor=FLOOR,
+                                   free_risk=FREE_RISK,
                                    free={"vendor/model:free"})
         score = bind.task_score(0.01, eff["vendor/model:free"], 0.7, 1.0)
-        self.assertGreater(eff["vendor/model:free"], 0.0)
+        self.assertEqual(eff["vendor/model:free"], FREE_COST)
         self.assertTrue(math.isfinite(score))
 
 

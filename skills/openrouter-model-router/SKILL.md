@@ -52,10 +52,10 @@ to a rung on each candidate's ladder.
 3. **Order by task score.** Each candidate scores `share^α / cost^β` —
    popularity priced at its rung for the effort intent (α, β from `policy.json`
    `scoring`). Free routes are priced at the **Nominal floor**
-   (`scoring.free_floor`, default $0.01/M output, configurable): below every
-   paid ticket in the pool, so a Free route can win where fit and context
-   allow, and never zero, so it cannot win by division alone. The floor is one
-   number for the shape — Exposure does not move it, the Sensitive gate does.
+   (`scoring.free_risk`, default 0.35): that fraction of the pool's cheapest
+   priced paid ticket, recomputed for each pool and shape. It is always above
+   zero and below that paid ticket, so Free can win without winning by division
+   alone. Exposure does not move it; the Sensitive gate does.
    The candidate set stays the popularity top; the score orders it.
    Rung rules: `glance`→floor, `measured`→default, `thorough`→above-default,
    `exhaustive`→ceiling; a rung the model lacks collapses to its nearest, and
@@ -150,17 +150,16 @@ to a rung on each candidate's ladder.
   only against the balance thresholds (top-1 score mass 20–50%, top-2 ≤ 75% per
   pool): neither uniform nor dominated by one or two entries.
   `--check-policy` re-measures and calls for a re-tune when the balance
-  drifts — a Free route priced at the Nominal floor is expected to move it, and
-  that drift is a diagnosed re-tune, never a silent clamp of the floor.
+  drifts — a Free route priced at the Nominal floor can move it, and that drift
+  is a diagnosed re-tune.
 
 - **Nominal floor** — the score's cost term for a Free route:
-  `scoring.free_floor` ($/M output, default $0.01) over the shape's output at
-  the effort intent, one number for every Free route in the pool whatever its
-  Exposure. It must sit above zero (no division by zero) and below every paid
-  ticket in the pool; a non-positive or non-finite floor stops the run, while
-  a floor at or above the cheapest paid ticket warns and continues unchanged.
-  Only the score uses it — the price columns
-  and the projection still report what a route really costs to run.
+  `scoring.free_risk` times the pool's cheapest priced paid ticket (default
+  0.35), recomputed per pool and shape and applied to every Free route whatever
+  its Exposure. The risk must be strictly between zero and one, which keeps the
+  derived floor positive and strictly below the paid ticket. Only the score
+  uses it — price columns and projections still report what a route costs to
+  run.
 
 - **Hints** — user observations in `policy.json`, structured: a `note` (shown
   beside the ranking), `fit` (favor/avoid/neutral, per domain), and `evidence`

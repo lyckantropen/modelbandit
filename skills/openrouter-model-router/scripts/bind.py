@@ -56,11 +56,9 @@ DOMAIN_PROFILE = {
 }
 BASES = ("worst", "primary", "best")
 
-# The Nominal floor: what the score's cost term charges a Free route. Configured
-# as $/M output (`scoring.free_floor`), it sits below every paid ticket so a
-# Free route can win where fit and context allow, and above zero so it cannot
-# win by division alone.
-DEFAULT_FREE_FLOOR = 0.01
+# The Nominal floor is derived from this Free-risk fraction of the cheapest
+# priced paid ticket in the same pool.
+DEFAULT_FREE_RISK = 0.35
 FREE_SHARE_CHECK_TICKETS = 100
 FREE_SHARE_CHECK_SEED = "policy-check-free-share"
 FREE_SHARE_HISTORY_LIMIT = 10
@@ -412,7 +410,7 @@ class PolicyConfig:
     factors: dict
     deal: DealPolicy
     context: ContextGatePolicy
-    free_floor: float = DEFAULT_FREE_FLOOR
+    free_risk: float = DEFAULT_FREE_RISK
 
 
 def load_policy_config(policy: dict) -> PolicyConfig:
@@ -454,13 +452,13 @@ def load_policy_config(policy: dict) -> PolicyConfig:
         raise SystemExit("policy context_gate.headroom must be at least 1")
     if not 0.0 < margin <= 1.0:
         raise SystemExit("policy context_gate.margin must be greater than 0 and at most 1")
-    free_floor = scoring.get("free_floor", DEFAULT_FREE_FLOOR)
+    free_risk = scoring.get("free_risk", DEFAULT_FREE_RISK)
     try:
-        free_floor = float(free_floor)
-    except (TypeError, ValueError):
-        raise SystemExit("policy scoring.free_floor must be a number") from None
-    if not math.isfinite(free_floor) or free_floor <= 0:
-        raise SystemExit("policy scoring.free_floor must be positive and finite")
+        free_risk = float(free_risk)
+    except (TypeError, ValueError, OverflowError):
+        raise SystemExit("policy scoring.free_risk must be a number") from None
+    if not math.isfinite(free_risk) or not 0.0 < free_risk < 1.0:
+        raise SystemExit("policy scoring.free_risk must be strictly between 0 and 1")
     return PolicyConfig(
         alpha=float(required(scoring, "alpha", "scoring.alpha")),
         beta=float(required(scoring, "beta", "scoring.beta")),
@@ -473,7 +471,7 @@ def load_policy_config(policy: dict) -> PolicyConfig:
                                            "affinity.eligibility_top_k")),
         ),
         context=ContextGatePolicy(headroom=headroom, margin=margin),
-        free_floor=free_floor,
+        free_risk=free_risk,
     )
 
 
@@ -649,42 +647,38 @@ def task_score(share: float, cost: float, alpha: float, beta: float) -> float:
     return share ** alpha / cost ** beta
 
 
-def nominal_floor_cost(free_floor: float, out_tokens: int,
-                       multiplier: float = 1.0) -> float:
-    """A Free route's ticket cost in the score: the Nominal floor rate over the
-    shape's output tokens at the effort multiplier.
-
-    Output only — a Free route's serving costs nothing, so this Nominal floor
-    is for the cost term, never a quote. It is one number for the shape:
-    every Free route in the pool pays it, whatever its Exposure.
+def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
+    """A Free route's ticket cost: Free risk times the pool's cheapest paid
+    ticket. One derived Nominal floor applies uniformly across Free routes.
     """
-    return out_tokens * multiplier * free_floor / 1e6
+    return free_risk * cheapest_paid_ticket
 
 
-def effective_costs(costs: dict, *, free_floor: float,
+def effective_costs(costs: dict, *, free_risk: float,
                     free: set[str] | frozenset[str] = frozenset()) -> dict:
-    """The score's cost term for one pool: Free routes at the Nominal floor,
+    """The score's cost term for one pool: Free routes at derived Free risk,
     every paid ticket at its own price.
 
     `free` names the pool's Free routes — a serving fact (see free_route_ids),
-    never inferred from a zero price — and `free_floor` is their Nominal floor
-    ticket cost (see nominal_floor_cost). The floor must be strictly above
-    zero, so the cost term cannot divide by zero. If it is not below every
-    paid ticket in the pool, warn and continue with the configured floor. A
-    pool with no Free route judges no floor; a paid ticket that priced at
-    nothing keeps the pool's cheapest paid ticket, as it always has.
+    never inferred from a zero price. The Nominal floor is Free risk times the
+    cheapest priced paid ticket, or a $1 fallback reference when the pool has
+    no priced paid ticket. A valid risk fraction makes the floor positive and,
+    when paid tickets exist, strictly below their cheapest ticket. A paid
+    ticket that priced at nothing keeps the pool's cheapest paid ticket.
     """
     paid = [v for mid, v in costs.items() if mid not in free and v > 0]
-    if any(mid in free for mid in costs):
-        if not math.isfinite(free_floor) or free_floor <= 0:
-            raise SystemExit(f"nominal floor must be a positive, finite ticket "
-                             f"cost; got ${free_floor:.6f}")
-        if paid and min(paid) <= free_floor:
-            print(f"warning: Nominal floor ${free_floor:.6f} is not below the "
-                  f"pool's cheapest paid ticket (${min(paid):.6f}); using "
-                  "the configured floor", file=sys.stderr)
     cheapest_paid = min(paid, default=1.0)
-    return {mid: (free_floor if mid in free else (v if v > 0 else cheapest_paid))
+    has_free = any(mid in free for mid in costs)
+    if has_free:
+        try:
+            free_risk = float(free_risk)
+        except (TypeError, ValueError, OverflowError):
+            raise SystemExit("scoring.free_risk must be strictly between 0 and 1") \
+                from None
+        if not math.isfinite(free_risk) or not 0.0 < free_risk < 1.0:
+            raise SystemExit("scoring.free_risk must be strictly between 0 and 1")
+    free_cost = nominal_floor_cost(free_risk, cheapest_paid) if has_free else None
+    return {mid: (free_cost if mid in free else (v if v > 0 else cheapest_paid))
             for mid, v in costs.items()}
 
 
@@ -1154,8 +1148,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
             costs[mid] = pricing[basis]
         effective = effective_costs(
             costs,
-            free_floor=nominal_floor_cost(config.free_floor, out_tok,
-                                          EFFORT_MULTIPLIERS[intent]),
+            free_risk=config.free_risk,
             free=free)
         scores = {mid: standing(share, effective[mid], None,
                                 config.alpha, config.beta)
@@ -1176,7 +1169,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      "eligibility_top_k": pool_k,
                      "blend_weight": config.deal.blend_weight,
                      "scoring": {"alpha": config.alpha, "beta": config.beta,
-                                 "free_floor": config.free_floor},
+                                 "free_risk": config.free_risk},
                      "context_gate": {
                          "headroom": config.context.headroom,
                          "margin": config.context.margin},
@@ -1258,8 +1251,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
             costs[mid] = pricing[basis]
         eff = effective_costs(
             costs,
-            free_floor=nominal_floor_cost(config.free_floor, out_tok,
-                                          EFFORT_MULTIPLIERS[intent]),
+            free_risk=config.free_risk,
             free=free_route_ids(costs, policy, local=local_ids))
         masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
         t1, t2 = mass_balance(masses)
@@ -1494,8 +1486,7 @@ def main() -> None:
     # showing what the route actually costs to run.
     eff_costs = effective_costs(
         pers,
-        free_floor=nominal_floor_cost(config.free_floor, out_tok,
-                                      EFFORT_MULTIPLIERS[args.effort]),
+        free_risk=config.free_risk,
         free=free_route_ids(pers, policy, local=local_ids))
 
     rows_out = []

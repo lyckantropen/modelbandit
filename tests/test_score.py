@@ -1,6 +1,6 @@
 """Unit tests for the task-order equation and its composition with task fit.
 
-score = share^alpha / cost^beta (free routes priced at the Nominal floor);
+score = share^alpha / cost^beta (Free routes priced by Free risk);
 standing = score * fit/5. The exponents' ratio orders, their scale
 concentrates; mass_balance is the acceptance criterion for any coefficient.
 """
@@ -33,19 +33,16 @@ class TaskScoreTests(unittest.TestCase):
 
 
 class EffectiveCostTests(unittest.TestCase):
-    """The score's cost term for one pool: Free routes at the Nominal floor,
-    every paid ticket at its own price. The floor is above zero, so the term
-    can never divide by zero; an out-of-bound floor warns and remains
-    configured rather than being clamped."""
+    """Free risk times the pool's cheapest paid ticket; paid costs stay intact."""
 
-    FLOOR = 0.00012  # $0.01/M output over the authoring profile's 12K out
+    FREE_RISK = 0.35
 
-    def test_free_route_prices_at_the_nominal_floor(self):
+    def test_free_route_prices_at_risk_fraction_of_the_cheapest_paid_ticket(self):
         eff = bind.effective_costs({"vendor/model:free": 0.0, "b": 0.02,
                                     "c": 0.05},
-                                   free_floor=self.FLOOR,
+                                   free_risk=self.FREE_RISK,
                                    free={"vendor/model:free"})
-        self.assertEqual(eff["vendor/model:free"], self.FLOOR)
+        self.assertAlmostEqual(eff["vendor/model:free"], 0.007)
         self.assertEqual(eff["b"], 0.02)
         self.assertEqual(eff["c"], 0.05)
 
@@ -57,62 +54,63 @@ class EffectiveCostTests(unittest.TestCase):
             with self.subTest(basis=basis):
                 eff = bind.effective_costs(
                     {"vendor/model:free": 0.0, **basis},
-                    free_floor=self.FLOOR, free={"vendor/model:free"})
+                    free_risk=self.FREE_RISK, free={"vendor/model:free"})
                 for mid, cost in basis.items():
                     self.assertEqual(eff[mid], cost)
 
-    def test_free_route_prices_the_floor_at_every_calculation_basis(self):
-        # worst/primary/best change the paid tickets a pool carries; the Free
-        # route's cost term is the same floor under each.
+    def test_free_route_price_tracks_the_cheapest_paid_ticket_at_each_basis(self):
+        # worst/primary/best change the paid tickets a pool carries; Free risk
+        # remains a fixed fraction of the cheapest priced paid ticket.
         bases = {"worst": 0.0984, "primary": 0.0322, "best": 0.0064}
         for basis, ticket in bases.items():
             with self.subTest(basis=basis):
                 eff = bind.effective_costs({"vendor/model:free": 0.0,
-                                            "paid": ticket},
-                                           free_floor=self.FLOOR,
+                                           "paid": ticket},
+                                           free_risk=self.FREE_RISK,
                                            free={"vendor/model:free"})
-                self.assertEqual(eff["vendor/model:free"], self.FLOOR)
+                self.assertAlmostEqual(eff["vendor/model:free"],
+                                       self.FREE_RISK * ticket)
                 self.assertEqual(eff["paid"], ticket)
 
-    def test_floor_stays_below_every_paid_ticket_in_the_pool(self):
+    def test_free_route_price_stays_below_every_paid_ticket_in_the_pool(self):
         eff = bind.effective_costs({"vendor/model:free": 0.0, "b": 0.02,
                                     "c": 0.0984},
-                                   free_floor=self.FLOOR,
+                                   free_risk=self.FREE_RISK,
                                    free={"vendor/model:free"})
         paid = [v for mid, v in eff.items() if mid != "vendor/model:free"]
         self.assertLess(eff["vendor/model:free"], min(paid))
 
-    def test_all_free_pool_prices_at_the_floor(self):
+    def test_all_free_pool_uses_positive_fallback_paid_ticket_reference(self):
         eff = bind.effective_costs({"a": 0.0, "b": 0.0},
-                                   free_floor=self.FLOOR, free={"a", "b"})
-        self.assertEqual(eff, {"a": self.FLOOR, "b": self.FLOOR})
+                                   free_risk=self.FREE_RISK, free={"a", "b"})
+        self.assertEqual(eff, {"a": self.FREE_RISK, "b": self.FREE_RISK})
 
-    def test_floor_at_or_above_cheapest_paid_ticket_warns_and_continues(self):
+    def test_derived_nominal_floor_never_warns_against_cheapest_paid(self):
         import io
         from contextlib import redirect_stderr
 
-        for floor in (0.02, 0.5):
-            with self.subTest(floor=floor):
-                err = io.StringIO()
-                with redirect_stderr(err):
-                    result = bind.effective_costs(
-                        {"vendor/model:free": 0.0, "paid": 0.02},
-                        free_floor=floor, free={"vendor/model:free"})
-                self.assertEqual(result["vendor/model:free"], floor)
-                self.assertIn("Nominal floor", err.getvalue())
+        err = io.StringIO()
+        with redirect_stderr(err):
+            result = bind.effective_costs(
+                {"vendor/model:free": 0.0, "paid": 0.02},
+                free_risk=self.FREE_RISK, free={"vendor/model:free"})
+        self.assertAlmostEqual(result["vendor/model:free"], 0.007)
+        self.assertLess(result["vendor/model:free"], result["paid"])
+        self.assertEqual(err.getvalue(), "")
 
-    def test_non_positive_or_unusable_floor_fails_loudly(self):
-        for floor in (0.0, -0.01, float("inf"), float("nan")):
-            with self.subTest(floor=floor), self.assertRaisesRegex(
-                    SystemExit, "nominal floor"):
+    def test_free_risk_outside_open_unit_interval_fails_loudly(self):
+        for risk in (0.0, 1.0, -0.01, 1.01, "invalid", None, [],
+                     float("inf"), float("nan")):
+            with self.subTest(risk=risk), self.assertRaisesRegex(
+                    SystemExit, "free_risk"):
                 bind.effective_costs({"vendor/model:free": 0.0, "paid": 0.02},
-                                     free_floor=floor,
+                                     free_risk=risk,
                                      free={"vendor/model:free"})
 
     def test_a_pool_without_a_free_route_is_unpriced_by_the_floor(self):
-        # No Free route, no floor to judge: paid tickets keep their own price
+        # No Free route, no Free risk to apply: paid tickets keep their own price
         # and the pool's own fallback for a ticket that priced at nothing.
-        eff = bind.effective_costs({"a": 0.0, "b": 0.02}, free_floor=0.0)
+        eff = bind.effective_costs({"a": 0.0, "b": 0.02}, free_risk=0.0)
         self.assertEqual(eff, {"a": 0.02, "b": 0.02})
 
 

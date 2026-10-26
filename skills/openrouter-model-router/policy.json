@@ -89,10 +89,10 @@
     ]
   },
   "scoring": {
-    "notes": "Task order = share^alpha / cost^beta (cost at the candidate's effort rung; Free routes priced at the Nominal floor — free_floor, $/M output, applied to every Free route whatever its Exposure: below every paid ticket so free can win where fit and context allow, never zero so it cannot win by division). The exponent ratio decides the ordering, their scale the sharpness. Tuned 2026-10-26 (alpha 0.6, beta 1.0) once the Nominal floor entered scoring — the floor lifted ops' top-1 past the limit at 0.7 (52%), compression at 0.6 restores balance across all five domains (top-1 score mass 27-49%, top-2 <= 70%): neither uniform nor dominated. A Free route in the pool moves that balance — expected, and surfaced by --check-policy as the coefficient re-tune verdict rather than silently absorbed. Thresholds are the acceptance criterion for any coefficient change.",
+    "notes": "Task order = share^alpha / cost^beta (cost at the candidate's effort rung; Free routes use the Nominal floor, derived as scoring.free_risk times the pool's cheapest priced paid ticket, default 0.35, recomputed per pool and shape. It is positive and strictly below the paid ticket, so Free can win without division by zero). The exponent ratio decides the ordering, their scale the sharpness. Tuned 2026-10-26 (alpha 0.6, beta 1.0) when the Nominal floor entered scoring — the fixed floor lifted ops' top-1 past the limit at 0.7 (52%), compression at 0.6 restored balance across all five domains (top-1 score mass 27-49%, top-2 <= 70%): neither uniform nor dominated. Free-risk pricing changes Free's score contribution; --check-policy surfaces coefficient drift rather than silently absorbing it. Thresholds are the acceptance criterion for any coefficient change.",
     "alpha": 0.6,
     "beta": 1.0,
-    "free_floor": 0.01,
+    "free_risk": 0.35,
     "thresholds": {
       "top1_min": 0.2,
       "top1_max": 0.5,
