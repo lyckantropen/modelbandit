@@ -369,6 +369,112 @@ def load_policy_config(policy: dict) -> PolicyConfig:
     )
 
 
+def load_free_models(policy: dict) -> dict:
+    """Validate the curated Free route catalog at the policy boundary.
+
+    A bad window or misspelled Exposure must stop the run: either could make a
+    candidate look safer or more capable than the policy says. ``summary_ref``
+    remains optional in policy, but when present it must be a usable string.
+    """
+    catalog = policy.get("free_models", {})
+    if not isinstance(catalog, dict):
+        raise SystemExit("policy free_models must be an object")
+    for prefix, entry in catalog.items():
+        path = f"free_models.{prefix}"
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise SystemExit(f"policy {path}: id-prefix must be a non-empty string")
+        if not isinstance(entry, dict):
+            raise SystemExit(f"policy {path} must be an object")
+        window = entry.get("context_length")
+        if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+            raise SystemExit(f"policy {path}.context_length must be a positive integer")
+        if "exposure" not in entry:
+            raise SystemExit(f"policy missing required key: {path}.exposure")
+        try:
+            known_exposure(prefix, entry["exposure"])
+        except SystemExit as exc:
+            raise SystemExit(f"policy {path}.exposure: {exc}") from None
+        summary_ref = entry.get("summary_ref")
+        if summary_ref is not None and (not isinstance(summary_ref, str)
+                                        or not summary_ref.strip()):
+            raise SystemExit(f"policy {path}.summary_ref must be a non-empty string")
+    return catalog
+
+
+def _free_summary(entry: dict, summaries: dict) -> bool:
+    """A Free route is selectable only when its catalog reference resolves."""
+    ref = entry.get("summary_ref")
+    return isinstance(ref, str) and bool(summaries.get(ref))
+
+
+def _free_model_record(mid: str, entry: dict, source: dict | None = None) -> dict:
+    """Build route-specific metadata; never inherit a sibling's paid price."""
+    model = dict(source or {})
+    model.update({
+        "id": mid,
+        "context_length": entry["context_length"],
+        "pricing": {"prompt": "0", "completion": "0",
+                    "input_cache_read": "0"},
+    })
+    model.setdefault("supported_parameters", [])
+    return model
+
+
+def merge_free_candidates(share: dict, models: dict, free_models: dict,
+                          summaries: dict) -> tuple[dict, dict]:
+    """Merge cataloged OpenCode models and ranked :free routes into candidates.
+
+    OpenRouter :free rows retain their own slug even when the API only resolves
+    them through a paid family model. Uncataloged or unsummarized ranked routes
+    stay visible but the catalog gate prevents the Deal from using them.
+    OpenCode catalog entries are added with zero observed share; their context
+    and Exposure remain curated facts, not inferred runtime data.
+    """
+    merged_share = dict(share)
+    merged_models = {mid: dict(model) for mid, model in models.items()}
+
+    for mid in list(merged_share):
+        if not mid.endswith(":free"):
+            continue
+        match = longest_prefix_match(mid, free_models)
+        if match is None:
+            continue
+        entry = match[1]
+        source = merged_models.get(mid)
+        if source is None:
+            source = merged_models.get(mid.removesuffix(":free"))
+        merged_models[mid] = _free_model_record(mid, entry, source)
+
+    for prefix, entry in free_models.items():
+        if not prefix.startswith("opencode/") or not _free_summary(entry, summaries):
+            continue
+        merged_share.setdefault(prefix, 0.0)
+        merged_models.setdefault(prefix, _free_model_record(prefix, entry))
+
+    return merged_share, merged_models
+
+
+def free_candidate_details(mid: str, policy: dict) -> tuple[int, str] | None:
+    """Return the curated window and Exposure for a Free route, if cataloged."""
+    if not (mid.endswith(":free") or mid.startswith("opencode/")):
+        return None
+    match = longest_prefix_match(mid, policy.get("free_models", {}))
+    if match is None:
+        return None
+    entry = match[1]
+    return entry["context_length"], entry["exposure"]
+
+
+def summary_for_candidate(mid: str, policy: dict) -> str | None:
+    """Resolve a Free route's explicit family summary, else its direct summary."""
+    match = longest_prefix_match(mid, policy.get("free_models", {}))
+    if match is not None and (mid.endswith(":free") or mid.startswith("opencode/")):
+        ref = match[1].get("summary_ref")
+        if ref:
+            return policy.get("summaries", {}).get(ref)
+    return hint_for(mid, policy.get("summaries", {}))
+
+
 def task_score(share: float, cost: float, alpha: float, beta: float) -> float:
     """share^alpha / cost^beta. cost must already be floored (see
     effective_costs) so free models cannot win on division alone."""
@@ -454,6 +560,7 @@ class Candidate:
     exposure: str
     is_free: bool = False
     context_length: int | None = None
+    cataloged: bool = True
 
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
@@ -497,18 +604,20 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     serving price class and context window."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
-    is_free = (local or mid.startswith("opencode/") or mid.endswith(":free")
-               or bool(catalog_match))
+    is_free = local or mid.startswith("opencode/") or mid.endswith(":free")
     context_length = (catalog_entry.get("context_length")
                       if isinstance(catalog_entry, dict) else None)
     if context_length is None and model:
         context_length = model.get("context_length")
     return Candidate(id=mid,
-                     exposure=resolve_exposure(
-                         mid, free_models=policy.get("free_models", {}),
-                         overrides=policy.get("exposure", {}), local=local),
-                     is_free=is_free,
-                     context_length=context_length)
+                      exposure=resolve_exposure(
+                          mid, free_models=policy.get("free_models", {}),
+                          overrides=policy.get("exposure", {}), local=local),
+                      is_free=is_free,
+                      context_length=context_length,
+                      cataloged=(not is_free or (catalog_match is not None
+                                and _free_summary(catalog_entry,
+                                                  policy.get("summaries", {})))))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -549,8 +658,16 @@ def context_gate(shape: Shape, candidate: Candidate) -> Decision:
     return ADMITTED
 
 
-# The gates, in order, behind the one decision. The Context gate joins here.
-GATES = (exposure_gate, context_gate)
+def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """Only curated, summary-backed Free routes can enter the Deal."""
+    if candidate.is_free and not candidate.cataloged:
+        return Decision(False, "free route requires a catalog entry and summary")
+    return ADMITTED
+
+
+# The gates, in order, behind the one decision. The Context and catalog gates
+# join the existing Exposure gate.
+GATES = (exposure_gate, context_gate, catalog_gate)
 
 
 def admit(shape: Shape, candidate: Candidate) -> Decision:
@@ -668,8 +785,16 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
             continue
         known_tags.add(c["tag"])
         for m in c["models"]:
-            resolved, how = resolve_model(models, by_canon, norm_id(m["id"]))
-            key = resolved["id"] if resolved else norm_id(m["id"])
+            raw_id = norm_id(m["id"])
+            if raw_id.endswith(":free"):
+                # A Free route is its own serving identity, even if the API's
+                # canonical map points it at the paid family model.
+                resolved = models.get(raw_id)
+                how = "exact" if resolved else "unresolved"
+                key = raw_id
+            else:
+                resolved, how = resolve_model(models, by_canon, raw_id)
+                key = resolved["id"] if resolved else raw_id
             matches[key] = how if resolved else "unresolved"
             share[key] += c["usage_share"] * m["tag_usage_share"]
     return share, matches, known_tags
@@ -846,6 +971,7 @@ def main() -> None:
     if os.path.exists(args.policy):
         with open(args.policy) as f:
             policy = json.load(f)
+    policy["free_models"] = load_free_models(policy)
     config = load_policy_config(policy)
     domains = policy.get("domains", {})
 
@@ -889,6 +1015,11 @@ def main() -> None:
     ranks = fetch_json(RANK_URL, "rankings.json", auth=True, refresh=args.refresh)
 
     share, matches, known_tags = domain_candidates(classif, tags, models, by_canon)
+    share, models = merge_free_candidates(
+        share, models, policy["free_models"], policy.get("summaries", {}))
+    for mid in share:
+        if mid.endswith(":free") and mid in models:
+            matches[mid] = "catalog"
     missing = set(tags) - known_tags
     if missing:
         print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
@@ -932,7 +1063,7 @@ def main() -> None:
         mid, policy, model=models.get(mid))) for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
     show_admission = shape.sensitive or any(
-        "context" in decision.reason for decision in decisions.values())
+        not decision.admitted for decision in decisions.values())
     # One eligibility pool: the deal plays it, and this run prices it, so a
     # favored model below --top still scores at the same scale as the rows
     # above it.
@@ -945,11 +1076,15 @@ def main() -> None:
               "pick and the deal (marked below, never hidden)\n")
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
           + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
-          "ctx | rung |" + (" admit |" if show_admission else ""))
-    print("|---" * (10 + (2 if fit_map else 0) + (1 if show_admission else 0))
+          "ctx | Exposure | rung |" + (" admit |" if show_admission else ""))
+    print("|---" * (11 + (2 if fit_map else 0) + (1 if show_admission else 0))
           + "|")
 
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
+    ranked_ids = {mid for mid, _ in ranked}
+    ranked.extend((mid, share[mid]) for mid in sorted(share)
+                  if (mid.startswith("opencode/") or mid.endswith(":free"))
+                  and mid not in ranked_ids)
     table_mids = {mid for mid, _ in ranked}
     priced = {}
     pers = {}
@@ -958,7 +1093,8 @@ def main() -> None:
         m = models.get(mid)
         if not m:
             continue
-        pr = price_model(m, endpoint_pricings(mid, args.refresh),
+        eps = [] if mid.startswith("opencode/") else endpoint_pricings(mid, args.refresh)
+        pr = price_model(m, eps,
                          in_tok, out_tok, cached,
                          mult_for(m, args.effort))
         priced[mid] = pr
@@ -990,7 +1126,13 @@ def main() -> None:
         out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
         if pr["n_eps"] == 0:
             out_cell += " (no endpoint data)"
-        ctx = f"{m['context_length'] / 1024:.0f}K" if m.get("context_length") else "?"
+        free_details = free_candidate_details(mid, policy)
+        context_length = free_details[0] if free_details else m.get("context_length")
+        ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
+        exposure = (free_details[1] if free_details else
+                    candidate_for(mid, policy, model=m).exposure
+                    if mid.endswith(":free") or mid.startswith("opencode/")
+                    else "—")
         ladder = effort_ladder(m)
         rung = resolve_rung(ladder, args.effort)
         if rung_collapsed(ladder, args.effort):
@@ -1004,7 +1146,7 @@ def main() -> None:
             admit_cell = f" {decisions[mid].reason or '—'} |"
         print(f"| {i} | {mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
-              f"{delta} | {ctx} | {rung} |{admit_cell}")
+              f"{delta} | {ctx} | {exposure} | {rung} |{admit_cell}")
         if decisions[mid].admitted:
             if pick is None:
                 pick = (mid, per, pr)
@@ -1018,8 +1160,16 @@ def main() -> None:
         admit_cell = ""
         if show_admission:
             admit_cell = f" {decisions[mid].reason or '—'} |"
+        free_details = free_candidate_details(mid, policy)
+        context_length = free_details[0] if free_details else None
+        ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
+        exposure = (free_details[1] if free_details else
+                    resolve_exposure(mid, free_models=policy["free_models"],
+                                     overrides=policy.get("exposure", {}))
+                    if mid.endswith(":free") or mid.startswith("opencode/")
+                    else "—")
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
-              f"— unresolved to a priced model | | | |{admit_cell}")
+              f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
 
     odd = {k: v for k, v in matches.items() if v in ("heuristic", "unresolved")}
     if odd:
@@ -1030,7 +1180,8 @@ def main() -> None:
                                    "— the deal tilts by preference)"),
                          ("summaries", "summaries (task-fit context; never taste)")):
         notes = policy.get(kind, {})
-        shown = [(mid, hint_for(mid, notes)) for mid, _ in ranked]
+        shown = [(mid, hint_for(mid, notes) if kind == "hints"
+                  else summary_for_candidate(mid, policy)) for mid, _ in ranked]
         shown = [(mid, note) for mid, note in shown if note]
         if shown:
             print(f"\n{header}:")

@@ -15,6 +15,7 @@
   "summaries": {
     "example/model-id": "EXAMPLE ENTRY - replace with a research summary: what the model is known for, its caveats, every claim cited. Summaries are produced and refreshed by the summaries-refresh procedure (research/README.md)."
   },
+  "free_models": {},
   "domains": {
     "research": [
       "research_report",

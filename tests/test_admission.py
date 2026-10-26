@@ -209,7 +209,8 @@ class CandidateFactsTests(unittest.TestCase):
     """candidate_for binds the policy's override map and free catalog into the
     candidate the gate judges; an empty policy is the safe default."""
 
-    POLICY = {"exposure": OVERRIDES, "free_models": FREE_MODELS}
+    POLICY = {"exposure": OVERRIDES, "free_models": FREE_MODELS,
+              "summaries": {"glm-5.3": "fixture summary"}}
 
     def test_unknown_free_route_binds_as_trains(self):
         facts = bind.candidate_for("z-ai/glm-5.4:free", self.POLICY)

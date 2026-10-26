@@ -25,7 +25,9 @@ to a rung on each candidate's ladder.
    the task-classification leaderboards and the daily token rankings, cached
    24h, and prices every candidate at live rates.
    Done when: candidates are ranked by their share of the domain's traffic,
-   prices and data timestamp shown.
+    prices and data timestamp shown. Cataloged OpenCode `opencode/*` models
+    also appear; OpenRouter `:free` routes retain their own slug. An
+    uncataloged or unsummarized Free route remains visible but is not selectable.
 
 3. **Order by task score.** Each candidate scores `share^α / cost^β` —
    popularity priced at its rung for the effort intent (α, β from `policy.json`
@@ -36,7 +38,7 @@ to a rung on each candidate's ladder.
    the output multiplier discounts toward `glance`'s in proportion to the rung
    achieved.
    Done when: candidates are in task order with share, score, price, context
-   window and rung visible.
+    window, Exposure and rung visible (Exposure is `—` for paid routes).
 
 4. **Judge task fit.** Score every candidate 0–5 for THIS task (fractions
    fine), from the summaries: 5 = summaries explicitly endorse it here;
@@ -96,6 +98,14 @@ to a rung on each candidate's ladder.
 - **Domains** — five, mapped to leaderboard tags in `policy.json`: research,
   writing, coding, orchestration, ops. A tag may serve two domains (a lens, not
   a partition). Edit the map there and nowhere else.
+
+- **Free catalog** — `policy.json`'s `free_models` maps id prefixes to
+  `context_length` (positive tokens), `exposure` (`no-retention`, `trains`, or
+  `local`), and optional `summary_ref` (an exact key in `summaries`). A catalog
+  entry without a resolving summary does not enter the candidate set. Ranked
+  OpenRouter `:free` routes use their own slug and need a catalog window;
+  unknown Free routes never play. OpenCode entries are listed from this
+  catalog, with no harness CLI probe.
 
 - **What popularity is** — revealed preference of real traffic: request share
   per task tag, with token share as the long-form weighting. It is not

@@ -520,6 +520,58 @@ class CliTests(unittest.TestCase):
         i_ghost = body.index("ghost/unknown-20260101")
         self.assertTrue(i_aug < i_apr < i_ghost)
 
+    def test_cataloged_opencode_candidate_shows_window_and_exposure(self):
+        policy = json.loads(json.dumps(POLICY))
+        policy["free_models"] = {
+            "opencode/flash": {"context_length": 262144,
+                               "exposure": "no-retention",
+                               "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+        out, _, code, _ = self.run_cli("--domain", "writing")
+        self.assertIsNone(code)
+        self.assertIn("opencode/flash", out)
+        row = next(line for line in out.splitlines()
+                   if line.startswith("|") and "opencode/flash" in line)
+        self.assertIn("256K | no-retention |", row)
+        self.assertIn("opencode/flash: eol summary", out)
+
+    def test_ranked_free_slug_is_not_replaced_by_paid_family(self):
+        policy = json.loads(json.dumps(POLICY))
+        policy["free_models"] = {
+            "vendor/model": {"context_length": 65536,
+                             "exposure": "trains",
+                             "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+        world = build_world()
+        world["models"].append(make_model("vendor/model:free", "0", "0", "0",
+                                           canonical="vendor/model"))
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": "vendor/model:free", "tag_usage_share": 0.01})
+        out, _, code, _ = self.run_cli("--domain", "writing", "--top", "1",
+                                       world=world)
+        self.assertIsNone(code)
+        self.assertIn("| vendor/model:free |", out)
+        row = next(line for line in out.splitlines()
+                   if line.startswith("|") and "vendor/model:free" in line)
+        self.assertIn("64K | trains |", row)
+        self.assertNotIn("| vendor/model |", out)
+
+    def test_uncatalogued_free_route_is_visible_but_never_picked(self):
+        world = build_world()
+        world["models"].append(make_model("vendor/unknown:free", "0", "0", "0"))
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": "vendor/unknown:free", "tag_usage_share": 0.2})
+        out, _, _, _ = self.run_cli("--domain", "writing", "--deal",
+                                    "--tickets", "12", world=world)
+        row = next(line for line in out.splitlines()
+                   if line.startswith("|") and "vendor/unknown:free" in line)
+        self.assertIn("catalog", row)
+        self.assertNotIn("default pick (top of task order): vendor/unknown:free", out)
+        deal = out.split("\ndeal (", 1)[1]
+        self.assertNotIn("vendor/unknown:free", deal)
+
     def test_canonical_resolution_regression_prices_august_endpoints(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
         self.assertIn("0.40–8.00 (2 eps, wide)", out)
