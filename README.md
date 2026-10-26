@@ -72,10 +72,13 @@ batch across the popular candidates instead of running one model for
 everything: eligibility stays popularity, the deal tilts by preference
 (`policy.json` `affinity`), and the seed makes the plan reproducible. One
 `bind.py --deal` invocation deals one ticket shape — a run's domain, effort,
-token profile and `--fit` combination — so tickets of the same shape share one
-task-fit assessment: the judgments are made once for the run and every ticket
-the deal draws inherits them. Groups that differ in any of the four are
-separate shapes, each dealt by its own invocation.
+token profile, `--fit` and `--sensitive` combination — so tickets of the same
+shape share one task-fit assessment: the judgments are made once for the run
+and every ticket the deal draws inherits them. Groups that differ in any of
+the five are separate shapes, each dealt by its own invocation. A Sensitive
+shape (its material trips the Secrets gate — SKILL.md step 1) is dealt with
+`--sensitive`: exposed candidates are excluded from its pick and deal,
+marked in the table, never hidden.
 
 ### Directly
 
