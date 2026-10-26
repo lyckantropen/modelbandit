@@ -99,6 +99,30 @@ class FreeCandidateTests(unittest.TestCase):
         self.assertNotIn("opencode/no-summary", share)
         self.assertNotIn("opencode/no-summary", models)
 
+    def test_ranked_free_route_admits_by_longest_prefix_summary(self):
+        policy = {
+            "free_models": {},
+            "summaries": {"nvidia/nemotron-3-ultra-550b": "family summary"},
+        }
+        mid = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        share, models = bind.merge_free_candidates(
+            {mid: 0.2},
+            {mid: {"id": mid, "context_length": 1_048_576,
+                   "pricing": {"prompt": "0", "completion": "0"}}},
+            policy["free_models"], policy["summaries"])
+        facts = bind.candidate_for(
+            mid, policy, model=models[mid])
+        self.assertEqual(share[mid], 0.2)
+        self.assertEqual(facts.context_length, 1_048_576)
+        self.assertTrue(bind.admit(bind.Shape(), facts).admitted)
+
+    def test_opencode_catalog_entry_still_requires_its_window_and_summary(self):
+        policy = {"free_models": {"opencode/model": {
+            "context_length": 65_536, "exposure": "trains"}},
+            "summaries": {}}
+        facts = bind.candidate_for("opencode/model", policy)
+        self.assertFalse(bind.admit(bind.Shape(), facts).admitted)
+
     def test_table_free_candidate_shows_window_and_exposure(self):
         self.assertEqual(bind.free_candidate_details(
             "opencode/flash", {"free_models": FREE_MODELS}),

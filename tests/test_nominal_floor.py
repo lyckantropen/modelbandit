@@ -94,6 +94,12 @@ class FreeRouteIdsTests(unittest.TestCase):
                                  "vendor/model"], {"free_models": FREE_MODELS}),
             {"vendor/model:free", "opencode/flash"})
 
+    def test_shared_free_route_predicate(self):
+        self.assertTrue(bind.is_free_route("vendor/model:free"))
+        self.assertTrue(bind.is_free_route("opencode/flash"))
+        self.assertTrue(bind.is_free_route("local-coder", local=True))
+        self.assertFalse(bind.is_free_route("local-coder"))
+
     def test_a_paid_route_is_never_a_free_route(self):
         self.assertEqual(bind.free_route_ids(["vendor/model"],
                                              {"free_models": FREE_MODELS}),

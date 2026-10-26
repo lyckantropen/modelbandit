@@ -28,7 +28,10 @@ to a rung on each candidate's ladder.
    readable from this machine's state — a mere path mention does not trip
    it; any one item does. The project file can tighten the default, never
    silently loosen it. The verdict is decided at collection — never a mood
-   declared mid-run.
+    declared mid-run. When working in the repository, use the pure
+    `scripts/bind.py` `secrets_gate(material, machine=..., rules=...)` function
+    to test and apply that verdict; pass relevant machine-state contents and
+    identifiers in `machine`.
    Done when: each input is stated or defaulted and none is guessed — the
    Secrets gate's verdict included; a Sensitive shape goes to the script as
    `--sensitive`.
@@ -42,8 +45,9 @@ to a rung on each candidate's ladder.
     silently probes LM Studio at `127.0.0.1:1234` each run; currently served
     local ids matched by `free_models` join that run's candidate set with the
     cataloged window and `local` Exposure. Probe results are not cached or
-    written to policy. An uncataloged or unsummarized Free route remains
-    visible but is not selectable.
+    written to policy. A Free route without a resolving summary remains
+    visible but is not selectable; OpenCode and local routes also need their
+    own catalog entries.
 
 3. **Order by task score.** Each candidate scores `share^α / cost^β` —
    popularity priced at its rung for the effort intent (α, β from `policy.json`
@@ -85,7 +89,10 @@ to a rung on each candidate's ladder.
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
    are made once for the run and every ticket the deal draws inherits them.
-   A run of a different shape is a different invocation.
+    A run of a different shape is a different invocation. Before assigning a
+    dealt Free slug, verify it resolves in the harness's model catalog (for
+    example, with `opencode models`); if it does not, substitute the nearest
+    cataloged sibling of the same family.
    Done when: a single task names one pick (score and fit both shown), or a
    batch names its deal with per-model ticket counts and a combined projection.
 
@@ -121,10 +128,12 @@ to a rung on each candidate's ladder.
 
 - **Free catalog** — `policy.json`'s `free_models` maps id prefixes to
   `context_length` (positive tokens), `exposure` (`no-retention`, `trains`, or
-  `local`), and optional `summary_ref` (an exact key in `summaries`). A catalog
-  entry without a resolving summary is never admitted. Ranked
-  OpenRouter `:free` routes use their own slug and need a catalog window;
-  unknown Free routes never play. OpenCode entries are listed from this
+  `local`), and optional `summary_ref` (an exact key in `summaries`).
+  `opencode/*` and local entries need their own window and a resolving summary.
+  Ranked OpenRouter `:free` routes use their own slug and may resolve a summary
+  by longest prefix without a `free_models` entry; their context window comes
+  from the OpenRouter model catalog when available. A Free route without a
+  resolving summary is never admitted. OpenCode entries are listed from this
   catalog. Entries with `local` Exposure are listed only while a matching id is
   served by the silent LM Studio probe; their context window and summary remain
   curated policy facts. Probe results join the in-memory model catalog for that
@@ -148,8 +157,9 @@ to a rung on each candidate's ladder.
   `scoring.free_floor` ($/M output, default $0.01) over the shape's output at
   the effort intent, one number for every Free route in the pool whatever its
   Exposure. It must sit above zero (no division by zero) and below every paid
-  ticket in the pool; a configured floor that breaks either bound is a loud
-  error, never a silent correction. Only the score uses it — the price columns
+  ticket in the pool; a non-positive or non-finite floor stops the run, while
+  a floor at or above the cheapest paid ticket warns and continues unchanged.
+  Only the score uses it — the price columns
   and the projection still report what a route really costs to run.
 
 - **Hints** — user observations in `policy.json`, structured: a `note` (shown

@@ -149,6 +149,8 @@ class CliTests(unittest.TestCase):
         argv = ["bind.py", "--policy", self.policy_path, *argv]
         with mock.patch("bind.fetch_json", side_effect=fake_fetch), \
                 mock.patch("bind.probe_local_models", return_value=local_models), \
+                mock.patch.object(bind, "CACHE_DIR",
+                                  os.path.join(self._tmp.name, "cache")), \
                 mock.patch.object(sys, "argv", argv), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
@@ -219,8 +221,49 @@ class CliTests(unittest.TestCase):
         self.assertIn("free-share-trends-to-zero", out)
         self.assertIn("writing", out)
         self.assertIn("0/100", out)
+        self.assertIn("no history", out)
         with open(self.policy_path, "rb") as f:
             self.assertEqual(f.read(), before)
+
+    def test_check_policy_tracks_zero_free_share_for_served_local_candidate(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["affinity"].update(blend_weight=0.0, eligibility_top_k=5)
+        pol["free_models"] = {
+            "local-coder": {"context_length": 262_144, "exposure": "local",
+                            "summary_ref": "deepseek/deepseek-v4-pro"},
+            "opencode/free-coder": {
+                "context_length": 262_144, "exposure": "no-retention",
+                "summary_ref": "deepseek/deepseek-v4-pro"},
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        local = {"local-coder": {"id": "local-coder",
+                                 "context_length": 262_144}}
+        world = build_world()
+        world["classifications"]["classifications"] = [{
+            "tag": "content_writing", "usage_share": 1.0,
+            "models": [
+                {"id": "deepseek/deepseek-v4-pro-20260813",
+                 "tag_usage_share": 0.5},
+                {"id": "deepseek/deepseek-v4-pro-20260423",
+                 "tag_usage_share": 0.3},
+                {"id": "deepseek/deepseek-v4-flash-20260101",
+                 "tag_usage_share": 0.2},
+            ]}]
+
+        first, _, code, _ = self.run_cli("--check-policy", world=world,
+                                        local_models=local)
+        second, _, code2, _ = self.run_cli("--check-policy", world=world,
+                                           local_models=local)
+
+        self.assertIsNone(code)
+        self.assertIsNone(code2)
+        self.assertIn("local-coder", first)
+        self.assertIn("opencode/free-coder", first)
+        self.assertIn("no history", first)
+        self.assertIn("free share 0 for 2 consecutive checks", second)
 
     def test_check_policy_does_not_flag_a_free_route_that_gets_share(self):
         pol = json.loads(json.dumps(POLICY))
@@ -788,18 +831,20 @@ class CliTests(unittest.TestCase):
         self.assertIn("| 416.67 |", row)
         self.assertIn("| local |", row)
 
-    def test_a_floor_above_the_cheapest_paid_ticket_stops_the_run(self):
+    def test_a_floor_above_the_cheapest_paid_ticket_warns_and_continues(self):
         # A configured floor of $5/M output is $0.06/ticket at the authoring
-        # profile — above the pool's cheapest paid ticket. That is an invalid
-        # floor: the run stops and says so, never a silent clamp downward.
+        # profile — above the pool's cheapest paid ticket. The run warns and
+        # continues with that configured value, never clamping it downward.
         pol = json.loads(json.dumps(POLICY))
         pol["scoring"]["free_floor"] = 5.0
         pol["free_models"] = {"vendor/model": self.FREE_CATALOG["vendor/model"]}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
         world = self.free_world(("vendor/model:free", 0.5))
-        _, _, code, _ = self.run_cli("--domain", "writing", world=world)
-        self.assertIn("nominal floor", code)
+        out, err, code, _ = self.run_cli("--domain", "writing", world=world)
+        self.assertIsNone(code)
+        self.assertIn("Nominal floor", err)
+        self.assertIn("default pick", out)
 
     def test_free_route_in_the_pool_trips_the_re_tune_verdict(self):
         # Four paid models at one price are in balance (top-1 25%, top-2 50%).

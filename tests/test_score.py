@@ -35,8 +35,8 @@ class TaskScoreTests(unittest.TestCase):
 class EffectiveCostTests(unittest.TestCase):
     """The score's cost term for one pool: Free routes at the Nominal floor,
     every paid ticket at its own price. The floor is above zero, so the term
-    can never divide by zero, and below every paid ticket in the pool; a
-    configured floor that breaks either bound is a loud error, never a clamp."""
+    can never divide by zero; an out-of-bound floor warns and remains
+    configured rather than being clamped."""
 
     FLOOR = 0.00012  # $0.01/M output over the authoring profile's 12K out
 
@@ -87,13 +87,19 @@ class EffectiveCostTests(unittest.TestCase):
                                    free_floor=self.FLOOR, free={"a", "b"})
         self.assertEqual(eff, {"a": self.FLOOR, "b": self.FLOOR})
 
-    def test_floor_at_or_above_the_cheapest_paid_ticket_fails_loudly(self):
+    def test_floor_at_or_above_cheapest_paid_ticket_warns_and_continues(self):
+        import io
+        from contextlib import redirect_stderr
+
         for floor in (0.02, 0.5):
-            with self.subTest(floor=floor), self.assertRaisesRegex(
-                    SystemExit, "nominal floor"):
-                bind.effective_costs({"vendor/model:free": 0.0, "paid": 0.02},
-                                     free_floor=floor,
-                                     free={"vendor/model:free"})
+            with self.subTest(floor=floor):
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    result = bind.effective_costs(
+                        {"vendor/model:free": 0.0, "paid": 0.02},
+                        free_floor=floor, free={"vendor/model:free"})
+                self.assertEqual(result["vendor/model:free"], floor)
+                self.assertIn("Nominal floor", err.getvalue())
 
     def test_non_positive_or_unusable_floor_fails_loudly(self):
         for floor in (0.0, -0.01, float("inf"), float("nan")):

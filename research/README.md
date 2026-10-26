@@ -59,12 +59,14 @@ churns with them instead of freezing.
   the default.
 - **Admit with its facts.** An entry is keyed by id-prefix and carries
   `context_length`, `exposure`, and an optional `summary_ref` naming the
-  `summaries` key that judges task fit for the family. Nothing auto-admits:
-  admit only with a summary to point at, researched per sections 1–3.
+  `summaries` key that judges task fit for the family. Admission requires a
+  resolving summary, found by longest-prefix match in `summaries` or by the
+  entry's explicit `summary_ref`, researched per sections 1–3.
 - **Exposure comes from the provider's own docs.** Take `exposure` from the
   provider's documented data use, cited in the summary — "collected data may
-  be used to improve the model" or "do not submit personal or confidential
-  data" is `trains`; a documented no-retention statement is `no-retention`;
+  be used to improve the model" or the verbatim quote from NVIDIA's endpoint
+  terms, "do not submit personal or confidential data," is `trains`; a
+  documented no-retention statement is `no-retention`;
   served on this machine is `local`. A route the catalog does not carry
   stays `trains` until documented otherwise. A user's explicit `exposure`
   override in `policy.json` outranks the catalog (longest prefix wins).

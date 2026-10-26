@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import collections
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -62,6 +63,7 @@ BASES = ("worst", "primary", "best")
 DEFAULT_FREE_FLOOR = 0.01
 FREE_SHARE_CHECK_TICKETS = 100
 FREE_SHARE_CHECK_SEED = "policy-check-free-share"
+FREE_SHARE_HISTORY_LIMIT = 10
 
 DEFAULT_POLICY = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "policy.json"
@@ -151,6 +153,60 @@ def probe_local_models(fetcher=None) -> dict[str, dict]:
 
 def norm_id(model_id: str) -> str:
     return model_id.removeprefix("openrouter/")
+
+
+def is_free_route(mid: str, *, local: bool = False) -> bool:
+    """Whether this serving identity is Free, independent of its price."""
+    return local or mid.startswith("opencode/") or mid.endswith(":free")
+
+
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"(?i)\b(?:password|passwd|token|api[_-]?key|access[_-]?token|"
+               r"secret[_-]?key)\b\s*[:=]\s*['\"]?[^\s,'\"]{4,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+)
+
+
+def _string_values(value) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [part for part in value if isinstance(part, str) and part]
+    if isinstance(value, dict):
+        return [part for part in value.values() if isinstance(part, str) and part]
+    return []
+
+
+def secrets_gate(material: str, *, machine: dict, rules: dict | None = None) -> bool:
+    """Pure Secrets gate verdict: True when sensitive content is included.
+
+    ``machine`` supplies content and identifiers readable from machine state
+    under ``outside_file_contents``, ``identifiers``, ``passwords``,
+    ``tokens``, and ``keys``. Project ``rules`` may add literal ``phrases``
+    and regular-expression ``patterns``; they cannot disable the built-ins.
+    A path mention by itself is not a content inclusion.
+    """
+    if not isinstance(material, str) or not material:
+        return False
+    machine = machine if isinstance(machine, dict) else {}
+    if any(value in material
+           for field in ("outside_file_contents", "identifiers", "passwords",
+                         "tokens", "keys")
+           for value in _string_values(machine.get(field))):
+        return True
+    if any(pattern.search(material) for pattern in _SECRET_VALUE_PATTERNS):
+        return True
+    if isinstance(rules, dict):
+        if any(value in material for value in _string_values(rules.get("phrases"))):
+            return True
+        for source in _string_values(rules.get("patterns")):
+            try:
+                if re.search(source, material):
+                    return True
+            except re.error:
+                continue
+    return False
 
 
 def resolve_model(models: dict, by_canon: dict, permaslug: str):
@@ -453,10 +509,11 @@ def load_free_models(policy: dict) -> dict:
     return catalog
 
 
-def _free_summary(entry: dict, summaries: dict) -> bool:
-    """A Free route is selectable only when its catalog reference resolves."""
+def _free_summary(entry: dict, summaries: dict, mid: str | None = None) -> bool:
+    """Whether a Free route has a resolvable explicit or prefix summary."""
     ref = entry.get("summary_ref")
-    return isinstance(ref, str) and bool(summaries.get(ref))
+    return ((isinstance(ref, str) and bool(summaries.get(ref)))
+            or (mid is not None and bool(hint_for(mid, summaries))))
 
 
 def _free_model_record(mid: str, entry: dict, source: dict | None = None) -> dict:
@@ -486,7 +543,7 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
     merged_models = {mid: dict(model) for mid, model in models.items()}
 
     for mid in list(merged_share):
-        if not mid.endswith(":free"):
+        if not is_free_route(mid):
             continue
         match = longest_prefix_match(mid, free_models)
         if match is None:
@@ -498,7 +555,8 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
         merged_models[mid] = _free_model_record(mid, entry, source)
 
     for prefix, entry in free_models.items():
-        if not prefix.startswith("opencode/") or not _free_summary(entry, summaries):
+        if (not is_free_route(prefix)
+                or not _free_summary(entry, summaries, prefix)):
             continue
         merged_share.setdefault(prefix, 0.0)
         merged_models.setdefault(prefix, _free_model_record(prefix, entry))
@@ -541,7 +599,7 @@ def local_candidate_ids(served: dict, free_models: dict) -> set[str]:
 def free_candidate_details(mid: str, policy: dict, *, local: bool = False
                            ) -> tuple[int, str] | None:
     """Return the curated window and Exposure for a Free route, if cataloged."""
-    if not (local or mid.endswith(":free") or mid.startswith("opencode/")):
+    if not is_free_route(mid, local=local):
         return None
     match = longest_prefix_match(mid, policy.get("free_models", {}))
     if match is None:
@@ -555,7 +613,7 @@ def free_candidate_details(mid: str, policy: dict, *, local: bool = False
 def summary_for_candidate(mid: str, policy: dict) -> str | None:
     """Resolve a Free route's explicit family summary, else its direct summary."""
     match = longest_prefix_match(mid, policy.get("free_models", {}))
-    if match is not None and (mid.endswith(":free") or mid.startswith("opencode/")
+    if match is not None and (is_free_route(mid)
                               or match[1].get("exposure") == "local"):
         ref = match[1].get("summary_ref")
         if ref:
@@ -565,7 +623,7 @@ def summary_for_candidate(mid: str, policy: dict) -> str | None:
 
 def task_score(share: float, cost: float, alpha: float, beta: float) -> float:
     """share^alpha / cost^beta. cost must already be floored (see
-    effective_costs) so free models cannot win on division alone."""
+    effective_costs) so Free routes cannot win on division alone."""
     return share ** alpha / cost ** beta
 
 
@@ -574,8 +632,8 @@ def nominal_floor_cost(free_floor: float, out_tokens: int,
     """A Free route's ticket cost in the score: the Nominal floor rate over the
     shape's output tokens at the effort multiplier.
 
-    Output only — a Free route's serving costs nothing, so this is a shadow
-    price for the cost term, never a quote. It is one number for the shape:
+    Output only — a Free route's serving costs nothing, so this Nominal floor
+    is for the cost term, never a quote. It is one number for the shape:
     every Free route in the pool pays it, whatever its Exposure.
     """
     return out_tokens * multiplier * free_floor / 1e6
@@ -587,14 +645,12 @@ def effective_costs(costs: dict, *, free_floor: float,
     every paid ticket at its own price.
 
     `free` names the pool's Free routes — a serving fact (see free_route_ids),
-    never inferred from a zero price — and `free_floor` is their ticket cost
-    (see nominal_floor_cost). The floor holds two bounds, and a configured
-    floor that breaks either is a loud error, never a silent clamp: strictly
-    above zero, so the cost term cannot divide by zero, and strictly below
-    every paid ticket in the pool, so a Free route wins on fit and context
-    rather than on arithmetic. A pool with no Free route judges no floor; a
-    paid ticket that priced at nothing keeps the pool's cheapest paid ticket,
-    as it always has.
+    never inferred from a zero price — and `free_floor` is their Nominal floor
+    ticket cost (see nominal_floor_cost). The floor must be strictly above
+    zero, so the cost term cannot divide by zero. If it is not below every
+    paid ticket in the pool, warn and continue with the configured floor. A
+    pool with no Free route judges no floor; a paid ticket that priced at
+    nothing keeps the pool's cheapest paid ticket, as it always has.
     """
     paid = [v for mid, v in costs.items() if mid not in free and v > 0]
     if any(mid in free for mid in costs):
@@ -602,10 +658,9 @@ def effective_costs(costs: dict, *, free_floor: float,
             raise SystemExit(f"nominal floor must be a positive, finite ticket "
                              f"cost; got ${free_floor:.6f}")
         if paid and min(paid) <= free_floor:
-            raise SystemExit(
-                f"nominal floor ${free_floor:.6f} is not below the pool's "
-                f"cheapest paid ticket (${min(paid):.6f}) — lower "
-                f"scoring.free_floor")
+            print(f"warning: Nominal floor ${free_floor:.6f} is not below the "
+                  f"pool's cheapest paid ticket (${min(paid):.6f}); using "
+                  "the configured floor", file=sys.stderr)
     cheapest_paid = min(paid, default=1.0)
     return {mid: (free_floor if mid in free else (v if v > 0 else cheapest_paid))
             for mid, v in costs.items()}
@@ -706,7 +761,7 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     entry = match[1] if match is not None else {}
     if isinstance(entry, dict) and entry.get("exposure"):
         return known_exposure(mid, entry["exposure"])
-    if mid.endswith(":free"):
+    if is_free_route(mid):
         return "trains"
     return "no-retention"
 
@@ -727,7 +782,7 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     serving price class and context window."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
-    is_free = local or mid.startswith("opencode/") or mid.endswith(":free")
+    is_free = is_free_route(mid, local=local)
     context_length = (catalog_entry.get("context_length")
                       if isinstance(catalog_entry, dict) else None)
     if context_length is None and model:
@@ -738,19 +793,20 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                           overrides=policy.get("exposure", {}), local=local),
                       is_free=is_free,
                       context_length=context_length,
-                      cataloged=(not is_free or (catalog_match is not None
-                                and _free_summary(catalog_entry,
-                                                  policy.get("summaries", {})))))
+                       cataloged=(not is_free or (
+                           _free_summary(catalog_entry,
+                                         policy.get("summaries", {}), mid)
+                           and (not local and not mid.startswith("opencode/")
+                                or catalog_match is not None))))
 
 
 def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
     """The Free routes among `mids`, by the serving rule: a ':free' slug, an
     OpenCode 'opencode/' model, or one this machine serves (`local`) — the
-    verdict candidate_for reports as is_free. Never the price: a paid route
+    route predicate reports as Free. Never the price: a paid route
     may be cheap, and Free is what the harness serves for nothing."""
     local = set(local)
-    return {mid for mid in mids
-            if candidate_for(mid, policy, local=mid in local).is_free}
+    return {mid for mid in mids if is_free_route(mid, local=mid in local)}
 
 
 def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, int]:
@@ -801,7 +857,8 @@ def context_gate(shape: Shape, candidate: Candidate) -> Decision:
 def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
     """Only curated, summary-backed Free routes can enter the Deal."""
     if candidate.is_free and not candidate.cataloged:
-        return Decision(False, "free route requires a catalog entry and summary")
+        return Decision(False, "free route requires a catalog entry and "
+                        "summary where applicable (summary resolution is required)")
     return ADMITTED
 
 
@@ -915,6 +972,58 @@ def policy_age_days(policy_path: str) -> int | None:
         return None
 
 
+def record_free_share_measurement(shape: dict, zero: bool) -> tuple[bool, int]:
+    """Persist the last measurements for a non-Sensitive ticket shape.
+
+    Returns (had_prior_measurement, trailing_zero_count). History is diagnostic
+    cache data only; it never changes policy or Deal eligibility.
+    """
+    encoded = json.dumps(shape, sort_keys=True, separators=(",", ":"))
+    key = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    path = os.path.join(CACHE_DIR, "free-share-history.json")
+    try:
+        with open(path) as f:
+            history = json.load(f)
+        if not isinstance(history, dict):
+            history = {}
+    except (OSError, ValueError):
+        history = {}
+    previous = history.get(key, {})
+    if isinstance(previous, list):
+        # Accept an early list-only cache entry without losing its trend.
+        measurements = previous
+        previous_streak = 0
+        for item in reversed(previous):
+            if item is not True:
+                break
+            previous_streak += 1
+    elif isinstance(previous, dict):
+        measurements = previous.get("measurements", [])
+        previous_streak = previous.get("zero_streak", 0)
+        if isinstance(previous_streak, bool) or not isinstance(previous_streak, int):
+            previous_streak = 0
+        if not previous_streak and isinstance(measurements, list):
+            for item in reversed(measurements):
+                if item is not True:
+                    break
+                previous_streak += 1
+    else:
+        measurements, previous_streak = [], 0
+    if not isinstance(measurements, list):
+        measurements = []
+    had_prior = bool(measurements)
+    measurements = (measurements + [bool(zero)])[-FREE_SHARE_HISTORY_LIMIT:]
+    zero_streak = previous_streak + 1 if zero else 0
+    history[key] = {"measurements": measurements,
+                    "zero_streak": zero_streak}
+    pending = path + ".tmp"
+    with open(pending, "w") as f:
+        json.dump(history, f)
+    os.replace(pending, path)
+    return had_prior, zero_streak
+
+
 def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
     """Rank models by their share of the domain's classified traffic."""
     share = collections.defaultdict(float)
@@ -926,7 +1035,7 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
         known_tags.add(c["tag"])
         for m in c["models"]:
             raw_id = norm_id(m["id"])
-            if raw_id.endswith(":free"):
+            if is_free_route(raw_id):
                 # A Free route is its own serving identity, even if the API's
                 # canonical map points it at the paid family model.
                 resolved = models.get(raw_id)
@@ -942,7 +1051,8 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
 
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
-                     intent: str, basis: str, config: PolicyConfig) -> None:
+                     intent: str, basis: str, config: PolicyConfig,
+                     local_ids=()) -> None:
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -950,8 +1060,14 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     ranked_by_domain: dict[str, list[str]] = {}
     share_by_domain: dict[str, dict] = {}
     all_ranked: set[str] = set()
+    local_ids = set(local_ids)
     for name, tags in domains.items():
         share, _, _ = domain_candidates(classif, tags, models, by_canon)
+        share, _ = merge_free_candidates(
+            share, models, policy.get("free_models", {}), summaries)
+        for mid in local_ids:
+            if mid in models:
+                share.setdefault(mid, 0.0)
         share_by_domain[name] = share
         ranked_by_domain[name] = [mid for mid, _ in
                                   sorted(share.items(), key=lambda kv: -kv[1])[:top]]
@@ -984,8 +1100,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
             if hit:
                 coverage.append(f"{key} ranks in {name} ({hit}) but has no fit there")
 
-    # `--check-policy` is stateless: report a zero in a reproducible diagnostic
-    # Deal for the current snapshot rather than claiming a historical trend.
+    # The safe diagnostic Deal is report-only. Its per-shape history is cache
+    # data and cannot mutate policy or eligibility.
     free_share_zeros = []
     for name in domains:
         profile_name = DOMAIN_PROFILE.get(name, "agentic")
@@ -996,16 +1112,22 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         aff = domain_weights(signals, name, config.factors)
         admitted = frozenset(
             mid for mid in share_by_domain[name]
-            if admit(shape, candidate_for(mid, policy, model=models.get(mid))).admitted)
+            if admit(shape, candidate_for(
+                mid, policy, local=mid in local_ids,
+                model=models.get(mid))).admitted)
         pool = eligibility_pool(share_by_domain[name], models, aff, pool_k,
                                 admitted)
-        free = free_route_ids((mid for mid, _ in pool), policy)
+        free = free_route_ids((mid for mid, _ in pool), policy,
+                              local=local_ids)
         if not free:
             continue
         costs = {}
         for mid, _ in pool:
             model = models[mid]
-            pricing = price_model(model, endpoint_pricings(mid, False),
+            eps = ([] if (is_free_route(mid, local=mid in local_ids)
+                          and (mid.startswith("opencode/") or mid in local_ids))
+                   else endpoint_pricings(mid, False))
+            pricing = price_model(model, eps,
                                   in_tok, out_tok, cached, mult_for(model, intent))
             costs[mid] = pricing[basis]
         effective = effective_costs(
@@ -1023,9 +1145,28 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                            tickets=FREE_SHARE_CHECK_TICKETS,
                            fit_adjusted_task_scores=scores,
                            admitted=admitted))
-        free_tickets, dealt_tickets = deal_free_share(rows, policy)
+        free_tickets, dealt_tickets = deal_free_share(
+            rows, policy, local=local_ids)
+        shape_key = {"domain": name, "profile": profile_name,
+                     "input_tokens": in_tok, "output_tokens": out_tok,
+                     "cached_share": cached, "effort": intent,
+                     "pricing_basis": basis, "sensitive": False,
+                     "eligibility_top_k": pool_k,
+                     "blend_weight": config.deal.blend_weight,
+                     "scoring": {"alpha": config.alpha, "beta": config.beta,
+                                 "free_floor": config.free_floor},
+                     "context_gate": {
+                         "headroom": config.context.headroom,
+                         "margin": config.context.margin},
+                     "eligible_free_routes": sorted(free),
+                     "domain_hints": {
+                         key: value for key, value in signals.items()
+                         if name in value.get("fit", {})}}
+        had_history, zero_streak = record_free_share_measurement(
+            shape_key, dealt_tickets > 0 and free_tickets == 0)
         if dealt_tickets and free_tickets == 0:
-            free_share_zeros.append((name, profile_name, dealt_tickets))
+            free_share_zeros.append((name, profile_name, dealt_tickets,
+                                     had_history, zero_streak))
     age = policy_age_days(policy_path)
 
     print("# Policy check\n")
@@ -1050,13 +1191,19 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     for line in sorted(coverage) or ["— none"]:
         print(f"- {line}")
 
-    print("\n## Free-share trends to zero (current snapshot; not longitudinal)")
-    print("Stateless check: a reproducible 100-ticket diagnostic Deal, not a "
-          "comparison with prior refreshes.")
+    print("\n## Free-share trends to zero (safe-shape history)")
+    print(f"History retains the last {FREE_SHARE_HISTORY_LIMIT} measurements "
+          "per shape; this report does not change policy.")
     for signal in free_share_zeros:
-        name, profile_name, tickets = signal
+        name, profile_name, tickets, had_history, streak = signal
+        if streak >= 2:
+            detail = f"free share 0 for {streak} consecutive checks"
+        elif not had_history:
+            detail = "free share 0 (snapshot; no history)"
+        else:
+            detail = "free share 0 for 1 consecutive check"
         print(f"- free-share-trends-to-zero: {name} ({profile_name}, {intent}, "
-              f"non-Sensitive) — eligible Free routes drew 0/{tickets} tickets")
+              f"non-Sensitive) — {detail} (0/{tickets} tickets)")
     if not free_share_zeros:
         print("- — none")
 
@@ -1081,14 +1228,17 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         costs = {}
         for mid, s in pool:
             m_mult = mult_for(models[mid], intent)
-            pricing = price_model(models[mid], endpoint_pricings(mid, False),
+            eps = ([] if (is_free_route(mid, local=mid in local_ids)
+                          and (mid.startswith("opencode/") or mid in local_ids))
+                   else endpoint_pricings(mid, False))
+            pricing = price_model(models[mid], eps,
                                   in_tok, out_tok, cached, m_mult)
             costs[mid] = pricing[basis]
         eff = effective_costs(
             costs,
             free_floor=nominal_floor_cost(config.free_floor, out_tok,
                                           EFFORT_MULTIPLIERS[intent]),
-            free=free_route_ids(costs, policy))
+            free=free_route_ids(costs, policy, local=local_ids))
         masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
         t1, t2 = mass_balance(masses)
         ok = (thresholds["top1_min"] <= t1 <= thresholds["top1_max"]
@@ -1197,10 +1347,18 @@ def main() -> None:
     classif = fetch_json(CLASS_URL, "classifications.json", auth=True,
                          refresh=args.refresh)["data"]
     if args.check_policy:
+        share, models = merge_free_candidates(
+            {}, models, policy["free_models"], policy.get("summaries", {}))
+        # Check-policy sees this invocation's same local candidates as a domain
+        # run, but still performs no persistent policy update.
+        served_local = probe_local_models()
+        local_ids = local_candidate_ids(served_local, policy["free_models"])
+        _, models = merge_local_candidates(
+            share, models, served_local, policy["free_models"])
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
-                         config)
+                         config, local_ids=local_ids)
         return
 
     tags = domains[args.domain]
@@ -1225,7 +1383,7 @@ def main() -> None:
     share, models = merge_local_candidates(
         share, models, served_local, policy["free_models"])
     for mid in share:
-        if mid.endswith(":free") and mid in models:
+        if is_free_route(mid) and mid in models:
             matches[mid] = "catalog"
     missing = set(tags) - known_tags
     if missing:
@@ -1291,8 +1449,7 @@ def main() -> None:
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
     ranked_ids = {mid for mid, _ in ranked}
     ranked.extend((mid, share[mid]) for mid in sorted(share)
-                  if (mid.startswith("opencode/") or mid.endswith(":free")
-                      or mid in local_ids)
+                  if is_free_route(mid, local=mid in local_ids)
                   and mid not in ranked_ids)
     table_mids = {mid for mid, _ in ranked}
     priced = {}
@@ -1302,7 +1459,8 @@ def main() -> None:
         m = models.get(mid)
         if not m:
             continue
-        eps = ([] if mid.startswith("opencode/") or mid in local_ids
+        eps = ([] if (is_free_route(mid, local=mid in local_ids)
+                      and (mid.startswith("opencode/") or mid in local_ids))
                else endpoint_pricings(mid, args.refresh))
         pr = price_model(m, eps,
                          in_tok, out_tok, cached,
@@ -1348,8 +1506,7 @@ def main() -> None:
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
         exposure = (free_details[1] if free_details else
                     candidate_for(mid, policy, model=m).exposure
-                    if mid.endswith(":free") or mid.startswith("opencode/")
-                    or mid in local_ids
+                    if is_free_route(mid, local=mid in local_ids)
                     else "—")
         ladder = effort_ladder(m)
         rung = resolve_rung(ladder, args.effort)
@@ -1384,8 +1541,7 @@ def main() -> None:
         exposure = (free_details[1] if free_details else
                     resolve_exposure(mid, free_models=policy["free_models"],
                                      overrides=policy.get("exposure", {}))
-                     if mid.endswith(":free") or mid.startswith("opencode/")
-                     or mid in local_ids
+                     if is_free_route(mid, local=mid in local_ids)
                      else "—")
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
