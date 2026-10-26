@@ -38,8 +38,12 @@ to a rung on each candidate's ladder.
    24h, and prices every candidate at live rates.
    Done when: candidates are ranked by their share of the domain's traffic,
     prices and data timestamp shown. Cataloged OpenCode `opencode/*` models
-    also appear; OpenRouter `:free` routes retain their own slug. An
-    uncataloged or unsummarized Free route remains visible but is not selectable.
+    also appear; OpenRouter `:free` routes retain their own slug. The script
+    silently probes LM Studio at `127.0.0.1:1234` each run; currently served
+    local ids matched by `free_models` join that run's candidate set with the
+    cataloged window and `local` Exposure. Probe results are not cached or
+    written to policy. An uncataloged or unsummarized Free route remains
+    visible but is not selectable.
 
 3. **Order by task score.** Each candidate scores `share^α / cost^β` —
    popularity priced at its rung for the effort intent (α, β from `policy.json`
@@ -114,10 +118,13 @@ to a rung on each candidate's ladder.
 - **Free catalog** — `policy.json`'s `free_models` maps id prefixes to
   `context_length` (positive tokens), `exposure` (`no-retention`, `trains`, or
   `local`), and optional `summary_ref` (an exact key in `summaries`). A catalog
-  entry without a resolving summary does not enter the candidate set. Ranked
+  entry without a resolving summary is never admitted. Ranked
   OpenRouter `:free` routes use their own slug and need a catalog window;
   unknown Free routes never play. OpenCode entries are listed from this
-  catalog, with no harness CLI probe.
+  catalog. Entries with `local` Exposure are listed only while a matching id is
+  served by the silent LM Studio probe; their context window and summary remain
+  curated policy facts. Probe results join the in-memory model catalog for that
+  invocation only. A missing server has no effect on output.
 
 - **What popularity is** — revealed preference of real traffic: request share
   per task tag, with token share as the long-form weighting. It is not

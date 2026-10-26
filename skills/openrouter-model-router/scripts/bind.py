@@ -25,6 +25,7 @@ import time
 import urllib.request
 
 MODELS_URL = "https://openrouter.ai/api/v1/models"
+LOCAL_MODELS_URL = "http://127.0.0.1:1234/v1/models"
 CLASS_URL = "https://openrouter.ai/api/v1/classifications/task?window=7d"
 RANK_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "modelbind")
@@ -104,6 +105,40 @@ def fetch_json(url: str, cache_name: str, *, auth: bool, refresh: bool):
     with open(cache_path, "w") as f:
         json.dump(data, f)
     return data
+
+
+def probe_local_models(fetcher=None) -> dict[str, dict]:
+    """Discover LM Studio models for this run; failures are silent.
+
+    This is deliberately not cached: the local server and its loaded models can
+    change between invocations. ``fetcher`` accepts the URL and returns decoded
+    JSON, keeping the probe deterministic and network-free in unit tests.
+    """
+    if fetcher is None:
+        def fetcher(url):
+            with urllib.request.urlopen(url, timeout=1) as response:
+                return json.load(response)
+
+    try:
+        payload = fetcher(LOCAL_MODELS_URL)
+    except Exception:
+        return {}
+    rows = payload.get("data", []) if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return {}
+    served = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        mid = row.get("id")
+        if not isinstance(mid, str) or not mid.strip():
+            continue
+        model = {"id": mid}
+        window = row.get("context_length")
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            model["context_length"] = window
+        served[mid] = model
+    return served
 
 
 def norm_id(model_id: str) -> str:
@@ -454,21 +489,57 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
     return merged_share, merged_models
 
 
-def free_candidate_details(mid: str, policy: dict) -> tuple[int, str] | None:
+def merge_local_candidates(share: dict, models: dict, served: dict,
+                           free_models: dict) -> tuple[dict, dict]:
+    """Join this run's served local ids to the curated Free catalog.
+
+    Served ids without a local Exposure catalog entry are ignored. Cataloged
+    served ids remain visible even without a summary, but the admission seam
+    requires that summary before they can be picked or dealt.
+    """
+    merged_share = dict(share)
+    merged_models = {mid: dict(model) for mid, model in models.items()}
+    for mid in served:
+        match = longest_prefix_match(mid, free_models)
+        if match is None:
+            continue
+        entry = match[1]
+        if not isinstance(entry, dict) or entry.get("exposure") != "local":
+            continue
+        merged_share.setdefault(mid, 0.0)
+        # The curated context window is policy; the probe establishes that this
+        # candidate is currently served. Runtime metadata is not policy.
+        merged_models[mid] = _free_model_record(mid, entry, served[mid])
+    return merged_share, merged_models
+
+
+def local_candidate_ids(served: dict, free_models: dict) -> set[str]:
+    """Served ids matched by a catalog entry whose Exposure is ``local``."""
+    return {mid for mid in served
+            if (match := longest_prefix_match(mid, free_models)) is not None
+            and isinstance(match[1], dict)
+            and match[1].get("exposure") == "local"}
+
+
+def free_candidate_details(mid: str, policy: dict, *, local: bool = False
+                           ) -> tuple[int, str] | None:
     """Return the curated window and Exposure for a Free route, if cataloged."""
-    if not (mid.endswith(":free") or mid.startswith("opencode/")):
+    if not (local or mid.endswith(":free") or mid.startswith("opencode/")):
         return None
     match = longest_prefix_match(mid, policy.get("free_models", {}))
     if match is None:
         return None
     entry = match[1]
+    if local and entry.get("exposure") != "local":
+        return None
     return entry["context_length"], entry["exposure"]
 
 
 def summary_for_candidate(mid: str, policy: dict) -> str | None:
     """Resolve a Free route's explicit family summary, else its direct summary."""
     match = longest_prefix_match(mid, policy.get("free_models", {}))
-    if match is not None and (mid.endswith(":free") or mid.startswith("opencode/")):
+    if match is not None and (mid.endswith(":free") or mid.startswith("opencode/")
+                              or match[1].get("exposure") == "local"):
         ref = match[1].get("summary_ref")
         if ref:
             return policy.get("summaries", {}).get(ref)
@@ -1017,6 +1088,12 @@ def main() -> None:
     share, matches, known_tags = domain_candidates(classif, tags, models, by_canon)
     share, models = merge_free_candidates(
         share, models, policy["free_models"], policy.get("summaries", {}))
+    # The local discovery is a live, per-run input, not persistent catalog
+    # state. Only served ids matched to an Exposure=local policy entry join.
+    served_local = probe_local_models()
+    local_ids = local_candidate_ids(served_local, policy["free_models"])
+    share, models = merge_local_candidates(
+        share, models, served_local, policy["free_models"])
     for mid in share:
         if mid.endswith(":free") and mid in models:
             matches[mid] = "catalog"
@@ -1060,7 +1137,8 @@ def main() -> None:
                   context_headroom=config.context.headroom,
                   context_margin=config.context.margin)
     decisions = {mid: admit(shape, candidate_for(
-        mid, policy, model=models.get(mid))) for mid in share}
+        mid, policy, local=mid in local_ids, model=models.get(mid)))
+        for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
     show_admission = shape.sensitive or any(
         not decision.admitted for decision in decisions.values())
@@ -1083,7 +1161,8 @@ def main() -> None:
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
     ranked_ids = {mid for mid, _ in ranked}
     ranked.extend((mid, share[mid]) for mid in sorted(share)
-                  if (mid.startswith("opencode/") or mid.endswith(":free"))
+                  if (mid.startswith("opencode/") or mid.endswith(":free")
+                      or mid in local_ids)
                   and mid not in ranked_ids)
     table_mids = {mid for mid, _ in ranked}
     priced = {}
@@ -1093,7 +1172,8 @@ def main() -> None:
         m = models.get(mid)
         if not m:
             continue
-        eps = [] if mid.startswith("opencode/") else endpoint_pricings(mid, args.refresh)
+        eps = ([] if mid.startswith("opencode/") or mid in local_ids
+               else endpoint_pricings(mid, args.refresh))
         pr = price_model(m, eps,
                          in_tok, out_tok, cached,
                          mult_for(m, args.effort))
@@ -1126,12 +1206,13 @@ def main() -> None:
         out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
         if pr["n_eps"] == 0:
             out_cell += " (no endpoint data)"
-        free_details = free_candidate_details(mid, policy)
+        free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else m.get("context_length")
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
         exposure = (free_details[1] if free_details else
                     candidate_for(mid, policy, model=m).exposure
                     if mid.endswith(":free") or mid.startswith("opencode/")
+                    or mid in local_ids
                     else "—")
         ladder = effort_ladder(m)
         rung = resolve_rung(ladder, args.effort)
@@ -1160,14 +1241,15 @@ def main() -> None:
         admit_cell = ""
         if show_admission:
             admit_cell = f" {decisions[mid].reason or '—'} |"
-        free_details = free_candidate_details(mid, policy)
+        free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else None
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
         exposure = (free_details[1] if free_details else
                     resolve_exposure(mid, free_models=policy["free_models"],
                                      overrides=policy.get("exposure", {}))
-                    if mid.endswith(":free") or mid.startswith("opencode/")
-                    else "—")
+                     if mid.endswith(":free") or mid.startswith("opencode/")
+                     or mid in local_ids
+                     else "—")
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
 

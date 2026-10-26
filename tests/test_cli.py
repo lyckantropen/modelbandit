@@ -126,8 +126,9 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_cli(self, *argv, world=None):
+    def run_cli(self, *argv, world=None, local_models=None):
         world = world if world is not None else build_world()
+        local_models = local_models if local_models is not None else {}
         calls = []
 
         def fake_fetch(url, cache_name, *, auth, refresh):
@@ -147,6 +148,7 @@ class CliTests(unittest.TestCase):
         code = None
         argv = ["bind.py", "--policy", self.policy_path, *argv]
         with mock.patch("bind.fetch_json", side_effect=fake_fetch), \
+                mock.patch("bind.probe_local_models", return_value=local_models), \
                 mock.patch.object(sys, "argv", argv), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
@@ -535,6 +537,58 @@ class CliTests(unittest.TestCase):
                    if line.startswith("|") and "opencode/flash" in line)
         self.assertIn("256K | no-retention |", row)
         self.assertIn("opencode/flash: eol summary", out)
+
+    def test_served_cataloged_local_candidate_uses_local_exposure_and_window(self):
+        policy = json.loads(json.dumps(POLICY))
+        policy["free_models"] = {
+            "qwen/qwen3-coder": {"context_length": 65_536,
+                                  "exposure": "local",
+                                  "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+        served = {"qwen/qwen3-coder-30b": {
+            "id": "qwen/qwen3-coder-30b", "context_length": 32_768}}
+
+        out, _, code, calls = self.run_cli(
+            "--domain", "writing", local_models=served)
+
+        self.assertIsNone(code)
+        row = next(line for line in out.splitlines()
+                   if line.startswith("|") and "qwen/qwen3-coder-30b" in line)
+        self.assertIn("64K | local |", row)
+        self.assertIn("qwen/qwen3-coder-30b: eol summary", out)
+        self.assertFalse(any(url.endswith("/endpoints")
+                             and "qwen/qwen3-coder" in url for url, *_ in calls))
+
+    def test_served_local_candidate_without_summary_is_visible_but_not_admitted(self):
+        policy = json.loads(json.dumps(POLICY))
+        policy["free_models"] = {
+            "local/qwen": {"context_length": 262_144, "exposure": "local"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_models={"local/qwen-30b": {"id": "local/qwen-30b"}})
+
+        self.assertIsNone(code)
+        row = next(line for line in out.splitlines()
+                   if line.startswith("|") and "local/qwen-30b" in line)
+        self.assertIn("local |", row)
+        self.assertIn("free route requires a catalog entry and summary", row)
+
+    def test_absent_local_server_keeps_cli_output_and_stderr_unchanged(self):
+        baseline = self.run_cli("--domain", "writing")
+        def connection_refused(_url):
+            raise OSError("connection refused")
+
+        # The probe absorbs the unavailable-server result; main receives the
+        # same empty per-run catalog it had before the probe existed.
+        absent_models = bind.probe_local_models(connection_refused)
+        absent = self.run_cli("--domain", "writing",
+                              local_models=absent_models)
+
+        self.assertEqual(absent, baseline)
 
     def test_ranked_free_slug_is_not_replaced_by_paid_family(self):
         policy = json.loads(json.dumps(POLICY))
