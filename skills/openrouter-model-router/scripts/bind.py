@@ -29,8 +29,14 @@ MODELS_URL = "https://openrouter.ai/api/v1/models"
 LOCAL_MODELS_URL = "http://127.0.0.1:1234/v1/models"
 CLASS_URL = "https://openrouter.ai/api/v1/classifications/task?window=7d"
 RANK_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
+KEY_URL = "https://openrouter.ai/api/v1/key"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "modelbind")
 CACHE_TTL = 24 * 3600
+# The free-request counter is spent as a run proceeds, so it is cached for a
+# minute rather than the day the catalogues get.
+KEY_CACHE_TTL = 60
+# Free requests planning must leave unspent: the last few are not the plan's.
+DEFAULT_FREE_QUOTA_RESERVE = 5
 
 # Effort intent -> output-token multiplier. Reasoning tokens bill as completion
 # tokens, so deliberation is bought in output spend — the axis that dominates
@@ -85,11 +91,20 @@ def api_key() -> str | None:
     return None
 
 
-def fetch_json(url: str, cache_name: str, *, auth: bool, refresh: bool):
+def fetch_json(url: str, cache_name: str, *, auth: bool, refresh: bool,
+               ttl: float | None = None, stale_ok: bool = True):
+    """Decoded JSON from `url`, cached on disk for `ttl` seconds.
+
+    `ttl` defaults to the daily catalogue window; a short-lived figure (the
+    free-request counter) passes its own. `stale_ok=False` refuses to answer
+    from a cache the fetch could not refresh: a stale figure is fine for a
+    price list, never for a counter that has since been spent.
+    """
+    ttl = CACHE_TTL if ttl is None else ttl
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(CACHE_DIR, cache_name)
     if not refresh and os.path.exists(cache_path):
-        if time.time() - os.path.getmtime(cache_path) < CACHE_TTL:
+        if time.time() - os.path.getmtime(cache_path) < ttl:
             with open(cache_path) as f:
                 return json.load(f)
     headers = {"Accept": "application/json"}
@@ -105,7 +120,7 @@ def fetch_json(url: str, cache_name: str, *, auth: bool, refresh: bool):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.load(resp)
     except Exception as exc:
-        if os.path.exists(cache_path):
+        if stale_ok and os.path.exists(cache_path):
             print(f"warning: fetch failed ({exc}); using stale cache", file=sys.stderr)
             with open(cache_path) as f:
                 return json.load(f)
@@ -421,6 +436,7 @@ class PolicyConfig:
     deal: DealPolicy
     context: ContextGatePolicy
     free_risk: float = DEFAULT_FREE_RISK
+    free_quota_reserve: int = DEFAULT_FREE_QUOTA_RESERVE
 
 
 def load_policy_config(policy: dict) -> PolicyConfig:
@@ -469,6 +485,18 @@ def load_policy_config(policy: dict) -> PolicyConfig:
         raise SystemExit("policy scoring.free_risk must be a number") from None
     if not math.isfinite(free_risk) or not 0.0 < free_risk < 1.0:
         raise SystemExit("policy scoring.free_risk must be strictly between 0 and 1")
+    # The reserve is a count of requests held back from planning, so a
+    # fractional or negative one is a misconfiguration, not a rounding.
+    raw_reserve = scoring.get("free_quota_reserve", DEFAULT_FREE_QUOTA_RESERVE)
+    quota_reserve = (raw_reserve
+                     if isinstance(raw_reserve, int)
+                     and not isinstance(raw_reserve, bool) else None)
+    if quota_reserve is None and isinstance(raw_reserve, float) \
+            and math.isfinite(raw_reserve) and raw_reserve.is_integer():
+        quota_reserve = int(raw_reserve)
+    if quota_reserve is None or quota_reserve < 0:
+        raise SystemExit("policy scoring.free_quota_reserve must be a "
+                         "non-negative integer")
     return PolicyConfig(
         alpha=float(required(scoring, "alpha", "scoring.alpha")),
         beta=float(required(scoring, "beta", "scoring.beta")),
@@ -482,6 +510,7 @@ def load_policy_config(policy: dict) -> PolicyConfig:
         ),
         context=ContextGatePolicy(headroom=headroom, margin=margin),
         free_risk=free_risk,
+        free_quota_reserve=quota_reserve,
     )
 
 
@@ -923,9 +952,27 @@ def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
 GATES = (exposure_gate, context_gate, catalog_gate)
 
 
-def admit(shape: Shape, candidate: Candidate) -> Decision:
+def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
+    """The Free-request quota gate: ':free' routes only.
+
+    The counter is an OpenRouter account fact spent by the routes OpenRouter
+    serves for nothing. A harness-served 'opencode/*' model or a model this
+    machine serves spends none of it, so a spent counter says nothing about
+    them; a paid route is charged credits, not free requests.
+    """
+    if not verdict.eligible and candidate.id.endswith(":free"):
+        return Decision(False, verdict.reason)
+    return ADMITTED
+
+
+def admit(shape: Shape, candidate: Candidate, *,
+          quota: QuotaVerdict | None = None) -> Decision:
     """Admission: may this candidate serve this shape? Pure, and the single
-    decision both the ranked table and the deal consult."""
+    decision both the ranked table and the deal consult.
+
+    ``quota`` is the run's free-request verdict (see free_quota_decision);
+    None means no counter was reported, which admits everything the shape
+    admits."""
     flags = []
     for gate in GATES:
         decision = gate(shape, candidate)
@@ -933,7 +980,131 @@ def admit(shape: Shape, candidate: Candidate) -> Decision:
             return decision
         if decision.reason:
             flags.append(decision.reason)
+    if quota is not None:
+        decision = quota_gate(candidate, quota)
+        if not decision.admitted:
+            return decision
+        if decision.reason:
+            flags.append(decision.reason)
     return Decision(True, "; ".join(flags)) if flags else ADMITTED
+
+
+# --- Free-request quota ----------------------------------------------------
+# OpenRouter's daily free-request counter: one figure shared by every ':free'
+# route on the account, reset at UTC midnight. The tier ceiling is set by
+# all-time credits purchased, and no response header reports the running
+# count, so it is read from the key payload up front. Harness-served free
+# models — 'opencode/*' and local — never spend it.
+
+
+@dataclasses.dataclass(frozen=True)
+class FreeQuota:
+    """The account's daily free-request counter: one figure for every ':free'
+    route, or all-None when the payload carries no usable one."""
+    used: int | None = None
+    limit: int | None = None
+    remaining: int | None = None
+
+    @property
+    def reported(self) -> bool:
+        """Whether the endpoint reported a counter at all."""
+        return not (self.used is None and self.limit is None
+                    and self.remaining is None)
+
+
+@dataclasses.dataclass(frozen=True)
+class QuotaVerdict:
+    """Whether ':free' routes stay eligible at this quota, and why not."""
+    eligible: bool
+    reason: str = ""
+
+
+def _count(value) -> int | None:
+    """A reported count, or None for anything that is not a plain integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def free_quota_from_payload(payload) -> FreeQuota | None:
+    """The key payload's ``free_model_daily_requests`` counter, or None.
+
+    OpenRouter nests key fields under ``data``; the counter may carry ``used``,
+    ``limit`` and ``remaining``. A payload without the counter — an older
+    response, a key with no free tier, a different field name — reports no
+    counter rather than an empty one, which leaves ':free' routes in the pool.
+    """
+    if not isinstance(payload, dict):
+        return None
+    holder = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    entry = holder.get("free_model_daily_requests")
+    if not isinstance(entry, dict):
+        return None
+    counts = {}
+    for key in ("used", "limit", "remaining"):
+        raw = entry.get(key)
+        if raw is not None and _count(raw) is None:
+            return None  # a counter half-read is not a counter
+        counts[key] = _count(raw)
+    if all(value is None for value in counts.values()):
+        return None
+    return FreeQuota(**counts)
+
+
+def _quota_unavailable(detail: str) -> None:
+    """Say it once, and never decide anything from it."""
+    suffix = f" ({detail})" if detail else ""
+    print(f"warning: free quota unavailable{suffix}; :free routes stay in the pool",
+          file=sys.stderr)
+
+
+def free_quota(refresh: bool = False, fetcher=None) -> FreeQuota | None:
+    """The account's daily free-request counter, or None when unavailable.
+
+    Read through the shared fetch seam so it caches on disk like every other
+    live figure — but for a minute, not a day, and never from a stale cache:
+    the count is spent as the run proceeds. An unreachable endpoint, a missing
+    key or a payload without the counter reports no counter and warns; it
+    never stops a run and never removes a route.
+    """
+    if fetcher is None:
+        def fetcher(url):
+            return fetch_json(url, "key.json", auth=True, refresh=refresh,
+                              ttl=KEY_CACHE_TTL, stale_ok=False)
+    try:
+        payload = fetcher(KEY_URL)
+    except SystemExit as exc:
+        _quota_unavailable(str(exc.code) if exc.code not in (None, 0) else "")
+        return None
+    except Exception as exc:
+        _quota_unavailable(str(exc))
+        return None
+    return free_quota_from_payload(payload)
+
+
+def free_quota_decision(*, used: int | None, limit: int | None,
+                        remaining: int | None, reserve: int,
+                        planned_free: int) -> QuotaVerdict:
+    """Whether ':free' routes stay in the pool: pure, from the count alone.
+
+    The plan needs ``planned_free`` requests plus a ``reserve`` the planning
+    must not eat into. A route set that cannot cover that is a cliff, not a
+    penalty: ':free' routes leave the pool rather than be assumed. When the
+    endpoint reports no ceiling (``limit`` is None) there is no counter to
+    judge and the pool is unchanged.
+    """
+    if remaining is None:
+        remaining = (limit - used
+                     if limit is not None and used is not None else None)
+    need = planned_free + reserve
+    if remaining is None or remaining >= need:
+        return QuotaVerdict(True)
+    if remaining <= 0:
+        spent = (f" ({used}/{limit} used)"
+                 if used is not None and limit is not None else "")
+        return QuotaVerdict(False, f"free quota exhausted{spent}")
+    return QuotaVerdict(False, f"free quota thin ({remaining} left < "
+                               f"{planned_free} planned + {reserve} reserve)")
 
 
 def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
@@ -1472,6 +1643,28 @@ def main() -> None:
           f"| effort={args.effort} | basis={args.pricing_basis} | policy: {age_txt} "
           f"| source: OpenRouter (openrouter.ai/rankings), as of "
           f"{classif.get('as_of', '?')}\n")
+    # Scarcity before the plan is drawn: any ticket may draw a ':free' route,
+    # so the plan's free demand is every ticket it deals.
+    quota = free_quota(args.refresh) or FreeQuota()
+    verdict = free_quota_decision(used=quota.used, limit=quota.limit,
+                                  remaining=quota.remaining,
+                                  reserve=config.free_quota_reserve,
+                                  planned_free=args.tickets)
+    if quota.reported:
+        left = quota.remaining
+        if left is None and quota.limit is not None and quota.used is not None:
+            left = quota.limit - quota.used
+        used_txt = "?" if quota.used is None else str(quota.used)
+        limit_txt = "?" if quota.limit is None else str(quota.limit)
+        print(f"free quota: {used_txt}/{limit_txt} used"
+              + (f" ({left} left)" if left is not None else "")
+              + f" | plan {args.tickets} + reserve "
+                f"{config.free_quota_reserve}")
+    else:
+        print("free quota: unavailable | :free routes stay in the pool")
+    if not verdict.eligible:
+        print(f":free routes excluded from the pick and the deal — "
+              f"{verdict.reason}")
     fit_map = parse_fit(args.fit) if args.fit else {}
     alpha, beta = config.alpha, config.beta
     aff = domain_weights(policy.get("hints", {}), args.domain, config.factors)
@@ -1506,7 +1699,8 @@ def main() -> None:
                   context_margin=config.context.margin)
     decisions = {mid: admit(shape, candidate_for(
         mid, policy, local=mid in local_ids, model=models.get(mid),
-        endpoints=endpoint_cache.get(mid, ()), intent=args.effort))
+        endpoints=endpoint_cache.get(mid, ()), intent=args.effort),
+        quota=verdict)
         for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
     show_admission = shape.sensitive or any(

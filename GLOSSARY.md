@@ -109,6 +109,15 @@ and never floored: some of the time on ordinary shapes, all of it on a shape
 free genuinely serves best, none when it does not stack up.
 _Avoid_: quota, free budget, cap
 
+**Free quota**
+OpenRouter's daily free-request counter: one figure shared by every `:free`
+route on the account, reset at UTC midnight, spent only by the routes
+OpenRouter serves for nothing. Read before a plan is priced and reported in the
+run header; when it cannot cover the plan's tickets plus the reserve, `:free`
+routes leave the pool. The provider's allowance, never a judgement of Free
+share.
+_Avoid_: free budget, cap, rate limit (that is per minute, and unqueryable)
+
 ### Taste
 
 **Hint**

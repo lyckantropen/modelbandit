@@ -47,7 +47,12 @@ to a rung on each candidate's ladder.
     cataloged window and `local` Exposure. Probe results are not cached or
     written to policy. A Free route without a resolving summary remains
     visible but is not selectable; OpenCode and local routes also need their
-    own catalog entries.
+    own catalog entries. The same run reads the account's daily free-request
+    counter and reports it in the header (`free quota: used/limit`): when it
+    cannot cover the run's tickets plus `scoring.free_quota_reserve`, `:free`
+    routes leave the pick and the deal with that reason. Harness `opencode/*`
+    models and locally served models spend none of it. An unreachable key
+    endpoint warns once and leaves the pool unchanged.
 
 3. **Order by task score.** Each candidate scores `share^α / cost^β` —
    popularity priced at its rung for the effort intent (α, β from `policy.json`
@@ -160,6 +165,22 @@ to a rung on each candidate's ladder.
   derived floor positive and strictly below the paid ticket. Only the score
   uses it — price columns and projections still report what a route costs to
   run.
+
+- **Free quota** — OpenRouter's daily free-request counter
+  (`free_model_daily_requests` on the key payload): one figure shared by every
+  `:free` route, reset at UTC midnight, cached for a minute and never answered
+  from a stale copy. The header reports `free quota: used/limit` and the plan
+  it has to cover. A plan needs one request per ticket plus
+  `scoring.free_quota_reserve` (default 5; a negative or fractional reserve
+  stops the run) — the last few requests are not the plan's. When the counter
+  cannot cover that, `:free` routes are excluded from the pick and the deal
+  with the numbers stated (`free quota exhausted (50/50 used)`, `free quota
+  thin (2 left < 1 planned + 5 reserve)`). Harness `opencode/*` models and
+  locally served models never spend the counter, so this gate never removes
+  them; a paid route is charged credits instead. An unreachable endpoint or a
+  missing key reports `free quota: unavailable`, warns once, and leaves the
+  pool unchanged; so does a payload that carries no counter, silently. No
+  network failure blocks a run.
 
 - **Hints** — user observations in `policy.json`, structured: a `note` (shown
   beside the ranking), `fit` (favor/avoid/neutral, per domain), and `evidence`

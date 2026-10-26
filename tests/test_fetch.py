@@ -147,6 +147,43 @@ class FetchJsonTests(CacheDirMixin):
             with self.assertRaises(SystemExit):
                 bind.fetch_json("http://x", "x.json", auth=True, refresh=False)
 
+    def test_a_shorter_ttl_refetches_an_older_cache(self):
+        path = os.path.join(bind.CACHE_DIR, "x.json")
+        with open(path, "w") as f:
+            json.dump({"cached": True}, f)
+        old = time.time() - 120
+        os.utime(path, (old, old))
+        with mock.patch("bind.urllib.request.urlopen",
+                        return_value=FakeResp({"fresh": True})) as urlopen:
+            out = bind.fetch_json("http://x", "x.json", auth=False,
+                                  refresh=False, ttl=60)
+        self.assertEqual(out, {"fresh": True})
+        urlopen.assert_called_once()
+
+    def test_cache_inside_the_shorter_ttl_skips_network(self):
+        path = os.path.join(bind.CACHE_DIR, "x.json")
+        with open(path, "w") as f:
+            json.dump({"cached": True}, f)
+        with mock.patch("bind.urllib.request.urlopen") as urlopen:
+            out = bind.fetch_json("http://x", "x.json", auth=False,
+                                  refresh=False, ttl=60)
+        self.assertEqual(out, {"cached": True})
+        urlopen.assert_not_called()
+
+    def test_failure_without_a_stale_fallback_never_serves_stale_cache(self):
+        path = os.path.join(bind.CACHE_DIR, "x.json")
+        with open(path, "w") as f:
+            json.dump({"stale": True}, f)
+        old = time.time() - bind.CACHE_TTL - 10
+        os.utime(path, (old, old))
+        err = io.StringIO()
+        with mock.patch("bind.urllib.request.urlopen",
+                        side_effect=OSError("boom")), redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                bind.fetch_json("http://x", "x.json", auth=False,
+                                refresh=False, stale_ok=False)
+        self.assertNotIn("stale cache", err.getvalue())
+
     def test_auth_sends_bearer_header(self):
         captured = {}
 
