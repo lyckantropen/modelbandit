@@ -93,3 +93,28 @@ _Avoid_: price range
 **Baseline**
 The price anchor model, used for Δ columns and nothing else.
 _Avoid_: reference model, benchmark (quality connotations)
+
+### Refresh
+
+**Anchor**
+A benchmark row carried into a research brief as a fact to verify or extend:
+first-party numbers for a model under review. Not the Baseline — that is the
+price anchor for Δ columns; anchors serve the research. Keep the two distinct.
+_Avoid_: price anchor, baseline
+
+**Refresh scope**
+What a summaries-refresh cycle covers, as of one policy check with scope: the
+gaps, the stale summaries and the stale signals current at that run. A
+snapshot of what is due, not a standing queue.
+_Avoid_: backlog, to-do
+
+**Gap**
+A model ranked on a domain board without a summary. Work the cycle should
+do, not a fault in the policy.
+_Avoid_: missing entry (implies error)
+
+**Stale**
+A summary or signal whose key no longer ranks on any domain board. The model
+may still rank below the depth the boards show — the scope's fact lines say
+where, if anywhere. A drift state of the policy, not of the model.
+_Avoid_: expired, deprecated (those are vendor statuses, not drift states)
