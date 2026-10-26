@@ -209,6 +209,46 @@ RULES_FILE = "modelrouter.secrets.json"
 RULES_KEYS = ("phrases", "patterns")
 
 
+def validate_secrets_rules(payload, *, writer: bool = False,
+                           source: str = RULES_FILE) -> dict:
+    """Validate rule values once for both file loading and the writer."""
+    if not isinstance(payload, dict):
+        raise SystemExit(f"secrets rules {source} must be a JSON object with "
+                         f"{' / '.join(RULES_KEYS)}")
+    allowed = set(RULES_KEYS) | ({"identifying", "commit"} if writer else set())
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise SystemExit(f"unknown secret rule key(s) in {source}: "
+                         f"{', '.join(unknown)}; known: "
+                         f"{', '.join(sorted(allowed))}")
+
+    rules: dict = {}
+    for key in RULES_KEYS:
+        if key not in payload and not writer:
+            continue
+        values = payload.get(key, [])
+        if not isinstance(values, list):
+            raise SystemExit(f"{key} in {source} must be a list of strings")
+        for index, entry in enumerate(values, 1):
+            kind = "phrase" if key == "phrases" else "pattern"
+            if not isinstance(entry, str) or not entry.strip():
+                raise SystemExit(f"{kind} #{index} is not a non-empty string")
+            if key == "patterns":
+                try:
+                    re.compile(entry)
+                except re.error:
+                    raise SystemExit(f"pattern #{index} is not a valid regex") \
+                        from None
+        rules[key] = list(values)
+
+    if writer:
+        for key in ("identifying", "commit"):
+            if key not in payload or not isinstance(payload[key], bool):
+                raise SystemExit(f"{key} must be a boolean")
+            rules[key] = payload[key]
+    return rules
+
+
 def load_secrets_rules(path: str) -> dict:
     """The project's Secrets rules, validated — additive only.
 
@@ -222,34 +262,9 @@ def load_secrets_rules(path: str) -> dict:
     try:
         with open(path, encoding="utf-8") as f:
             payload = json.load(f)
-    except (OSError, ValueError) as exc:
-        raise SystemExit(f"cannot read secrets rules {path}: {exc}") from None
-    if not isinstance(payload, dict):
-        raise SystemExit(f"secrets rules {path} must be a JSON object with "
-                         f"{' / '.join(RULES_KEYS)}")
-    unknown = sorted(set(payload) - set(RULES_KEYS))
-    if unknown:
-        raise SystemExit(f"unknown secret rule key(s) in {path}: "
-                         f"{', '.join(unknown)}; known: {', '.join(RULES_KEYS)}")
-    rules: dict = {}
-    for key in RULES_KEYS:
-        if key not in payload:
-            continue
-        values = payload[key]
-        if not isinstance(values, list):
-            raise SystemExit(f"{key} in {path} must be a list of strings")
-        for entry in values:
-            if not isinstance(entry, str) or not entry.strip():
-                raise SystemExit(f"every {key} entry in {path} must be a "
-                                 f"non-empty string, got {entry!r}")
-        rules[key] = list(values)
-    for source in rules.get("patterns", []):
-        try:
-            re.compile(source)
-        except re.error as exc:
-            raise SystemExit(f"invalid regex in {RULES_FILE} patterns: "
-                             f"{source!r} ({exc})") from None
-    return rules
+    except (OSError, ValueError):
+        raise SystemExit(f"cannot read secrets rules file {path}") from None
+    return validate_secrets_rules(payload, source=path)
 
 
 # Machine facts are matched as inclusions, so an identifier short enough to
@@ -346,6 +361,16 @@ def _run_git(root: str):
     return run
 
 
+def _rules_file_is_tracked(root: str) -> bool:
+    """Whether Git already tracks the project rules file in its index."""
+    try:
+        tracked = _run_git(root)(["ls-files", "--error-unmatch", "--",
+                                 RULES_FILE])
+    except Exception:
+        return False
+    return RULES_FILE in str(tracked or "").splitlines()
+
+
 def gitignored_facts(root: str, *, run=None, reader=None,
                      max_files: int = GITIGNORED_MAX_FILES,
                      max_bytes: int = GITIGNORED_MAX_BYTES) -> list[dict]:
@@ -394,6 +419,29 @@ def gitignored_facts(root: str, *, run=None, reader=None,
             seen.add(line)
             facts.append({"path": path, "line": line})
     return facts
+
+
+def outside_file_contents(root: str, paths, *,
+                          max_files: int = GITIGNORED_MAX_FILES,
+                          max_bytes: int = GITIGNORED_MAX_BYTES) -> list[str]:
+    """Capped content from explicitly named outside files, by significant line."""
+    contents, seen = [], set()
+    for named_path in list(paths or ())[:max_files]:
+        path = (named_path if os.path.isabs(named_path)
+                else os.path.join(root, named_path))
+        try:
+            with open(path, "rb") as f:
+                text = f.read(max_bytes).decode("utf-8", "replace")
+        except (OSError, TypeError):
+            continue
+        if "\0" in text:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line and line not in seen:
+                seen.add(line)
+                contents.append(line)
+    return contents
 
 
 def secrets_verdict(material: str, *, machine: dict | None = None,
@@ -466,7 +514,8 @@ def resolve_working_root(root: str | None = None, *, run=None) -> str:
 
 def secrets_check(material: str, *, root: str | None = None,
                   rules: dict | None = None, machine: dict | None = None,
-                  gitignored: list | None = None) -> tuple[bool, str]:
+                  gitignored: list | None = None,
+                  outside_files=()) -> tuple[bool, str]:
     """The collect-demand verdict, assembled at the edge.
 
     Rules come from `modelrouter.secrets.json` at the working-folder root,
@@ -481,33 +530,48 @@ def secrets_check(material: str, *, root: str | None = None,
     facts = dict(machine_facts() if machine is None else machine)
     facts["gitignored"] = (gitignored_facts(working_root)
                            if gitignored is None else list(gitignored))
+    facts["outside_file_contents"] = (
+        _string_values(facts.get("outside_file_contents"))
+        + outside_file_contents(working_root, outside_files))
     return secrets_verdict(material, machine=facts, rules=rules)
 
 
 SECRETS_SAFE, SECRETS_SENSITIVE, SECRETS_NOT_CERTIFIED = 0, 1, 3
+# Exit status 2 belongs to argparse's usage errors; rules/config errors use 4.
+SECRETS_RULES_ERROR = 4
 
 
 def run_secrets_check(*, working_dir: str | None = None,
                       material: str | None = None,
-                      stream=None) -> int:
+                      outside_files=()) -> int:
     """Print the Secrets gate's verdict for one shape's material.
 
     Material is read from stdin; the verdict, the rule that tripped and the
     rules file in force are printed. Exit status distinguishes them: 0 safe,
-    1 sensitive, 3 not certified. A shape with no material given cannot be
-    certified — silence is never read as safe.
+    1 sensitive, 2 usage error, 3 not certified, 4 rules/config error. A shape
+    with no material given cannot be certified — silence is never read as safe.
     """
     if material is None:
         try:
-            material = (stream or sys.stdin).read()
+            material = sys.stdin.read()
         except Exception:
             material = ""
     root = resolve_working_root(working_dir)
+    path_base = os.path.abspath(working_dir or os.getcwd())
+    outside_paths = [path if os.path.isabs(path)
+                     else os.path.join(path_base, path)
+                     for path in outside_files]
     rules_path = os.path.join(root, RULES_FILE)
+    try:
+        rules = load_secrets_rules(rules_path)
+    except SystemExit as exc:
+        print(f"secrets gate: rules/config error ({exc.code})", file=sys.stderr)
+        return SECRETS_RULES_ERROR
     if not isinstance(material, str) or not material.strip():
         print("secrets gate: not certified (no material given)")
         return SECRETS_NOT_CERTIFIED
-    sensitive, rule = secrets_check(material, root=root)
+    sensitive, rule = secrets_check(material, root=root, rules=rules,
+                                    outside_files=outside_paths)
     if sensitive:
         print("secrets gate: sensitive")
         print(f"rule: {rule}")
@@ -518,47 +582,30 @@ def run_secrets_check(*, working_dir: str | None = None,
     return SECRETS_SENSITIVE if sensitive else SECRETS_SAFE
 
 
-def run_secrets_writer(*, working_dir: str | None = None, payload: str | None = None,
-                       stream=None) -> int:
+def run_secrets_writer(*, working_dir: str | None = None,
+                       payload: str | None = None) -> int:
     """Write or merge confirmed project rules and apply the gitignore choice."""
     if payload is None:
         try:
-            payload = (stream or sys.stdin).read()
+            payload = sys.stdin.read()
         except Exception as exc:
             raise SystemExit(f"cannot read --write-secrets input: {exc}") from None
     try:
         submitted = json.loads(payload)
-    except (TypeError, ValueError) as exc:
-        raise SystemExit(f"invalid JSON for --write-secrets: {exc}") from None
-    if not isinstance(submitted, dict):
-        raise SystemExit("--write-secrets input must be a JSON object")
-    allowed = set(RULES_KEYS) | {"identifying", "commit"}
-    unknown = sorted(set(submitted) - allowed)
-    if unknown:
-        raise SystemExit("unknown --write-secrets key(s): " + ", ".join(unknown))
-
-    incoming = {}
-    for key in RULES_KEYS:
-        values = submitted.get(key, [])
-        if not isinstance(values, list):
-            raise SystemExit(f"{key} must be a list of non-empty strings")
-        for value in values:
-            if not isinstance(value, str) or not value.strip():
-                raise SystemExit(f"every {key} entry must be a non-empty string, "
-                                 f"got {value!r}")
-        incoming[key] = values
-    for key in ("identifying", "commit"):
-        if key not in submitted or not isinstance(submitted[key], bool):
-            raise SystemExit(f"{key} must be a boolean")
-    for source in incoming["patterns"]:
-        try:
-            re.compile(source)
-        except re.error as exc:
-            raise SystemExit(f"invalid regex in patterns: {source!r} ({exc})") from None
+    except (TypeError, ValueError):
+        raise SystemExit("invalid JSON for --write-secrets") from None
+    submitted = validate_secrets_rules(
+        submitted, writer=True, source="--write-secrets input")
+    incoming = {key: submitted[key] for key in RULES_KEYS}
 
     root = resolve_working_root(working_dir)
     rules_path = os.path.join(root, RULES_FILE)
     existing = load_secrets_rules(rules_path)
+    if (submitted["identifying"] or not submitted["commit"]) \
+            and _rules_file_is_tracked(root):
+        raise SystemExit(f"{RULES_FILE} is already tracked; first run "
+                         f"`git rm --cached {RULES_FILE}`, then rerun "
+                         "--write-secrets")
     merged = {}
     added, present = {}, {}
     for key in RULES_KEYS:
@@ -585,10 +632,14 @@ def run_secrets_writer(*, working_dir: str | None = None, payload: str | None = 
     with open(rules_path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(merged, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    for key in RULES_KEYS:
-        print(f"added {key}: {json.dumps(added[key], ensure_ascii=False)}")
-        print(f"already present {key}: "
-              f"{json.dumps(present[key], ensure_ascii=False)}")
+
+    def counts(values):
+        return ", ".join(
+            f"{len(values[key])} {key[:-1] if len(values[key]) == 1 else key}"
+            for key in RULES_KEYS)
+
+    # Keep the summary at the level of kinds and counts, never rule values.
+    print(f"added {counts(added)}; already present {counts(present)}")
     print(f"secrets rules: {rules_path}")
 
     if submitted["identifying"] or not submitted["commit"]:
@@ -1932,9 +1983,13 @@ def main() -> None:
                     help="show domains and their leaderboard tags")
     ap.add_argument("--check-secrets", action="store_true",
                     help="Secrets gate check: reads the shape's material from "
-                         "stdin and prints the verdict with the rule that "
-                         "tripped it; exit 0 safe, 1 sensitive, 3 not "
-                         "certified (no material). No network, no policy.")
+                         "stdin and prints the verdict and rule; repeat "
+                         "--outside-file PATH for named outside content. "
+                         "Exit 0 safe, 1 sensitive, 3 not certified, 4 "
+                         "rules/config error; 2 is reserved for usage errors.")
+    ap.add_argument("--outside-file", action="append", default=[], metavar="PATH",
+                    help="include this outside file's capped content in --check-secrets "
+                         "(repeatable; relative paths use --working-dir)")
     ap.add_argument("--write-secrets", action="store_true",
                     help="write or merge confirmed Secrets gate rules from "
                          "JSON on stdin; apply the commit/gitignore decision")
@@ -1984,7 +2039,8 @@ def main() -> None:
     if args.check_secrets:
         # The gate reads the working folder, never the network: no policy and
         # no board are needed to decide whether a shape is Sensitive.
-        raise SystemExit(run_secrets_check(working_dir=args.working_dir))
+        raise SystemExit(run_secrets_check(working_dir=args.working_dir,
+                                           outside_files=args.outside_file))
     if args.write_secrets:
         raise SystemExit(run_secrets_writer(working_dir=args.working_dir))
 

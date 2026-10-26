@@ -21,15 +21,19 @@ to a rung on each candidate's ladder.
    volume is the cost driver for authoring work and is stated before pricing.
    Apply the Secrets gate to the shape's material — always, before choosing a
    model. Run `scripts/bind.py --check-secrets --working-dir <folder>` with the
-   shape's material on stdin. It does the mechanics itself: it reads the
+   shape's material on stdin; add a repeatable `--outside-file PATH` for each
+   named outside source that contributes content. Each named file contributes
+   only a capped slice. The gate does the mechanics itself: it reads the
    project's `modelrouter.secrets.json` (at the folder's git root, when it is
    in a repository), gathers this machine's hostname, login, home path and
-   local address, and reads content from the folder's **gitignored** files —
-   no assembly by you. It prints `secrets gate: safe` or `secrets gate:
-   sensitive` with the rule that tripped it (`hostname`, `username`,
-   `home path`, `local address`, `gitignored content (.env)`, a credential
-   pattern, `phrase #N`, `pattern #N`), and exits 0 for safe, 1 for sensitive,
-   3 for **not certified** — no material given, which is never read as safe.
+   local address, reads content from the folder's **gitignored** files, and
+   checks the named outside files — no assembly by you. It reports safe,
+   sensitive or **not certified**, and names a rule when one trips it
+   (`hostname`, `username`, `home path`, `local address`, `gitignored content
+   (.env)`, outside-file content, a credential pattern, `phrase #N`,
+   `pattern #N`). Exit status is 0 for safe, 1 for sensitive, 2 for usage
+   errors, 3 for **not certified** — no material given, never read as safe —
+   or 4 for a rules/config error.
    Content-inclusion, any-of: the shape is **Sensitive** when its material
    carries content drawn from a file outside the working folder, or from a
    gitignored file inside it, or passwords/tokens/keys, or identifiers
@@ -178,18 +182,22 @@ conduct this interview before relying on project-specific rules:
    on stdin. It writes `modelrouter.secrets.json` at the folder's git root (or
    the folder itself outside a repository), reports rules added and already
    present, and merges on every re-run: existing rules are never removed and
-   exact duplicates are kept once. If `identifying` is true **or** `commit` is
-   false, it appends the file path to `.gitignore` once and reports that
-   decision; otherwise it leaves `.gitignore` alone and says the rules file is
-   meant to be committed.
+   exact duplicates are kept once. Its report gives counts, never rule values.
+   If `identifying` is true **or** `commit` is false, it appends the file path
+   to `.gitignore` once; if the rules file is already tracked, it refuses and
+   tells you to run `git rm --cached modelrouter.secrets.json` first.
+   Otherwise it leaves `.gitignore` alone and says the rules file is meant to
+   be committed.
 4. Review the writer's report and show the resulting diff. Before a re-run,
    retain the previous rules-file contents; afterwards show a unified
    before/after diff as well as the `.gitignore` diff. An ignored, untracked
    rules file will not appear in ordinary `git diff`.
 5. Run `scripts/bind.py --check-secrets --working-dir <folder>` with the actual
-   shape material on stdin. The gate now reads the rules file itself. Exit 0 is
-   safe, 1 is Sensitive, and 3 means **not certified**: empty material is not
-   safe by default, so obtain the material before claiming a safe shape.
+   shape material on stdin, adding `--outside-file PATH` for each named outside
+   source. The gate reads the rules file itself. Exit 0 is safe, 1 is Sensitive,
+   2 is a usage error, 3 means **not certified**, and 4 means a rules/config
+   error: empty material is not safe by default, so obtain the material before
+   claiming a safe shape.
 
 ## Reference
 
@@ -279,23 +287,26 @@ conduct this interview before relying on project-specific rules:
 
 - **Secrets gate** — the collect-demand check that makes a shape Sensitive,
   run as `scripts/bind.py --check-secrets [--working-dir PATH]` with the
-  material on stdin. It needs no policy and no network; the material is the
+  material on stdin and repeatable `--outside-file PATH` arguments for named
+  outside content. It needs no policy and no network; the material is the
   agent's to supply (the tool never reads it for you). The verdict names the
   rule that tripped it and sets the exit status: **0** safe, **1** sensitive,
-  **3** not certified — no material given, never "safe". The tool assembles
+  **2** usage error, **3** not certified — no material given, never "safe" —
+  **4** rules/config error. The tool assembles
   everything mechanical: the project's `modelrouter.secrets.json` at the
   working-folder root (the git root when in a repository, else the folder),
   this machine's identifiers (hostname, login, home path, non-loopback local
   address, each best effort and never shorter than four characters), and the
   significant lines of the folder's gitignored untracked files
   (`git ls-files --others --ignored --exclude-standard`, twenty files of up
-  to 8 KB each) — `.gitignore` is the repository's own list of what must not
-  leave it. Rules are additive only: `phrases` are literal inclusions,
+  to 8 KB each), plus the capped content of every named outside file —
+  `.gitignore` is the repository's own list of what must not leave it. Rules
+  are additive only: `phrases` are literal inclusions,
   `patterns` are regular expressions, both validated at load — an unknown key,
-  an empty phrase or a broken regex stops the check loudly, and the built-in
-  credential rules always apply. The verdict echoes no rule *value*, only its
-  class or index (`phrase #1`), so its output is safe to quote back. For setup
-  or updates, follow **Set up the secrets file**; `--write-secrets` reads
+  an empty phrase or a broken regex stops the check with status 4, and the
+  built-in credential rules always apply. The verdict echoes no rule *value*,
+  only its class or index (`phrase #1`), so its output is safe to quote back.
+  For setup or updates, follow **Set up the secrets file**; `--write-secrets` reads
   confirmed JSON from stdin, merges additively, and applies the commit/gitignore
   decision.
 

@@ -63,22 +63,36 @@ class SecretsRulesLoaderTests(TempDirMixin):
             bind.load_secrets_rules(path)
 
     def test_phrases_must_be_non_empty_strings(self):
-        for payload in ({"phrases": "a string"}, {"phrases": [""]},
-                        {"phrases": ["ok", 7]}):
+        cases = (({"phrases": "a string"}, "phrases"),
+                 ({"phrases": [""]}, "phrase #1"),
+                 ({"phrases": ["ok", 7]}, "phrase #2"))
+        for payload, expected in cases:
             with self.subTest(payload=payload):
                 path = self.write_rules(payload)
-                with self.assertRaisesRegex(SystemExit, "phrases"):
+                with self.assertRaisesRegex(SystemExit, expected):
                     bind.load_secrets_rules(path)
 
     def test_patterns_must_be_strings(self):
         path = self.write_rules({"patterns": [42]})
-        with self.assertRaisesRegex(SystemExit, "patterns"):
+        with self.assertRaisesRegex(SystemExit, "pattern #1"):
             bind.load_secrets_rules(path)
 
-    def test_invalid_regex_fails_loudly_naming_it(self):
-        path = self.write_rules({"patterns": [r"ok-\d+", r"broken-([unclosed"]})
-        with self.assertRaisesRegex(SystemExit, r"broken-\(\[unclosed"):
+    def test_invalid_regex_reports_its_index_without_echoing_the_value(self):
+        invalid = r"broken-([unclosed"
+        path = self.write_rules({"patterns": [r"ok-\d+", invalid]})
+        with self.assertRaisesRegex(SystemExit,
+                                    "pattern #2 is not a valid regex") as raised:
             bind.load_secrets_rules(path)
+        self.assertNotIn(invalid, str(raised.exception))
+
+    def test_invalid_rule_value_is_never_echoed(self):
+        secret = "classified-project-code-9721"
+        path = self.write_rules({"phrases": [{"value": secret}]})
+
+        with self.assertRaisesRegex(SystemExit, "phrase #1") as raised:
+            bind.load_secrets_rules(path)
+
+        self.assertNotIn(secret, str(raised.exception))
 
     def test_loaded_rules_tighten_but_never_disable_the_built_ins(self):
         path = self.write_rules({"phrases": ["ordinary fixture phrase"]})
@@ -375,10 +389,53 @@ class SecretsCliTests(TempDirMixin):
 
     def test_a_malformed_rules_file_stops_the_check_loudly(self):
         self.write_rules({"phrase": ["typo"]})
-        _, _, code = self.run_cli("--check-secrets", "--working-dir",
-                                  self.root, stdin="anything at all")
-        self.assertIn("unknown secret rule key(s)", str(code))
-        self.assertIn("phrase", str(code))
+        _, err, code = self.run_cli("--check-secrets", "--working-dir",
+                                    self.root, stdin="anything at all")
+        self.assertEqual(code, 4)
+        self.assertIn("secrets gate: rules/config error", err)
+        self.assertIn("unknown secret rule key(s)", err)
+
+    def test_malformed_rules_file_is_reported_even_without_material(self):
+        self.write_rules({"patterns": ["invalid-([regex"]})
+        out, err, code = self.run_cli("--check-secrets", "--working-dir",
+                                      self.root, stdin="")
+
+        self.assertEqual(code, 4)
+        self.assertIn("pattern #1 is not a valid regex", err)
+        self.assertNotIn("not certified", out)
+        self.assertNotIn("invalid-([regex", err)
+
+    def test_named_outside_file_content_trips_the_gate(self):
+        with tempfile.TemporaryDirectory() as outside:
+            paths = [os.path.join(outside, f"deployment-notes-{i}.txt")
+                     for i in range(2)]
+            line = "OUTSIDE_DEPLOYMENT_TENANT=rare-tenant-7291"
+            with open(paths[0], "w", encoding="utf-8") as f:
+                f.write("unrelated notes\n")
+            with open(paths[1], "w", encoding="utf-8") as f:
+                f.write(line + "\n")
+            out, _, code = self.run_cli(
+                "--check-secrets", "--working-dir", self.root,
+                "--outside-file", paths[0], "--outside-file", paths[1],
+                stdin=f"Use {line} in deployment.")
+
+        self.assertEqual(code, 1)
+        self.assertIn("rule: outside-file content", out)
+        self.assertNotIn(line, out)
+
+    def test_named_outside_file_is_capped_to_eight_kilobytes(self):
+        with tempfile.TemporaryDirectory() as outside:
+            path = os.path.join(outside, "long-source.txt")
+            beyond_cap = "SECRET_BEYOND_OUTSIDE_FILE_CAP_79d2"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("A" * bind.GITIGNORED_MAX_BYTES + "\n" + beyond_cap)
+
+            out, _, code = self.run_cli(
+                "--check-secrets", "--working-dir", self.root,
+                "--outside-file", path, stdin=f"Quote {beyond_cap}.")
+
+        self.assertEqual(code, 0)
+        self.assertIn("secrets gate: safe", out)
 
 
 class SecretsWriterCliTests(TempDirMixin):
@@ -397,6 +454,29 @@ class SecretsWriterCliTests(TempDirMixin):
             except SystemExit as exc:
                 code = exc.code
         return out.getvalue(), err.getvalue(), code
+
+    def test_writer_reports_rule_counts_without_echoing_values(self):
+        phrase = "rare-client-codename-7f2a"
+        pattern = r"private-case-\d{4}"
+        payload = json.dumps({"phrases": [phrase], "patterns": [pattern],
+                              "identifying": False, "commit": True})
+
+        out, _, code = self.run_writer(payload)
+
+        self.assertEqual(code, 0)
+        self.assertIn("added 1 phrase, 1 pattern", out)
+        self.assertNotIn(phrase, out)
+        self.assertNotIn(pattern, out)
+
+    def test_writer_invalid_regex_reports_index_without_echoing_value(self):
+        invalid = "client-regex-([secret"
+        payload = json.dumps({"phrases": [], "patterns": ["ok", invalid],
+                              "identifying": False, "commit": True})
+
+        _, _, code = self.run_writer(payload)
+
+        self.assertIn("pattern #2 is not a valid regex", str(code))
+        self.assertNotIn(invalid, str(code))
 
     def test_rerun_keeps_existing_rules_and_deduplicates_exact_repeats(self):
         self.write_rules({"phrases": ["existing client name"],
@@ -420,8 +500,8 @@ class SecretsWriterCliTests(TempDirMixin):
                          ["existing client name", "new client name"])
         self.assertEqual(rules["patterns"],
                          [r"old-key-\d+", r"new-key-\d+"])
-        self.assertIn("added phrase", first)
-        self.assertIn("already present phrase", second)
+        self.assertIn("added 1 phrase, 1 pattern", first)
+        self.assertIn("already present 2 phrases, 2 patterns", second)
 
     def test_identifying_rules_add_gitignore_entry_only_once(self):
         self.write(".gitignore", "cache")
@@ -463,12 +543,32 @@ class SecretsWriterCliTests(TempDirMixin):
             self.assertIn("modelrouter.secrets.json", f.read().splitlines())
         self.assertIn("gitignore: appended", out)
 
+    @unittest.skipUnless(shutil.which("git"), "git is not installed")
+    def test_writer_refuses_to_gitignore_a_tracked_rules_file(self):
+        subprocess.run(["git", "-C", self.root, "init", "-q"], check=True,
+                       capture_output=True)
+        self.write_rules({"phrases": ["old phrase"]})
+        subprocess.run(["git", "-C", self.root, "add", "modelrouter.secrets.json"],
+                       check=True, capture_output=True)
+        rules_path = os.path.join(self.root, "modelrouter.secrets.json")
+        with open(rules_path, encoding="utf-8") as f:
+            original = f.read()
+        payload = json.dumps({"phrases": ["new phrase"], "patterns": [],
+                              "identifying": True, "commit": True})
+
+        _, _, code = self.run_writer(payload)
+
+        self.assertIn("git rm --cached modelrouter.secrets.json", str(code))
+        with open(rules_path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), original)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".gitignore")))
+
     def test_invalid_json_and_rule_shapes_fail_loudly(self):
         cases = (("{", "invalid JSON"),
                  (json.dumps({"phrases": "not a list", "patterns": [],
                               "identifying": False, "commit": True}), "phrases"),
                  (json.dumps({"phrases": [], "patterns": ["("],
-                              "identifying": False, "commit": True}), "patterns"))
+                              "identifying": False, "commit": True}), "pattern #1"))
         for payload, problem in cases:
             with self.subTest(problem=problem):
                 _, _, code = self.run_writer(payload)
@@ -478,15 +578,17 @@ class SecretsWriterCliTests(TempDirMixin):
 
 
 class SecretsEndToEndTests(TempDirMixin):
-    """The whole mechanism, unpatched: real machine facts, real files, real
-    git. A file on disk changes the verdict for the same material — the gap
-    that reopened because no such test existed."""
+    """The whole mechanism with deterministic machine facts and real files/git."""
 
-    def run_check(self, working_dir, material):
+    def run_check(self, working_dir, material, *, machine=None, outside_files=()):
         out, err, code = io.StringIO(), io.StringIO(), None
-        with mock.patch.object(sys, "argv", ["bind.py", "--check-secrets",
-                                             "--working-dir", working_dir]), \
+        argv = ["bind.py", "--check-secrets", "--working-dir", working_dir]
+        for path in outside_files:
+            argv.extend(("--outside-file", path))
+        with mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(sys, "stdin", io.StringIO(material)), \
+                mock.patch("bind.machine_facts",
+                           return_value=machine or {"identifiers": []}), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
                 bind.main()
@@ -524,16 +626,14 @@ class SecretsEndToEndTests(TempDirMixin):
         self.assertEqual(code, 1, out)
         self.assertIn("rule: gitignored content (.env)", out)
 
-    def test_the_real_hostname_trips_without_caller_assembly(self):
-        import socket
-        host = socket.gethostname()
-        if len(host) < bind.MIN_IDENTIFIER_LEN:
-            self.skipTest(f"hostname {host!r} is too short to identify")
-        out, code = self.run_check(self.root, f"Deploy to {host} tonight.")
+    def test_injected_machine_identifier_trips_end_to_end(self):
+        out, code = self.run_check(
+            self.root, f"Deploy to {HOST} tonight.",
+            machine={"hostname": HOST, "identifiers": [HOST]})
         self.assertEqual(code, 1, out)
         self.assertIn("rule: hostname", out)
 
-    def test_material_matching_nothing_is_safe_on_this_machine(self):
+    def test_material_matching_nothing_is_safe_with_empty_machine_facts(self):
         out, code = self.run_check(self.root, "Summarize the public API docs.")
         self.assertEqual(code, 0, out)
         self.assertIn("secrets gate: safe", out)

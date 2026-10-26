@@ -71,10 +71,12 @@ _Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
 **Secrets gate**
 The check run at collect-demand: the project's optional secrets file
 (`modelrouter.secrets.json`), falling back to the built-in default — content
-drawn from files outside the working folder, passwords/tokens/keys, and
-identifiers readable from this machine's state — applied to the shape's
+from a gitignored file inside the working folder, from files outside it
+(including content supplied from named outside files), passwords/tokens/keys,
+and identifiers readable from this machine's state — applied to the shape's
 material. Content-inclusion, any-of; a mere path mention does not trip it.
-Outcome: the shape's sensitive flag.
+Outcome: Sensitive when an inclusion is found, safe when provided material has
+none, or not certified when no material is present.
 _Avoid_: detector, classifier (suggests learned behaviour; it is a list)
 
 **Footprint**
