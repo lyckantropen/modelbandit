@@ -28,6 +28,7 @@ import urllib.request
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 CLASS_URL = "https://openrouter.ai/api/v1/classifications/task?window=7d"
 RANK_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
+BENCHMARKS_URL = "https://openrouter.ai/api/v1/benchmarks"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "modelbind")
 CACHE_TTL = 24 * 3600
 
@@ -615,6 +616,21 @@ def scope_facts(key: str, exact: bool, models: dict, by_canon: dict,
     return lines
 
 
+def domain_rankings(classif: dict, domains: dict, models: dict,
+                    by_canon: dict, top: int):
+    """Per-domain share boards and their top-cut ranked mids, in popularity
+    order — the shared input for the check's drift derivation and the
+    anchors scope."""
+    share_by_domain: dict[str, dict] = {}
+    ranked_by_domain: dict[str, list[str]] = {}
+    for name, tags in domains.items():
+        share, _, _ = domain_candidates(classif, tags, models, by_canon)
+        share_by_domain[name] = share
+        ranked_by_domain[name] = [mid for mid, _ in
+                                  sorted(share.items(), key=lambda kv: -kv[1])[:top]]
+    return share_by_domain, ranked_by_domain
+
+
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
                      intent: str, basis: str, config: PolicyConfig,
@@ -623,15 +639,11 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
     pool_k = config.deal.eligibility_top_k
-    ranked_by_domain: dict[str, list[str]] = {}
-    share_by_domain: dict[str, dict] = {}
+    share_by_domain, ranked_by_domain = domain_rankings(
+        classif, domains, models, by_canon, top)
     all_ranked: set[str] = set()
-    for name, tags in domains.items():
-        share, _, _ = domain_candidates(classif, tags, models, by_canon)
-        share_by_domain[name] = share
-        ranked_by_domain[name] = [mid for mid, _ in
-                                  sorted(share.items(), key=lambda kv: -kv[1])[:top]]
-        all_ranked.update(ranked_by_domain[name])
+    for ranked in ranked_by_domain.values():
+        all_ranked.update(ranked)
     # The deal's players: the eligibility top-K of each domain, plus ranked
     # models the user favors (weight > 1) below the cut — the same pool
     # plan_deal admits. Coverage is judged only for those.
@@ -749,6 +761,143 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     print(f"coefficient re-tune due: {'yes' if re_tune else 'no'}")
 
 
+# The combined benchmarks feed's top-level meta carries source/citation null
+# (it mixes all three), so per-source headers use the known citation strings
+# and the feed-level as-of is stated once, in the main header.
+SOURCE_ORDER = ("artificial-analysis", "design-arena", "openrouter")
+SOURCE_HEADINGS = {
+    "artificial-analysis": "Artificial Analysis",
+    "design-arena": "Design Arena",
+    "openrouter": "OpenRouter evals",
+}
+SOURCE_CITATIONS = {
+    "artificial-analysis":
+        "Source: Artificial Analysis (artificialanalysis.ai) via OpenRouter "
+        "(openrouter.ai/rankings).",
+    "design-arena":
+        "Source: Design Arena (www.designarena.ai) via OpenRouter "
+        "(openrouter.ai/rankings).",
+    "openrouter":
+        "Source: OpenRouter evals (openrouter.ai) via OpenRouter "
+        "(openrouter.ai/rankings).",
+}
+SOURCE_COLUMNS = {
+    "artificial-analysis":
+        "| model | intelligence | coding | agentic | $/1M in/out |",
+    "design-arena":
+        "| model | arena | category | elo | win rate | $/1M in/out |",
+    "openrouter":
+        "| model | benchmark | accuracy | cost/task | last run | $/1M in/out |",
+}
+
+
+def anchor_scope(explicit: list, models: dict, by_canon: dict, classif: dict,
+                 domains: dict, policy: dict, top: int) -> list[str]:
+    """The anchor model set: explicit ids when given (deduplicated, in given
+    order), else the check's drift set — gaps, then stale summaries, then
+    stale signals, via the shared drift_keys helper."""
+    if explicit:
+        out, seen = [], set()
+        for mid in explicit:
+            key = norm_id(mid)
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+        return out
+    summaries = policy.get("summaries", {})
+    signals = {k: v for k, v in policy.get("hints", {}).items()
+               if isinstance(v, dict) and v.get("fit")}
+    _, ranked_by_domain = domain_rankings(classif, domains, models, by_canon, top)
+    all_ranked = {mid for ranked in ranked_by_domain.values() for mid in ranked}
+    gaps, stale, stale_signals = drift_keys(all_ranked, summaries, signals)
+    out, seen = [], set()
+    for mid in (*gaps, *stale, *stale_signals):
+        if mid not in seen:
+            seen.add(mid)
+            out.append(mid)
+    return out
+
+
+def anchor_cell(value, fmt) -> str:
+    """Formatted number, or an em dash for missing/null — never 0."""
+    return fmt(value) if isinstance(value, (int, float)) and not \
+        isinstance(value, bool) else "—"
+
+
+def anchor_price(row: dict) -> str:
+    """Per-1M in/out price when the source provides pricing, else missing."""
+    try:
+        pricing = row["pricing"]
+        return (f"${per_million(pricing['prompt']):.2f}/"
+                f"${per_million(pricing['completion']):.2f}")
+    except (KeyError, TypeError, ValueError):
+        return "—"
+
+
+def anchor_row(source: str, row: dict) -> str:
+    """One table row in its source's own schema. The slug (dated permaslug)
+    is what the feed carries; the scope id that matched it is implicit in the
+    row's position."""
+    slug = norm_id(str(row.get("model_permaslug", "")))
+    if source == "artificial-analysis":
+        cells = [anchor_cell(row.get(k), lambda v: f"{v:.1f}")
+                 for k in ("intelligence_index", "coding_index",
+                           "agentic_index")]
+    elif source == "design-arena":
+        cells = [str(row.get("arena", "?")), str(row.get("category", "?")),
+                 anchor_cell(row.get("elo"), lambda v: f"{v:.0f}"),
+                 anchor_cell(row.get("win_rate"), lambda v: f"{v:g}%")]
+    else:  # openrouter
+        cells = [str(row.get("benchmark_type", "?")),
+                 anchor_cell(row.get("accuracy"), lambda v: f"{v:.1%}"),
+                 anchor_cell(row.get("avg_cost_per_task"),
+                             lambda v: f"${v:.4f}"),
+                 str(row.get("last_run_timestamp") or "—")[:10]]
+    return f"| {slug} | " + " | ".join(cells) + f" | {anchor_price(row)} |"
+
+
+def run_anchors(explicit: list, models: dict, by_canon: dict, classif: dict,
+                domains: dict, policy: dict, top: int, refresh: bool) -> None:
+    """First-party benchmark anchors for the scope: one unfiltered,
+    authenticated, cached fetch of the combined feed; one table per source
+    in that source's own schema, rows in scope order; a trailing line naming
+    scoped models the feed does not cover. Facts only — nothing persists."""
+    scope = anchor_scope(explicit, models, by_canon, classif, domains,
+                         policy, top)
+    feed = fetch_json(BENCHMARKS_URL, "benchmarks.json", auth=True,
+                      refresh=refresh)
+    rows = feed.get("data", []) if isinstance(feed, dict) else (feed or [])
+    meta = feed.get("meta", {}) if isinstance(feed, dict) else {}
+
+    # Each feed row joins the first scope id it prefixes-matches (family
+    # semantics, as for the policy keys); buckets keep feed order within
+    # their id, so iterating scope order yields scope-ordered tables.
+    assigned: dict[tuple, list] = {}
+    for row in rows:
+        slug = norm_id(str(row.get("model_permaslug", "")))
+        for idx, sid in enumerate(scope):
+            if slug.startswith(sid):
+                assigned.setdefault((row.get("source"), idx), []).append(row)
+                break
+    matched = {idx for _, idx in assigned}
+
+    print("# Benchmark anchors")
+    print(f"feed as of {meta.get('as_of', '?')} — {len(matched)} of "
+          f"{meta.get('model_count', '?')} feed models matched")
+    for source in SOURCE_ORDER:
+        print(f"\n## {SOURCE_HEADINGS[source]}")
+        print(f"{SOURCE_CITATIONS[source]}\n")
+        body = [anchor_row(source, row)
+                for idx, _ in enumerate(scope)
+                for row in assigned.get((source, idx), [])]
+        if body:
+            print(SOURCE_COLUMNS[source])
+            print("|---" * (SOURCE_COLUMNS[source].count("|") - 1) + "|")
+            print("\n".join(body))
+    missing = [sid for idx, sid in enumerate(scope) if idx not in matched]
+    print(f"\nno benchmark rows: {', '.join(missing) if missing else '— none'}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--domain", help="domain from policy.json (see --list-domains)")
@@ -762,6 +911,13 @@ def main() -> None:
                          "under each gap, stale-summary and stale-signal "
                          "bullet: where the model still ranks and its catalog "
                          "row with daily-token window totals; facts only")
+    ap.add_argument("--anchors", nargs="*", metavar="MODEL_ID", default=None,
+                    help="render first-party benchmark anchors as one table "
+                         "per source (Artificial Analysis, Design Arena, "
+                         "OpenRouter evals) for the refresh scope — the "
+                         "policy's gaps then stale entries — or, when model "
+                         "ids are given, for exactly those; one cached fetch "
+                         "of the combined benchmarks feed; facts only")
     ap.add_argument("--effort", default="measured", choices=INTENTS,
                     help="effort intent (default: measured); a rung the "
                          "model's ladder collapses discounts the output "
@@ -804,9 +960,10 @@ def main() -> None:
         for name, tags in domains.items():
             print(f"{name:14s} {', '.join(tags)}")
         return
-    if not args.domain and not args.check_policy and not args.scope:
+    if (not args.domain and not args.check_policy and not args.scope
+            and args.anchors is None):
         raise SystemExit("need --domain (or --list-domains / --check-policy "
-                         "/ --scope)")
+                         "/ --scope / --anchors)")
     if args.domain and args.domain not in domains:
         raise SystemExit(
             f"no domain '{args.domain}'; known: {', '.join(domains) or 'none'}")
@@ -821,6 +978,10 @@ def main() -> None:
 
     classif = fetch_json(CLASS_URL, "classifications.json", auth=True,
                          refresh=args.refresh)["data"]
+    if args.anchors is not None:
+        run_anchors(args.anchors, models, by_canon, classif, domains, policy,
+                    args.top, args.refresh)
+        return
     if args.check_policy or args.scope:
         # The scope path needs the daily token rankings for window totals; the
         # bare check never consults them and stays one fetch lighter.
