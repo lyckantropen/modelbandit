@@ -558,6 +558,139 @@ class CliTests(unittest.TestCase):
         self.assertIn("64K | trains |", row)
         self.assertNotIn("| vendor/model |", out)
 
+    # --- Nominal floor: Free routes in the score's cost term -------------
+
+    FREE_CATALOG = {
+        "vendor/model": {"context_length": 262_144, "exposure": "no-retention",
+                         "summary_ref": "deepseek/deepseek-v4-pro"},
+        "vendor/other": {"context_length": 262_144, "exposure": "trains",
+                         "summary_ref": "deepseek/deepseek-v4-pro"},
+    }
+
+    def floor_policy(self, free_models, alpha=1.0, beta=1.0):
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=alpha, beta=beta)
+        pol["free_models"] = free_models
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+    def free_world(self, *shares, models=()):
+        world = build_world()
+        for mid, share in shares:
+            world["models"].append(make_model(mid, "0", "0", "0"))
+            world["classifications"]["classifications"][0]["models"].append(
+                {"id": mid, "tag_usage_share": share})
+        world["models"] += list(models)
+        return world
+
+    def test_free_route_scores_at_the_floor_and_takes_the_pick(self):
+        # Authoring profile, measured effort: the floor is 12,000 output
+        # tokens at $0.01/M = $0.00012/ticket. At alpha=beta=1 the Free
+        # route's score is 0.05 / 0.00012 = 416.67 against the share leader's
+        # 0.05 / $0.0984 = 0.51 — free can win where fit and context allow.
+        # The projected price stays $0.0000: only the cost term is shadowed.
+        self.floor_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+        out, _, code, _ = self.run_cli("--domain", "writing", world=world)
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and "vendor/model:free |" in ln)
+        self.assertIn("| 416.67 |", row)
+        self.assertIn("$0.0000", row)
+        self.assertIn("default pick (top of task order): vendor/model:free", out)
+
+    def test_floor_is_uniform_across_exposure(self):
+        # Same share, different Exposure, same floor: the score is identical.
+        # Exposure decides admission, never the price.
+        self.floor_policy(self.FREE_CATALOG)
+        world = self.free_world(("vendor/model:free", 0.5),
+                               ("vendor/other:free", 0.5))
+        out, _, code, _ = self.run_cli("--domain", "writing", world=world)
+        self.assertIsNone(code)
+        rows = {mid: next(ln for ln in out.splitlines()
+                          if ln.startswith("|") and f"{mid} |" in ln)
+                for mid in ("vendor/model:free", "vendor/other:free")}
+        self.assertIn("| 416.67 |", rows["vendor/model:free"])
+        self.assertIn("| 416.67 |", rows["vendor/other:free"])
+        self.assertIn("no-retention", rows["vendor/model:free"])
+        self.assertIn("trains", rows["vendor/other:free"])
+
+    def test_free_floor_holds_at_every_calculation_basis(self):
+        # The basis moves the paid tickets the pool carries — 0813 is
+        # $0.0984 worst, $0.0322 primary, $0.0064 best — and leaves the Free
+        # route's cost term at the floor.
+        self.floor_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+        for basis, ticket in (("worst", "$0.0984"), ("primary", "$0.0322"),
+                              ("best", "$0.0064")):
+            with self.subTest(basis=basis):
+                out, _, code, _ = self.run_cli("--domain", "writing",
+                                               "--pricing-basis", basis,
+                                               world=world)
+                self.assertIsNone(code)
+                free_row = next(ln for ln in out.splitlines()
+                                if ln.startswith("|")
+                                and "vendor/model:free |" in ln)
+                paid_row = next(ln for ln in out.splitlines()
+                                if ln.startswith("|")
+                                and "deepseek/deepseek-v4-pro-0813 |" in ln)
+                self.assertIn("| 416.67 |", free_row)
+                self.assertIn(ticket, paid_row)
+
+    def test_a_floor_above_the_cheapest_paid_ticket_stops_the_run(self):
+        # A configured floor of $5/M output is $0.06/ticket at the authoring
+        # profile — above the pool's cheapest paid ticket. That is an invalid
+        # floor: the run stops and says so, never a silent clamp downward.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"]["free_floor"] = 5.0
+        pol["free_models"] = {"vendor/model": self.FREE_CATALOG["vendor/model"]}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        world = self.free_world(("vendor/model:free", 0.5))
+        _, _, code, _ = self.run_cli("--domain", "writing", world=world)
+        self.assertIn("nominal floor", code)
+
+    def test_free_route_in_the_pool_trips_the_re_tune_verdict(self):
+        # Four paid models at one price are in balance (top-1 25%, top-2 50%).
+        # The same pool with a Free route at the Nominal floor is not — the
+        # check says so and calls the re-tune, which is the expected drift.
+        paid = [make_model(f"m{i}/model", "0.000001", "0.000002", "0.000001")
+                for i in range(4)]
+        board = ([{"id": "vendor/model:free", "tag_usage_share": 0.3}]
+                 + [{"id": f"m{i}/model", "tag_usage_share": 0.25}
+                    for i in range(4)])
+
+        def run(with_free):
+            pol = json.loads(json.dumps(POLICY))
+            pol["scoring"].update(alpha=1.0, beta=1.0)
+            pol["affinity"]["eligibility_top_k"] = 5
+            pol["domains"] = {"writing": ["content_writing"]}
+            pol["hints"] = {}
+            pol["summaries"] = {}
+            pol["free_models"] = ({"vendor/model":
+                                   self.FREE_CATALOG["vendor/model"]}
+                                  if with_free else {})
+            with open(self.policy_path, "w") as f:
+                json.dump(pol, f)
+            world = build_world()
+            world["models"] = paid + ([make_model("vendor/model:free", "0",
+                                                  "0", "0")]
+                                      if with_free else [])
+            world["classifications"]["classifications"][0]["models"] = (
+                board[1:] if not with_free else board)
+            out, _, code, _ = self.run_cli("--check-policy", world=world)
+            self.assertIsNone(code)
+            return out
+
+        balanced = run(False)
+        self.assertIn("writing: top-1 25%, top-2 50%", balanced)
+        self.assertIn("coefficient re-tune due: no", balanced)
+
+        drifted = run(True)
+        balance = drifted[drifted.index("## Score balance"):]
+        self.assertIn("OUT OF BALANCE", balance)
+        self.assertIn("coefficient re-tune due: yes", drifted)
+
     def test_uncatalogued_free_route_is_visible_but_never_picked(self):
         world = build_world()
         world["models"].append(make_model("vendor/unknown:free", "0", "0", "0"))
