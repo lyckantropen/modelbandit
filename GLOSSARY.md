@@ -53,6 +53,36 @@ _Avoid_: quality, capability, fit (that is the hint direction)
 The priced cost of a run: per ticket and total, at a stated pricing basis.
 _Avoid_: estimate, quote
 
+**Exposure**
+A candidate's data-handling class: no-retention (input is neither stored nor
+trained on), trains (input may be stored, collected, or trained on), or local
+(runs on this machine — no training, no retention). The property that gates
+sensitive work; never inferred from price — free does not imply trains, paid
+does not imply no-retention. Unknown free defaults to trains.
+_Avoid_: privacy, data policy (an account rule, not a model property), training flag
+
+**Sensitive**
+A ticket shape whose material trips the secrets gate; exposed candidates are
+excluded from it. A join of the shape — the fifth shape element, bound per
+invocation (`--sensitive`) — never a mood declared mid-run.
+_Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
+
+**Secrets gate**
+The check run at collect-demand: the project's optional secrets file
+(`modelrouter.secrets.json`), falling back to the built-in default — content
+drawn from files outside the working folder, passwords/tokens/keys, and
+identifiers readable from this machine's state — applied to the shape's
+material. Content-inclusion, any-of; a mere path mention does not trip it.
+Outcome: the shape's sensitive flag.
+_Avoid_: detector, classifier (suggests learned behaviour; it is a list)
+
+**Context gate**
+The mechanical exclusion of free candidates whose shape's input budget (with
+growth headroom) does not fit a share of the model's context window. Free-tier
+only: a free route has no paid tier to upgrade into, so a context blowout is a
+hard failure, not taste. The paid tier stays judge-only.
+_Avoid_: context flooring, token cap
+
 ### Taste
 
 **Hint**
@@ -93,3 +123,17 @@ _Avoid_: price range
 **Baseline**
 The price anchor model, used for Δ columns and nothing else.
 _Avoid_: reference model, benchmark (quality connotations)
+
+**Free route**
+A candidate served at $0: an OpenRouter `:free` slug, an OpenCode
+`opencode/*` free model, or a local model. The *serving* is free, not the
+model family — the same family may serve paid routes with different exposure.
+_Avoid_: free model (the model isn't free, the serving is)
+
+**Nominal floor**
+The fixed per-token cost (default $0.01/M output, configurable) the score's
+cost term uses for free candidates on eligible shapes: below every paid row so
+free can win, never zero so it cannot dominate by division. Applied uniformly
+to free routes regardless of exposure — the exposure difference is decided by
+the sensitive gate, not by price.
+_Avoid_: free price, effective cost, shadow price
