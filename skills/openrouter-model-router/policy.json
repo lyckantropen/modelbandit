@@ -93,6 +93,8 @@
     "alpha": 0.4,
     "beta": 1.0,
     "free_risk": 0.35,
+    "free_share_inheritance": 0.5,
+    "free_share_inheritance_notes": "A curated Free route (opencode/*, local) inherits this fraction of its family's board share: the free serving is a limited-time, rate-limited surrogate, so it never carries the family's full standing. At 0.5 a coding deal draws ~1/3 free rather than a majority.",
     "free_quota_reserve": 5,
     "thresholds": {
       "top1_min": 0.2,

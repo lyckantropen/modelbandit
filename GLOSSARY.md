@@ -164,6 +164,9 @@ _Avoid_: reference model, benchmark (quality connotations)
 A candidate served at $0: an OpenRouter `:free` slug, an OpenCode
 `opencode/*` free model, or a local model. The *serving* is free, not the
 model family — the same family may serve paid routes with different exposure.
+A curated serving (harness or local) inherits a discounted share of its
+family's popularity: a limited-time, rate-limited surrogate does not carry the
+family's full standing.
 _Avoid_: free model (the model isn't free, the serving is)
 
 **Nominal floor**

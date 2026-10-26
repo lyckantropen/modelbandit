@@ -37,6 +37,10 @@ CACHE_TTL = 24 * 3600
 KEY_CACHE_TTL = 60
 # Free requests planning must leave unspent: the last few are not the plan's.
 DEFAULT_FREE_QUOTA_RESERVE = 5
+# A curated Free route inherits this fraction of its family's board share: the
+# free serving is a limited-time, rate-limited surrogate, so it does not carry
+# the family's full standing.
+DEFAULT_FREE_SHARE_INHERITANCE = 0.5
 
 # Effort intent -> output-token multiplier. Reasoning tokens bill as completion
 # tokens, so deliberation is bought in output spend — the axis that dominates
@@ -442,6 +446,7 @@ class PolicyConfig:
     deal: DealPolicy
     context: ContextGatePolicy
     free_risk: float = DEFAULT_FREE_RISK
+    free_share_inheritance: float = DEFAULT_FREE_SHARE_INHERITANCE
     free_quota_reserve: int = DEFAULT_FREE_QUOTA_RESERVE
 
 
@@ -491,6 +496,16 @@ def load_policy_config(policy: dict) -> PolicyConfig:
         raise SystemExit("policy scoring.free_risk must be a number") from None
     if not math.isfinite(free_risk) or not 0.0 < free_risk < 1.0:
         raise SystemExit("policy scoring.free_risk must be strictly between 0 and 1")
+    inheritance = scoring.get("free_share_inheritance",
+                              DEFAULT_FREE_SHARE_INHERITANCE)
+    try:
+        inheritance = float(inheritance)
+    except (TypeError, ValueError, OverflowError):
+        raise SystemExit(
+            "policy scoring.free_share_inheritance must be a number") from None
+    if not math.isfinite(inheritance) or not 0.0 < inheritance <= 1.0:
+        raise SystemExit("policy scoring.free_share_inheritance must be "
+                         "greater than 0 and at most 1")
     # The reserve is a count of requests held back from planning, so a
     # fractional or negative one is a misconfiguration, not a rounding.
     raw_reserve = scoring.get("free_quota_reserve", DEFAULT_FREE_QUOTA_RESERVE)
@@ -514,6 +529,7 @@ def load_policy_config(policy: dict) -> PolicyConfig:
         ),
         context=ContextGatePolicy(headroom=headroom, margin=margin),
         free_risk=free_risk,
+        free_share_inheritance=inheritance,
         free_quota_reserve=quota_reserve,
     )
 
@@ -562,21 +578,24 @@ def _free_summary(entry: dict, summaries: dict, mid: str | None = None) -> bool:
             or (mid is not None and bool(hint_for(mid, summaries))))
 
 
-def _family_share(share: dict, entry: dict) -> float:
-    """A curated Free route's standing: its family's domain share.
+def _family_share(share: dict, entry: dict, inheritance: float) -> float:
+    """A curated Free route's standing: a discount on its family's domain share.
 
     An ``opencode/*`` or local serving has no leaderboard row of its own; its
-    popularity is the family's revealed preference, exactly the board share an
-    OpenRouter ``:free`` route would carry. The family prefix is the summary
-    reference with any trailing ``:free`` stripped, so a dated
-    ``X-YYYYMMDD:free`` board row still counts toward it. No summary reference
-    means no observable popularity — the standing stays zero.
+    popularity is the family's revealed preference. It inherits only
+    ``inheritance`` of that share: the free serving is a limited-time,
+    rate-limited surrogate for the family, so it does not carry the family's
+    full standing. The family prefix is the summary reference with any trailing
+    ``:free`` stripped, so a dated ``X-YYYYMMDD:free`` board row still counts
+    toward it. No summary reference means no observable popularity — the
+    standing stays zero.
     """
     ref = entry.get("summary_ref")
     if not isinstance(ref, str) or not ref.strip():
         return 0.0
     prefix = ref.removesuffix(":free")
-    return sum(s for key, s in share.items() if key.startswith(prefix))
+    family = sum(s for key, s in share.items() if key.startswith(prefix))
+    return family * inheritance
 
 
 def _free_model_record(mid: str, entry: dict, source: dict | None = None) -> dict:
@@ -593,15 +612,18 @@ def _free_model_record(mid: str, entry: dict, source: dict | None = None) -> dic
 
 
 def merge_free_candidates(share: dict, models: dict, free_models: dict,
-                          summaries: dict) -> tuple[dict, dict]:
+                          summaries: dict, *,
+                          inheritance: float = DEFAULT_FREE_SHARE_INHERITANCE
+                          ) -> tuple[dict, dict]:
     """Merge cataloged OpenCode models and ranked :free routes into candidates.
 
     OpenRouter :free rows retain their own slug even when the API only resolves
     them through a paid family model. Uncataloged or unsummarized ranked routes
     stay visible but the catalog gate prevents the Deal from using them.
-    OpenCode catalog entries are added with their family's domain share (the
-    family's revealed preference standing in for a route with no board row);
-    their context and Exposure remain curated facts, not inferred runtime data.
+    OpenCode catalog entries are added with a discounted share of their family's
+    domain share (the family's revealed preference standing in for a route with
+    no board row); their context and Exposure remain curated facts, not inferred
+    runtime data.
     """
     merged_share = dict(share)
     merged_models = {mid: dict(model) for mid, model in models.items()}
@@ -624,14 +646,17 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
             continue
         merged_share.setdefault(prefix, 0.0)
         if merged_share[prefix] == 0.0:
-            merged_share[prefix] = _family_share(merged_share, entry)
+            merged_share[prefix] = _family_share(merged_share, entry,
+                                                 inheritance)
         merged_models.setdefault(prefix, _free_model_record(prefix, entry))
 
     return merged_share, merged_models
 
 
 def merge_local_candidates(share: dict, models: dict, served: dict,
-                           free_models: dict) -> tuple[dict, dict]:
+                           free_models: dict, *,
+                           inheritance: float = DEFAULT_FREE_SHARE_INHERITANCE
+                           ) -> tuple[dict, dict]:
     """Join this run's served local ids to the curated Free catalog.
 
     Served ids without a local Exposure catalog entry are ignored. Cataloged
@@ -649,7 +674,7 @@ def merge_local_candidates(share: dict, models: dict, served: dict,
             continue
         merged_share.setdefault(mid, 0.0)
         if merged_share[mid] == 0.0:
-            merged_share[mid] = _family_share(merged_share, entry)
+            merged_share[mid] = _family_share(merged_share, entry, inheritance)
         # The curated context window is policy; the probe establishes that this
         # candidate is currently served. Runtime metadata is not policy.
         merged_models[mid] = _free_model_record(mid, entry, served[mid])
@@ -1309,7 +1334,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     for name, tags in domains.items():
         share, _, _ = domain_candidates(classif, tags, models, by_canon)
         share, _ = merge_free_candidates(
-            share, models, policy.get("free_models", {}), summaries)
+            share, models, policy.get("free_models", {}), summaries,
+            inheritance=config.free_share_inheritance)
         for mid in local_ids:
             if mid in models:
                 share.setdefault(mid, 0.0)
@@ -1592,13 +1618,15 @@ def main() -> None:
                          refresh=args.refresh)["data"]
     if args.check_policy:
         share, models = merge_free_candidates(
-            {}, models, policy["free_models"], policy.get("summaries", {}))
+            {}, models, policy["free_models"], policy.get("summaries", {}),
+            inheritance=config.free_share_inheritance)
         # Check-policy sees this invocation's same local candidates as a domain
         # run, but still performs no persistent policy update.
         served_local = probe_local_models()
         local_ids = local_candidate_ids(served_local, policy["free_models"])
         _, models = merge_local_candidates(
-            share, models, served_local, policy["free_models"])
+            share, models, served_local, policy["free_models"],
+            inheritance=config.free_share_inheritance)
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
@@ -1619,13 +1647,15 @@ def main() -> None:
 
     share, matches, known_tags = domain_candidates(classif, tags, models, by_canon)
     share, models = merge_free_candidates(
-        share, models, policy["free_models"], policy.get("summaries", {}))
+        share, models, policy["free_models"], policy.get("summaries", {}),
+        inheritance=config.free_share_inheritance)
     # The local discovery is a live, per-run input, not persistent catalog
     # state. Only served ids matched to an Exposure=local policy entry join.
     served_local = probe_local_models()
     local_ids = local_candidate_ids(served_local, policy["free_models"])
     share, models = merge_local_candidates(
-        share, models, served_local, policy["free_models"])
+        share, models, served_local, policy["free_models"],
+        inheritance=config.free_share_inheritance)
     for mid in share:
         if is_free_route(mid) and mid in models:
             matches[mid] = "catalog"

@@ -45,7 +45,8 @@ class OpenCodeInheritanceTests(unittest.TestCase):
                 "summary_ref": "z-ai/glm-5.3-flash",
             },
         })
-        share, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES)
+        share, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
+                                             inheritance=1.0)
         self.assertAlmostEqual(
             share["opencode/deepseek-v4.1-flash-free"], 0.008 + 0.0172)
         self.assertAlmostEqual(share["opencode/glm-5.3-flash-free"], 0.003)
@@ -66,7 +67,8 @@ class OpenCodeInheritanceTests(unittest.TestCase):
             "exposure": "trains",
             "summary_ref": "nvidia/nemotron-3-ultra-550b-a55b",
         }})
-        share, _ = bind.merge_free_candidates(share2, {}, cat, SUMMARIES)
+        share, _ = bind.merge_free_candidates(share2, {}, cat, SUMMARIES,
+                                             inheritance=1.0)
         self.assertAlmostEqual(share["opencode/nemotron-3-ultra-free"], 0.0018)
 
     def test_entry_without_summary_ref_is_not_merged(self):
@@ -85,9 +87,52 @@ class LocalInheritanceTests(unittest.TestCase):
         })
         served = {"lmstudio/qwen/qwen3-4b": {"context_length": 131072}}
         share, _ = bind.merge_local_candidates(
-            dict(SHARE), {}, served, free_models)
+            dict(SHARE), {}, served, free_models, inheritance=1.0)
         self.assertAlmostEqual(share["lmstudio/qwen/qwen3-4b"],
                                0.008 + 0.0172)
+
+
+class InheritanceDiscountTests(unittest.TestCase):
+    """A free serving is a limited-time surrogate: it inherits part of the
+    family's standing, not all of it."""
+
+    def test_default_discounts_the_family_share(self):
+        cat = catalog({"opencode/deepseek-v4.1-flash-free": {
+            "exposure": "no-retention",
+            "summary_ref": "deepseek/deepseek-v4.1-flash",
+        }})
+        share, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES)
+        self.assertAlmostEqual(share["opencode/deepseek-v4.1-flash-free"],
+                               (0.008 + 0.0172)
+                               * bind.DEFAULT_FREE_SHARE_INHERITANCE)
+
+    def test_lower_inheritance_lowers_standing(self):
+        cat = catalog({"opencode/deepseek-v4.1-flash-free": {
+            "summary_ref": "deepseek/deepseek-v4.1-flash",
+        }})
+        half, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
+                                             inheritance=0.5)
+        tenth, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
+                                              inheritance=0.1)
+        self.assertLess(tenth["opencode/deepseek-v4.1-flash-free"],
+                        half["opencode/deepseek-v4.1-flash-free"])
+        self.assertGreater(tenth["opencode/deepseek-v4.1-flash-free"], 0.0)
+
+    def test_out_of_range_inheritance_fails_loudly(self):
+        for bad in (0.0, -0.5, 1.5):
+            scoring = {"alpha": 0.4, "beta": 1.0,
+                       "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
+                                      "top2_max": 0.75},
+                       "free_share_inheritance": bad}
+            policy = {"scoring": scoring,
+                      "affinity": {"blend_weight": 0.6, "eligibility_top_k": 5,
+                                   "factors": {"favor_validated": 3.0,
+                                               "favor_suspected": 2.0,
+                                               "avoid_validated": 0.3,
+                                               "avoid_suspected": 0.5}}}
+            with self.assertRaisesRegex(SystemExit,
+                                        "free_share_inheritance"):
+                bind.load_policy_config(policy)
 
 
 if __name__ == "__main__":
