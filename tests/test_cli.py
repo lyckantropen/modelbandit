@@ -229,12 +229,16 @@ class CliTests(unittest.TestCase):
         pol = json.loads(json.dumps(POLICY))
         pol["domains"] = {"writing": ["content_writing"]}
         pol["affinity"].update(blend_weight=0.0, eligibility_top_k=5)
+        # A family with no ranked share in this fixture keeps the free
+        # candidates genuinely share-less, so the zero-trend signal fires
+        # (family-share inheritance would otherwise give them real rotation).
+        pol["summaries"]["ghost/family"] = "family summary"
         pol["free_models"] = {
             "local-coder": {"context_length": 262_144, "exposure": "local",
-                            "summary_ref": "deepseek/deepseek-v4-pro"},
+                            "summary_ref": "ghost/family"},
             "opencode/free-coder": {
                 "context_length": 262_144, "exposure": "no-retention",
-                "summary_ref": "deepseek/deepseek-v4-pro"},
+                "summary_ref": "ghost/family"},
         }
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)

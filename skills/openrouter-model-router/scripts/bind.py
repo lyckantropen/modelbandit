@@ -516,6 +516,23 @@ def _free_summary(entry: dict, summaries: dict, mid: str | None = None) -> bool:
             or (mid is not None and bool(hint_for(mid, summaries))))
 
 
+def _family_share(share: dict, entry: dict) -> float:
+    """A curated Free route's standing: its family's domain share.
+
+    An ``opencode/*`` or local serving has no leaderboard row of its own; its
+    popularity is the family's revealed preference, exactly the board share an
+    OpenRouter ``:free`` route would carry. The family prefix is the summary
+    reference with any trailing ``:free`` stripped, so a dated
+    ``X-YYYYMMDD:free`` board row still counts toward it. No summary reference
+    means no observable popularity — the standing stays zero.
+    """
+    ref = entry.get("summary_ref")
+    if not isinstance(ref, str) or not ref.strip():
+        return 0.0
+    prefix = ref.removesuffix(":free")
+    return sum(s for key, s in share.items() if key.startswith(prefix))
+
+
 def _free_model_record(mid: str, entry: dict, source: dict | None = None) -> dict:
     """Build route-specific metadata; never inherit a sibling's paid price."""
     model = dict(source or {})
@@ -536,8 +553,9 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
     OpenRouter :free rows retain their own slug even when the API only resolves
     them through a paid family model. Uncataloged or unsummarized ranked routes
     stay visible but the catalog gate prevents the Deal from using them.
-    OpenCode catalog entries are added with zero observed share; their context
-    and Exposure remain curated facts, not inferred runtime data.
+    OpenCode catalog entries are added with their family's domain share (the
+    family's revealed preference standing in for a route with no board row);
+    their context and Exposure remain curated facts, not inferred runtime data.
     """
     merged_share = dict(share)
     merged_models = {mid: dict(model) for mid, model in models.items()}
@@ -559,6 +577,8 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
                 or not _free_summary(entry, summaries, prefix)):
             continue
         merged_share.setdefault(prefix, 0.0)
+        if merged_share[prefix] == 0.0:
+            merged_share[prefix] = _family_share(merged_share, entry)
         merged_models.setdefault(prefix, _free_model_record(prefix, entry))
 
     return merged_share, merged_models
@@ -582,6 +602,8 @@ def merge_local_candidates(share: dict, models: dict, served: dict,
         if not isinstance(entry, dict) or entry.get("exposure") != "local":
             continue
         merged_share.setdefault(mid, 0.0)
+        if merged_share[mid] == 0.0:
+            merged_share[mid] = _family_share(merged_share, entry)
         # The curated context window is policy; the probe establishes that this
         # candidate is currently served. Runtime metadata is not policy.
         merged_models[mid] = _free_model_record(mid, entry, served[mid])

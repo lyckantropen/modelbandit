@@ -77,12 +77,37 @@ material. Content-inclusion, any-of; a mere path mention does not trip it.
 Outcome: the shape's sensitive flag.
 _Avoid_: detector, classifier (suggests learned behaviour; it is a list)
 
+**Footprint**
+A Ticket shape's measured demand on a candidate — input tokens times growth
+headroom, and output tokens times the rung's multiplier. Compared against the
+candidate's context window and completion cap. Measured, never judged.
+_Avoid_: complexity, size, difficulty (that is deliberation)
+
+**Difficulty**
+How much deliberation a ticket needs: the effort intent, plus the agent's
+task-fit judgment. Judged, never measured — and never compared to a window.
+_Avoid_: complexity (it names both halves at once and so neither)
+
 **Context gate**
-The mechanical exclusion of free candidates whose shape's input budget (with
-growth headroom) does not fit a share of the model's context window. Free-tier
-only: a free route has no paid tier to upgrade into, so a context blowout is a
-hard failure, not taste. The paid tier stays judge-only.
+The mechanical exclusion of free candidates whose Footprint exceeds their
+capacity, on either dimension — the input budget against a share of the context
+window, the rung-priced output against a share of the completion cap. Free-tier
+only: a free route has no paid tier to upgrade into, so an overrun is a hard
+failure, not taste. The paid tier is flagged and stays judge-only.
 _Avoid_: context flooring, token cap
+
+**Free risk**
+The policy fraction of a paid ticket that a Free route is charged in the score,
+standing for the expected cost of its failure modes — a re-run after a rate
+limit, a route withdrawn mid-run, an outage. It is why free wins sometimes but
+not most of the time, and why it may win everything on a job it genuinely fits.
+_Avoid_: penalty, handicap, discount
+
+**Free share**
+The fraction of a deal's tickets that Free routes drew. Reported, never capped
+and never floored: some of the time on ordinary shapes, all of it on a shape
+free genuinely serves best, none when it does not stack up.
+_Avoid_: quota, free budget, cap
 
 ### Taste
 
@@ -132,9 +157,9 @@ model family — the same family may serve paid routes with different exposure.
 _Avoid_: free model (the model isn't free, the serving is)
 
 **Nominal floor**
-The fixed per-token cost (default $0.01/M output, configurable) the score's
-cost term uses for free candidates on eligible shapes: below every paid row so
-free can win, never zero so it cannot dominate by division. Applied uniformly
-to free routes regardless of exposure — the exposure difference is decided by
-the sensitive gate, not by price.
+A Free route's effective ticket price in the score: Free risk times the pool's
+cheapest paid ticket. Never zero, so free cannot win by division, and always
+below a healthy paid row, so it can still win. Applied uniformly to Free routes
+regardless of Exposure — the Exposure difference is decided by the Sensitive
+gate, not by price.
 _Avoid_: free price, effective cost, shadow price
