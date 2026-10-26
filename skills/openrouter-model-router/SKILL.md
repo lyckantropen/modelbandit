@@ -19,7 +19,19 @@ to a rung on each candidate's ladder.
 1. **Collect the demand.** Domain (one of the five in `policy.json`), effort
    intent, tickets, budget. The token profile defaults to the domain; output
    volume is the cost driver for authoring work and is stated before pricing.
-   Done when: each input is stated or defaulted and none is guessed.
+   Apply the Secrets gate to the shape's material: consult the project's
+   optional secrets file
+   (`modelrouter.secrets.json` — a gitignoreable file in the working tree),
+   falling back to the built-in default. Content-inclusion, any-of: the shape
+   is **Sensitive** when its material carries content drawn from files
+   outside the working folder, or passwords/tokens/keys, or identifiers
+   readable from this machine's state — a mere path mention does not trip
+   it; any one item does. The project file can tighten the default, never
+   silently loosen it. The verdict is decided at collection — never a mood
+   declared mid-run.
+   Done when: each input is stated or defaulted and none is guessed — the
+   Secrets gate's verdict included; a Sensitive shape goes to the script as
+   `--sensitive`.
 
 2. **Pull popularity.** Run `scripts/bind.py` (mechanics: `--help`). It reads
    the task-classification leaderboards and the daily token rankings, cached
@@ -57,10 +69,10 @@ to a rung on each candidate's ladder.
    project replays the same deal. Budget pressure moves within the order
    toward cheaper rows — never outside the popularity set.
    One invocation deals one ticket shape — a run's domain, effort, token
-   profile and `--fit` combination — so tickets of the same shape share one
-   task-fit assessment by construction: the step-4 judgments are made once for
-   the run and every ticket the deal draws inherits them. A run of a different
-   shape is a different invocation.
+   profile, `--fit` and `--sensitive` combination — so tickets of the same
+   shape share one task-fit assessment by construction: the step-4 judgments
+   are made once for the run and every ticket the deal draws inherits them.
+   A run of a different shape is a different invocation.
    Done when: a single task names one pick (score and fit both shown), or a
    batch names its deal with per-model ticket counts and a combined projection.
 
@@ -128,6 +140,20 @@ to a rung on each candidate's ladder.
   (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
   avoid/suspected ×0.5). Longest prefix wins. The deal is the only place taste
   acts — the ranking itself is never reordered.
+
+- **Exposure & Sensitive** — Sensitive is the Ticket shape's fifth element,
+  bound per invocation (`--sensitive`) from the Secrets gate's verdict at
+  demand collection. Exposure is a candidate's data-handling class —
+  no-retention (input neither stored nor trained on), trains (input may be
+  stored, collected, or trained on), local (runs on this machine) — a
+  property of the serving route, never inferred from price: free does not
+  imply trains, paid does not imply no-retention, an unknown free route
+  defaults to trains. On a Sensitive shape the exposed — `trains` — are
+  excluded from the pick and the deal, marked in the table with the reason
+  (`exposed (trains)`), never hidden; no-retention free routes and local
+  models stay admitted. Exposure, not price, decides — and one admission
+  verdict serves both the table and the deal, so the two never disagree
+  about what may serve a shape.
 
 - **Token profiles** — cost is output-weighted for authoring: a `.md` research
   note is mostly completion tokens (authoring: 20K in / 12K out / 40% cached),
