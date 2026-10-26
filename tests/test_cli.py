@@ -546,6 +546,62 @@ class CliTests(unittest.TestCase):
                    if "nvidia/nemotron:free |" in ln)
         self.assertIn("context", row)
 
+    def test_paid_candidate_over_completion_cap_is_flagged_but_kept(self):
+        world = build_world()
+        for endpoint in world["endpoints"]["deepseek/deepseek-v4-pro-0813"]:
+            endpoint["max_completion_tokens"] = 16_000
+
+        out, _, code, _ = self.run_cli("--domain", "writing", "--effort",
+                                       "thorough", "--out-tokens", "12_000",
+                                       world=world)
+
+        self.assertIsNone(code)
+        self.assertIn("| admit |", out)
+        row = next(ln for ln in out.splitlines()
+                   if "deepseek/deepseek-v4-pro-0813 |" in ln)
+        self.assertIn("over completion cap", row)
+        self.assertIn("default pick (top of task order):", out)
+
+    def test_paid_candidate_over_window_is_flagged_but_kept(self):
+        world = build_world()
+        target = next(model for model in world["models"]
+                      if model["id"] == "deepseek/deepseek-v4-pro-0813")
+        target["context_length"] = 65_536
+
+        out, _, code, _ = self.run_cli("--domain", "writing", "--in-tokens",
+                                       "40_000", world=world)
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if "deepseek/deepseek-v4-pro-0813 |" in ln)
+        self.assertIn("over window", row)
+        self.assertNotIn("over completion cap", row)
+        self.assertIn("default pick (top of task order):", out)
+
+    def test_free_candidate_over_catalog_completion_cap_is_excluded_from_deal(self):
+        policy = json.loads(json.dumps(POLICY))
+        policy["free_models"] = {"vendor/model": {
+            "context_length": 262_144, "max_completion_tokens": 16_000,
+            "exposure": "no-retention",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+        world = build_world()
+        world["models"].append(make_model("vendor/model:free", "0", "0", "0"))
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": "vendor/model:free", "tag_usage_share": 0.25})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--effort", "thorough", "--deal",
+            "--tickets", "8", world=world)
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if "vendor/model:free |" in ln)
+        self.assertIn("over completion cap", row)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn("vendor/model:free", deal)
+
     def test_sensitive_deal_never_draws_an_exposed_candidate(self):
         self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
         out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",

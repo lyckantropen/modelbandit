@@ -43,6 +43,14 @@ class FreeCatalogPolicyTests(unittest.TestCase):
                 "vendor/model": {"context_length": "65536",
                                  "exposure": "trains"}}})
 
+    def test_invalid_completion_cap_fails_loudly(self):
+        with self.assertRaisesRegex(
+                SystemExit, "free_models.vendor/model.max_completion_tokens"):
+            bind.load_free_models({"free_models": {
+                "vendor/model": {"context_length": 65_536,
+                                  "max_completion_tokens": 0,
+                                  "exposure": "trains"}}})
+
 
 class FreeCandidateTests(unittest.TestCase):
     def test_cataloged_opencode_route_is_merged_with_catalog_window(self):

@@ -134,6 +134,38 @@ class AdmissionTests(unittest.TestCase):
 
         self.assertFalse(decision.admitted)
         self.assertIn("context", decision.reason)
+        self.assertIn("over window", decision.reason)
+
+    def test_free_candidate_over_rung_priced_completion_cap_is_excluded(self):
+        shape = bind.Shape(output_tokens=12_000)
+        facts = bind.Candidate("nvidia/nemotron:free", "trains",
+                               is_free=True, completion_cap=16_000,
+                               output_multiplier=2.5)
+
+        decision = bind.admit(shape, facts)
+
+        self.assertFalse(decision.admitted)
+        self.assertIn("over completion cap", decision.reason)
+
+    def test_paid_candidate_over_completion_cap_is_admitted_with_flag(self):
+        shape = bind.Shape(output_tokens=12_000)
+        facts = bind.Candidate("vendor/model", "no-retention",
+                               completion_cap=16_000, output_multiplier=2.5)
+
+        decision = bind.admit(shape, facts)
+
+        self.assertTrue(decision.admitted)
+        self.assertIn("over completion cap", decision.reason)
+
+    def test_paid_candidate_over_window_is_admitted_with_flag(self):
+        shape = bind.Shape(input_tokens=40_000)
+        facts = bind.Candidate("vendor/model", "no-retention",
+                               context_length=65_536)
+
+        decision = bind.admit(shape, facts)
+
+        self.assertTrue(decision.admitted)
+        self.assertIn("over window", decision.reason)
 
     def test_paid_candidate_is_not_context_gated(self):
         shape = bind.Shape(input_tokens=40_000)
@@ -193,6 +225,21 @@ class ContextPolicyTests(unittest.TestCase):
 
         self.assertTrue(bind.admit(shape, free_route).admitted)
 
+    def test_configured_context_margin_applies_to_completion_cap(self):
+        config = bind.load_policy_config(
+            {**self.POLICY,
+             "context_gate": {"headroom": 1, "margin": 0.75}})
+        shape = bind.Shape(output_tokens=20_000,
+                           context_headroom=config.context.headroom,
+                           context_margin=config.context.margin)
+        free_route = bind.Candidate("provider/route:free", "trains",
+                                    is_free=True, completion_cap=25_000)
+
+        decision = bind.admit(shape, free_route)
+
+        self.assertFalse(decision.admitted)
+        self.assertIn("over completion cap", decision.reason)
+
     def test_invalid_context_policy_boundaries_fail_loudly(self):
         for policy in (
                 {"context_gate": {"headroom": 0.99}},
@@ -232,6 +279,26 @@ class CandidateFactsTests(unittest.TestCase):
                                   model={"context_length": 65_536})
         self.assertTrue(facts.is_free)
         self.assertEqual(facts.context_length, 65_536)
+
+    def test_endpoint_completion_cap_overrides_catalog_cap(self):
+        policy = {"free_models": {"vendor/model": {
+            "context_length": 65_536, "max_completion_tokens": 65_536,
+            "exposure": "trains"}}}
+        facts = bind.candidate_for(
+            "vendor/model:free", policy, model={},
+            endpoints=[{"max_completion_tokens": 32_000},
+                       {"max_completion_tokens": 16_000}])
+
+        self.assertEqual(facts.completion_cap, 16_000)
+
+    def test_catalog_completion_cap_is_fallback_without_endpoint_cap(self):
+        policy = {"free_models": {"vendor/model": {
+            "context_length": 65_536, "max_completion_tokens": 24_000,
+            "exposure": "trains"}}}
+        facts = bind.candidate_for("vendor/model:free", policy, model={},
+                                   endpoints=[{"pricing": {}}])
+
+        self.assertEqual(facts.completion_cap, 24_000)
 
     def test_policy_override_is_read(self):
         facts = bind.candidate_for("z-ai/glm-5.3-flash:free", self.POLICY)
