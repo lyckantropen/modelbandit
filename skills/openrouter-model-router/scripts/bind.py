@@ -242,10 +242,15 @@ def validate_secrets_rules(payload, *, writer: bool = False,
         rules[key] = list(values)
 
     if writer:
-        for key in ("identifying", "commit"):
-            if key not in payload or not isinstance(payload[key], bool):
+        # Either switch may stand alone: "identifying" implies gitignore, and
+        # plain rules mean a committed file. Only a present, non-boolean value
+        # is an error.
+        defaults = {"identifying": False, "commit": True}
+        for key, default in defaults.items():
+            value = payload.get(key, default)
+            if not isinstance(value, bool):
                 raise SystemExit(f"{key} must be a boolean")
-            rules[key] = payload[key]
+            rules[key] = value
     return rules
 
 
@@ -642,14 +647,16 @@ def run_secrets_writer(*, working_dir: str | None = None,
     print(f"added {counts(added)}; already present {counts(present)}")
     print(f"secrets rules: {rules_path}")
 
+    ignore_path = os.path.join(root, ".gitignore")
+    try:
+        with open(ignore_path, encoding="utf-8") as f:
+            ignored_lines = f.read().splitlines()
+    except FileNotFoundError:
+        ignored_lines = []
+    already_ignored = any(line.strip() == RULES_FILE for line in ignored_lines)
+
     if submitted["identifying"] or not submitted["commit"]:
-        ignore_path = os.path.join(root, ".gitignore")
-        try:
-            with open(ignore_path, encoding="utf-8") as f:
-                ignored_lines = f.read().splitlines()
-        except FileNotFoundError:
-            ignored_lines = []
-        if any(line.strip() == RULES_FILE for line in ignored_lines):
+        if already_ignored:
             print(f"gitignore: already contains {RULES_FILE}")
         else:
             with open(ignore_path, "a+b") as f:
@@ -660,6 +667,9 @@ def run_secrets_writer(*, working_dir: str | None = None,
                         f.write(b"\n")
                 f.write((RULES_FILE + "\n").encode("utf-8"))
             print(f"gitignore: appended {RULES_FILE} (identifying rules or commit=false)")
+    elif already_ignored:
+        # A later run does not re-assert the commit decision; say what is true.
+        print(f"gitignore: already lists {RULES_FILE}; left unchanged")
     else:
         print(f"gitignore: unchanged; {RULES_FILE} is meant to be committed")
     return 0
