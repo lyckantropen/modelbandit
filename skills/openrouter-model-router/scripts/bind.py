@@ -60,6 +60,8 @@ BASES = ("worst", "primary", "best")
 # Free route can win where fit and context allow, and above zero so it cannot
 # win by division alone.
 DEFAULT_FREE_FLOOR = 0.01
+FREE_SHARE_CHECK_TICKETS = 100
+FREE_SHARE_CHECK_SEED = "policy-check-free-share"
 
 DEFAULT_POLICY = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "policy.json"
@@ -751,6 +753,13 @@ def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
             if candidate_for(mid, policy, local=mid in local).is_free}
 
 
+def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, int]:
+    """Count tickets dealt to Free routes, independent of their Exposure."""
+    free = free_route_ids((row["mid"] for row in rows), policy, local=local)
+    total = sum(row["tickets"] for row in rows)
+    return sum(row["tickets"] for row in rows if row["mid"] in free), total
+
+
 @dataclasses.dataclass(frozen=True)
 class Decision:
     """An admission verdict: admitted, or excluded with a visible reason.
@@ -974,6 +983,49 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                         if mid.startswith(key) and mid in eligible), None)
             if hit:
                 coverage.append(f"{key} ranks in {name} ({hit}) but has no fit there")
+
+    # `--check-policy` is stateless: report a zero in a reproducible diagnostic
+    # Deal for the current snapshot rather than claiming a historical trend.
+    free_share_zeros = []
+    for name in domains:
+        profile_name = DOMAIN_PROFILE.get(name, "agentic")
+        in_tok, out_tok, cached = PROFILES[profile_name]
+        shape = Shape(sensitive=False, input_tokens=in_tok,
+                      context_headroom=config.context.headroom,
+                      context_margin=config.context.margin)
+        aff = domain_weights(signals, name, config.factors)
+        admitted = frozenset(
+            mid for mid in share_by_domain[name]
+            if admit(shape, candidate_for(mid, policy, model=models.get(mid))).admitted)
+        pool = eligibility_pool(share_by_domain[name], models, aff, pool_k,
+                                admitted)
+        free = free_route_ids((mid for mid, _ in pool), policy)
+        if not free:
+            continue
+        costs = {}
+        for mid, _ in pool:
+            model = models[mid]
+            pricing = price_model(model, endpoint_pricings(mid, False),
+                                  in_tok, out_tok, cached, mult_for(model, intent))
+            costs[mid] = pricing[basis]
+        effective = effective_costs(
+            costs,
+            free_floor=nominal_floor_cost(config.free_floor, out_tok,
+                                          EFFORT_MULTIPLIERS[intent]),
+            free=free)
+        scores = {mid: standing(share, effective[mid], None,
+                                config.alpha, config.beta)
+                  for (mid, share) in pool}
+        rows = plan_deal(
+            share_by_domain[name], models, aff,
+            DealParameters(blend_weight=config.deal.blend_weight,
+                           top_k=pool_k, seed=FREE_SHARE_CHECK_SEED,
+                           tickets=FREE_SHARE_CHECK_TICKETS,
+                           fit_adjusted_task_scores=scores,
+                           admitted=admitted))
+        free_tickets, dealt_tickets = deal_free_share(rows, policy)
+        if dealt_tickets and free_tickets == 0:
+            free_share_zeros.append((name, profile_name, dealt_tickets))
     age = policy_age_days(policy_path)
 
     print("# Policy check\n")
@@ -997,6 +1049,16 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     print("\n## Signal coverage gaps (opinion elsewhere, silent here)")
     for line in sorted(coverage) or ["— none"]:
         print(f"- {line}")
+
+    print("\n## Free-share trends to zero (current snapshot; not longitudinal)")
+    print("Stateless check: a reproducible 100-ticket diagnostic Deal, not a "
+          "comparison with prior refreshes.")
+    for signal in free_share_zeros:
+        name, profile_name, tickets = signal
+        print(f"- free-share-trends-to-zero: {name} ({profile_name}, {intent}, "
+              f"non-Sensitive) — eligible Free routes drew 0/{tickets} tickets")
+    if not free_share_zeros:
+        print("- — none")
 
     alpha, beta = config.alpha, config.beta
     thresholds = config.thresholds
@@ -1042,6 +1104,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         print("(no domain with 3+ candidates — balance not judgeable)")
 
     due = bool(gaps) or bool(stale) or bool(stale_signals) or bool(coverage) \
+        or bool(free_share_zeros) \
         or (age is not None and age > 30)
     reasons = []
     if gaps:
@@ -1052,6 +1115,9 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         reasons.append(f"{len(stale_signals)} stale signal{'' if len(stale_signals) == 1 else 's'}")
     if coverage:
         reasons.append(f"{len(coverage)} signal gap{'' if len(coverage) == 1 else 's'}")
+    if free_share_zeros:
+        reasons.append(f"{len(free_share_zeros)} zero Free-share signal"
+                       f"{'s' if len(free_share_zeros) != 1 else ''}")
     if age is not None and age > 30:
         reasons.append(f"policy {age} days old")
     print(f"\nresearch cycle due: {'yes (' + ', '.join(reasons) + ')' if due else 'no'}")
@@ -1399,6 +1465,11 @@ def main() -> None:
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
+        free_tickets, dealt_tickets = deal_free_share(
+            rows, policy, local=local_ids)
+        free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0
+        print(f"free share: {free_tickets}/{dealt_tickets} tickets "
+              f"({free_share:.0%})")
     else:
         total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "

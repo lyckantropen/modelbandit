@@ -189,6 +189,62 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("ghost/unknown-20260101", gaps)  # outside eligibility
         self.assertIn("research cycle due: yes", out)
 
+    def test_check_policy_reports_zero_free_share_for_an_eligible_safe_shape(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["scoring"].update(alpha=1.0, beta=0.0)
+        pol["affinity"].update(blend_weight=0.0, eligibility_top_k=5)
+        pol["free_models"] = {"vendor/model": {
+            "context_length": 262_144, "exposure": "trains",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        with open(self.policy_path, "rb") as f:
+            before = f.read()
+
+        world = build_world()
+        world["models"] = [
+            make_model(f"m{i}/model", "0.000001", "0.000002", "0.000001")
+            for i in range(4)] + [make_model("vendor/model:free", "0", "0", "0")]
+        world["classifications"]["classifications"] = [{
+            "tag": "content_writing", "usage_share": 1.0,
+            "models": ([{"id": f"m{i}/model", "tag_usage_share": 0.25}
+                        for i in range(4)]
+                       + [{"id": "vendor/model:free", "tag_usage_share": 1e-30}]),
+        }]
+
+        out, _, code, _ = self.run_cli("--check-policy", world=world)
+
+        self.assertIsNone(code)
+        self.assertIn("free-share-trends-to-zero", out)
+        self.assertIn("writing", out)
+        self.assertIn("0/100", out)
+        with open(self.policy_path, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_check_policy_does_not_flag_a_free_route_that_gets_share(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["scoring"].update(alpha=1.0, beta=0.0)
+        pol["affinity"].update(blend_weight=0.0, eligibility_top_k=1)
+        pol["free_models"] = {"vendor/model": {
+            "context_length": 262_144, "exposure": "trains",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        world = build_world()
+        world["models"] = [make_model("vendor/model:free", "0", "0", "0")]
+        world["classifications"]["classifications"] = [{
+            "tag": "content_writing", "usage_share": 1.0,
+            "models": [{"id": "vendor/model:free", "tag_usage_share": 1.0}],
+        }]
+
+        out, _, code, _ = self.run_cli("--check-policy", world=world)
+
+        self.assertIsNone(code)
+        self.assertNotIn("- free-share-trends-to-zero:", out)
+
     def test_signal_coverage_gap_closed_by_explicit_neutral(self):
         pol = json.loads(json.dumps(POLICY))
         pol["hints"]["ghost/unknown-20260101"]["fit"]["writing"] = "neutral"
@@ -312,6 +368,23 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(sum(int(ln.split("|")[7].strip()) for ln in rows), 12)
         self.assertIn("projection at 12 ticket(s)", out)
+
+    def test_deal_reports_free_share_by_serving_route(self):
+        self.floor_policy({"vendor/model": self.FREE_CATALOG["vendor/other"]},
+                          alpha=1.0, beta=1.0)
+        world = self.free_world(("vendor/model:free", 1.0))
+        world["classifications"]["classifications"] = [{
+            "tag": "content_writing", "usage_share": 1.0,
+            "models": [{"id": "vendor/model:free", "tag_usage_share": 1.0}],
+        }]
+
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
+                                       "--deal", "--seed", "proj", world=world)
+
+        self.assertIsNone(code)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("vendor/model:free", deal)
+        self.assertIn("free share: 12/12 tickets (100%)", deal)
 
     def test_deal_is_deterministic_per_seed(self):
         args = ("--domain", "writing", "--tickets", "12", "--deal")
