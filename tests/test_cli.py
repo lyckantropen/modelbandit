@@ -19,12 +19,16 @@ import bind  # noqa: E402
 
 
 def make_model(mid, prompt, completion, cache_read, canonical=None,
-               params=("reasoning_effort",)):
+               params=("reasoning_effort",), created=None, context=None):
     m = {"id": mid, "supported_parameters": list(params),
          "pricing": {"prompt": prompt, "completion": completion,
                      "input_cache_read": cache_read}}
     if canonical:
         m["canonical_slug"] = canonical
+    if created:
+        m["created"] = created
+    if context:
+        m["context_length"] = context
     return m
 
 
@@ -59,13 +63,20 @@ def build_world():
         {"tag": "math", "usage_share": 0.2, "models": [
             {"id": "xiaomi/mimo-v2.6-pro-20260921", "tag_usage_share": 1.0},
         ]},
+        {"tag": "translation", "usage_share": 0.03, "models": [
+            {"id": "deepseek/deepseek-v4-flash-20260101", "tag_usage_share": 0.6},
+            {"id": "xiaomi/mimo-v2.6-pro-20260921", "tag_usage_share": 0.4},
+        ]},
     ]}
     rankings = {"data": [
-        {"model_permaslug": "deepseek/deepseek-v4-pro-20260813",
+        {"date": "2026-10-24",
+         "model_permaslug": "deepseek/deepseek-v4-pro-20260813",
          "total_tokens": "2000000000"},
-        {"model_permaslug": "deepseek/deepseek-v4-pro-20260423",
+        {"date": "2026-10-24",
+         "model_permaslug": "deepseek/deepseek-v4-pro-20260423",
          "total_tokens": "3000000000"},
-        {"model_permaslug": "ghost/unknown-20260101", "total_tokens": "100"},
+        {"date": "2026-10-24",
+         "model_permaslug": "ghost/unknown-20260101", "total_tokens": "100"},
         {"model_permaslug": "other", "total_tokens": "9999999"},
     ]}
     endpoints = {
@@ -293,6 +304,172 @@ class CliTests(unittest.TestCase):
         self.assertIn("OUT OF BALANCE", balance)      # as before: 60/80 breaches
         self.assertIn("coefficient re-tune due: yes", out)
         self.assertNotIn("not judgeable", balance)    # five candidates are judgeable
+
+    # --- scope facts ------------------------------------------------------
+
+    def test_scope_alone_implies_the_check(self):
+        out, _, code, calls = self.run_cli("--scope")
+        self.assertIsNone(code)
+        self.assertIn("# Policy check", out)
+        self.assertIn("research cycle due:", out)
+        self.assertIn("rankings.json", [c[1] for c in calls])
+
+    def test_bare_check_fetches_no_rankings_and_prints_no_facts(self):
+        out, _, code, calls = self.run_cli("--check-policy")
+        self.assertIsNone(code)
+        self.assertNotIn("ranks:", out)
+        self.assertNotIn("catalog:", out)
+        self.assertNotIn("rankings.json", [c[1] for c in calls])
+
+    def test_gap_bullets_carry_catalog_and_ranks_facts(self):
+        out, _, code, _ = self.run_cli("--scope")
+        self.assertIsNone(code)
+        flash = out[out.index("- deepseek/deepseek-v4-flash (writing)"):
+                    out.index("- ghost/unknown-20260101")]
+        self.assertIn("  ranks: writing #4/4, other tags: translation #1/2",
+                      flash)
+        self.assertIn("catalog: created ?, context ?, "
+                      "$0.20/$1.00 per 1M in/out, "
+                      "window: 0.00T tokens, 0/30 days",
+                      " ".join(flash.split()))
+        mimo = out[out.index("- xiaomi/mimo-v2.6-pro (coding)"):
+                   out.index("## Stale summaries")]
+        self.assertIn("  ranks: coding #1/1, other tags: translation #2/2",
+                      mimo)
+        self.assertIn("$0.43/$0.87 per 1M in/out", mimo)
+        ghost = out[out.index("- ghost/unknown-20260101"):
+                    out.index("- xiaomi/mimo-v2.6-pro (coding)")]
+        self.assertIn("  ranks: writing #3/4", ghost)
+        self.assertIn("  catalog: not in model list, "
+                      "window: 0.00T tokens, 1/30 days", ghost)
+
+    def test_stale_bullets_carry_absent_phrase_and_keep_the_note(self):
+        out, _, _, _ = self.run_cli("--scope")
+        stale = out[out.index("## Stale summaries"):out.index("## Stale signals")]
+        self.assertIn("- stale/model — not in model list", stale)
+        self.assertIn("  ranks: absent from all 4 tags and all 2 domains",
+                      stale)
+        self.assertIn("  catalog: not in model list, "
+                      "window: 0.00T tokens, 0/30 days", stale)
+
+    def test_stale_signal_bullets_carry_the_same_facts(self):
+        out, _, _, _ = self.run_cli("--scope")
+        sig = out[out.index("## Stale signals"):out.index("## Signal coverage gaps")]
+        self.assertIn("- gone/hinted", sig)
+        self.assertIn("  ranks: absent from all 4 tags and all 2 domains", sig)
+        self.assertIn("  catalog: not in model list", sig)
+
+    def test_scope_writes_nothing_to_the_policy(self):
+        before = open(self.policy_path).read()
+        self.run_cli("--scope")
+        self.assertEqual(open(self.policy_path).read(), before)
+
+    def test_scope_adds_only_indented_fact_lines_to_the_check(self):
+        bare, _, _, _ = self.run_cli("--check-policy")
+        scoped, _, _, _ = self.run_cli("--scope")
+        kept = [ln for ln in scoped.splitlines() if not ln.startswith(" ")]
+        self.assertEqual(kept, bare.splitlines())
+
+    def test_window_line_carries_dates_tokens_and_days(self):
+        world = build_world()
+        world["models"].append(make_model("acme/acme-star", "0.00000125",
+                                          "0.000005", "0", created=1768435200,
+                                          context=262144))
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": "acme/acme-star", "tag_usage_share": 0.02})
+        world["rankings"] = {
+            "meta": {"start_date": "2026-09-25", "end_date": "2026-10-24"},
+            "data": world["rankings"]["data"] + [
+                {"date": "2026-10-01", "model_permaslug": "acme/acme-star",
+                 "total_tokens": "5000000000000"},
+                {"date": "2026-10-15", "model_permaslug": "acme/acme-star",
+                 "total_tokens": "5000000000000"},
+                {"date": "2026-10-24", "model_permaslug": "acme/acme-star",
+                 "total_tokens": "5000000000000"},
+            ],
+        }
+        out, _, code, _ = self.run_cli("--scope", world=world)
+        self.assertIsNone(code)
+        block = out[out.index("- acme/acme-star (writing)"):
+                    out.index("## Stale summaries")]
+        self.assertIn("  ranks: writing #3/5", block)
+        self.assertIn("catalog: created 2026-01-15, context 256K, "
+                      "$1.25/$5.00 per 1M in/out, "
+                      "window 2026-09-25..2026-10-24: 15.00T tokens, 3/30 days",
+                      " ".join(block.split()))
+
+    def test_below_cut_positions_come_from_the_full_board(self):
+        # Ten candidates on the writing board with the default --top 8: the
+        # stale summary at #9 and the stale signal at #10 sit below the cut,
+        # and their scope facts must still show the position and size of the
+        # whole board.
+        world = build_world()
+        names = ["acme/one", "acme/two", "acme/three", "acme/four",
+                 "acme/five", "acme/six", "acme/seven", "acme/eight",
+                 "acme/nine", "acme/ten"]
+        world["models"] += [make_model(n, "0.000001", "0.000002", "0")
+                            for n in names[:8]]
+        world["models"] += [
+            make_model("acme/nine", "0.000002", "0.000006", "0",
+                       created=1769904000, context=131072),
+            make_model("acme/ten", "0.000002", "0.000006", "0",
+                       created=1769904000, context=131072),
+        ]
+        world["classifications"]["classifications"][0]["models"] = [
+            {"id": n, "tag_usage_share": (10 - i) / 100}
+            for i, n in enumerate(names)]
+        world["rankings"]["data"] += [
+            {"date": "2026-10-20", "model_permaslug": "acme/nine",
+             "total_tokens": "3000000000000"},
+            {"date": "2026-10-23", "model_permaslug": "acme/nine",
+             "total_tokens": "2500000000000"},
+        ]
+        pol = json.loads(json.dumps(POLICY))
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["summaries"] = {n: "s" for n in names[:8]}
+        pol["summaries"]["acme/nine"] = "s"
+        pol["hints"] = {"acme/ten": {"note": "n", "fit": {"writing": "favor"},
+                                     "evidence": "validated"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, code, _ = self.run_cli("--scope", world=world)
+        self.assertIsNone(code)
+        stale = out[out.index("## Stale summaries"):out.index("## Stale signals")]
+        self.assertIn("- acme/nine\n", stale)
+        self.assertNotIn("not in model list", stale)  # it is listed, just below cut
+        self.assertIn("  ranks: writing #9/10", stale)
+        self.assertIn("catalog: created 2026-02-01, context 128K, "
+                      "$2.00/$6.00 per 1M in/out, "
+                      "window: 5.50T tokens, 2/30 days",
+                      " ".join(stale.split()))
+        sig = out[out.index("## Stale signals"):out.index("## Signal coverage gaps")]
+        self.assertIn("- acme/ten", sig)
+        self.assertIn("  ranks: writing #10/10", sig)
+
+    def test_none_placeholder_carries_no_facts(self):
+        # "— none" is a placeholder, not a model: no facts hang off it.
+        pol = json.loads(json.dumps(POLICY))
+        pol["summaries"].update({
+            "ghost/unknown-20260101": "s", "deepseek/deepseek-v4-flash": "s",
+            "xiaomi/mimo-v2.6-pro": "s"})
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, _, _ = self.run_cli("--scope")
+        gaps = out[out.index("## Research gaps"):out.index("## Stale summaries")]
+        self.assertIn("- — none\n", gaps)
+        self.assertNotIn("ranks:", gaps)
+        self.assertNotIn("catalog:", gaps)
+
+    def test_unresolved_gap_catalog_does_not_borrow_a_prefix_sibling(self):
+        # A gap is an exact mid: if it is not in the model list, its catalog
+        # line says so — it never borrows the row of a prefix sibling.
+        world = build_world()
+        world["models"].append(make_model("ghost/unknown-20260101-lite",
+                                          "0.000001", "0.000002", "0"))
+        out, _, _, _ = self.run_cli("--scope", world=world)
+        ghost = out[out.index("- ghost/unknown-20260101"):
+                    out.index("- xiaomi/mimo-v2.6-pro (coding)")]
+        self.assertIn("  catalog: not in model list", ghost)
 
     # --- preference-tilted deal -----------------------------------------
 
