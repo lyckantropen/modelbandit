@@ -38,6 +38,8 @@ to a rung on each candidate's ladder.
    silently loosen it. The verdict is decided at collection — never a mood
    declared mid-run — and a Sensitive shape goes to the ranking run as
    `--sensitive`.
+   If the rules file needs creating or updating, complete **Set up the secrets
+   file** below before relying on project-specific rules.
    Done when: each input is stated or defaulted and none is guessed — the
    Secrets gate's verdict included; a Sensitive shape goes to the script as
    `--sensitive`.
@@ -145,6 +147,50 @@ to a rung on each candidate's ladder.
    Done when: a due policy has been surfaced to the user with an offer to
    update — never silently ignored.
 
+## Set up the secrets file
+
+When `modelrouter.secrets.json` is missing, or the user wants to tighten it,
+conduct this interview before relying on project-specific rules:
+
+1. Scan the repository for candidate identifiers, not credential values:
+   `.gitignore` entries, `.env*` and key-material filenames, plus internal
+   hostnames and client codenames that appear in configuration and docs. Do not
+   assume a candidate is sensitive just because it appears; propose each one to
+   the user individually and record an explicit include/exclude decision.
+2. Ask for any additional free-form phrases or regex patterns. Phrases match
+   literally; patterns must be valid regular expressions. The built-in
+   credential and machine-fact rules already apply and cannot be disabled.
+3. Ask whether the confirmed entries identify a person, client, or internal
+   system, then ask directly: “Should this rules file be committed, or should
+   it be gitignored?” Send the confirmed rules and both decisions to the writer
+   as JSON on stdin:
+
+   ```json
+   {
+     "phrases": ["confirmed literal"],
+     "patterns": ["confirmed-regex"],
+     "identifying": false,
+     "commit": true
+   }
+   ```
+
+   Run `scripts/bind.py --write-secrets --working-dir <folder>` with that JSON
+   on stdin. It writes `modelrouter.secrets.json` at the folder's git root (or
+   the folder itself outside a repository), reports rules added and already
+   present, and merges on every re-run: existing rules are never removed and
+   exact duplicates are kept once. If `identifying` is true **or** `commit` is
+   false, it appends the file path to `.gitignore` once and reports that
+   decision; otherwise it leaves `.gitignore` alone and says the rules file is
+   meant to be committed.
+4. Review the writer's report and show the resulting diff. Before a re-run,
+   retain the previous rules-file contents; afterwards show a unified
+   before/after diff as well as the `.gitignore` diff. An ignored, untracked
+   rules file will not appear in ordinary `git diff`.
+5. Run `scripts/bind.py --check-secrets --working-dir <folder>` with the actual
+   shape material on stdin. The gate now reads the rules file itself. Exit 0 is
+   safe, 1 is Sensitive, and 3 means **not certified**: empty material is not
+   safe by default, so obtain the material before claiming a safe shape.
+
 ## Reference
 
 - **Domains** — five, mapped to leaderboard tags in `policy.json`: research,
@@ -248,7 +294,10 @@ to a rung on each candidate's ladder.
   `patterns` are regular expressions, both validated at load — an unknown key,
   an empty phrase or a broken regex stops the check loudly, and the built-in
   credential rules always apply. The verdict echoes no rule *value*, only its
-  class or index (`phrase #1`), so its output is safe to quote back.
+  class or index (`phrase #1`), so its output is safe to quote back. For setup
+  or updates, follow **Set up the secrets file**; `--write-secrets` reads
+  confirmed JSON from stdin, merges additively, and applies the commit/gitignore
+  decision.
 
 - **Exposure & Sensitive** — Sensitive is the Ticket shape's fifth element,
   bound per invocation (`--sensitive`) from the Secrets gate's verdict at

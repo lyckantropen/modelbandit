@@ -518,6 +518,102 @@ def run_secrets_check(*, working_dir: str | None = None,
     return SECRETS_SENSITIVE if sensitive else SECRETS_SAFE
 
 
+def run_secrets_writer(*, working_dir: str | None = None, payload: str | None = None,
+                       stream=None) -> int:
+    """Write or merge confirmed project rules and apply the gitignore choice."""
+    if payload is None:
+        try:
+            payload = (stream or sys.stdin).read()
+        except Exception as exc:
+            raise SystemExit(f"cannot read --write-secrets input: {exc}") from None
+    try:
+        submitted = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"invalid JSON for --write-secrets: {exc}") from None
+    if not isinstance(submitted, dict):
+        raise SystemExit("--write-secrets input must be a JSON object")
+    allowed = set(RULES_KEYS) | {"identifying", "commit"}
+    unknown = sorted(set(submitted) - allowed)
+    if unknown:
+        raise SystemExit("unknown --write-secrets key(s): " + ", ".join(unknown))
+
+    incoming = {}
+    for key in RULES_KEYS:
+        values = submitted.get(key, [])
+        if not isinstance(values, list):
+            raise SystemExit(f"{key} must be a list of non-empty strings")
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise SystemExit(f"every {key} entry must be a non-empty string, "
+                                 f"got {value!r}")
+        incoming[key] = values
+    for key in ("identifying", "commit"):
+        if key not in submitted or not isinstance(submitted[key], bool):
+            raise SystemExit(f"{key} must be a boolean")
+    for source in incoming["patterns"]:
+        try:
+            re.compile(source)
+        except re.error as exc:
+            raise SystemExit(f"invalid regex in patterns: {source!r} ({exc})") from None
+
+    root = resolve_working_root(working_dir)
+    rules_path = os.path.join(root, RULES_FILE)
+    existing = load_secrets_rules(rules_path)
+    merged = {}
+    added, present = {}, {}
+    for key in RULES_KEYS:
+        merged[key] = []
+        seen = set()
+        for value in existing.get(key, []):
+            if value not in seen:
+                seen.add(value)
+                merged[key].append(value)
+        added[key], present[key] = [], []
+        added_seen, present_seen = set(), set()
+        for value in incoming[key]:
+            if value in seen:
+                if value not in present_seen:
+                    present[key].append(value)
+                    present_seen.add(value)
+                continue
+            seen.add(value)
+            merged[key].append(value)
+            if value not in added_seen:
+                added[key].append(value)
+                added_seen.add(value)
+
+    with open(rules_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(merged, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    for key in RULES_KEYS:
+        print(f"added {key}: {json.dumps(added[key], ensure_ascii=False)}")
+        print(f"already present {key}: "
+              f"{json.dumps(present[key], ensure_ascii=False)}")
+    print(f"secrets rules: {rules_path}")
+
+    if submitted["identifying"] or not submitted["commit"]:
+        ignore_path = os.path.join(root, ".gitignore")
+        try:
+            with open(ignore_path, encoding="utf-8") as f:
+                ignored_lines = f.read().splitlines()
+        except FileNotFoundError:
+            ignored_lines = []
+        if any(line.strip() == RULES_FILE for line in ignored_lines):
+            print(f"gitignore: already contains {RULES_FILE}")
+        else:
+            with open(ignore_path, "a+b") as f:
+                f.seek(0, os.SEEK_END)
+                if f.tell():
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) not in (b"\n", b"\r"):
+                        f.write(b"\n")
+                f.write((RULES_FILE + "\n").encode("utf-8"))
+            print(f"gitignore: appended {RULES_FILE} (identifying rules or commit=false)")
+    else:
+        print(f"gitignore: unchanged; {RULES_FILE} is meant to be committed")
+    return 0
+
+
 def resolve_model(models: dict, by_canon: dict, permaslug: str):
     """Leaderboard rows are permaslugs. Resolve via canonical_slug; heuristic
     date-stripping misprices dated releases (v4-pro-0813 vs v4-pro) and is a
@@ -1839,10 +1935,13 @@ def main() -> None:
                          "stdin and prints the verdict with the rule that "
                          "tripped it; exit 0 safe, 1 sensitive, 3 not "
                          "certified (no material). No network, no policy.")
+    ap.add_argument("--write-secrets", action="store_true",
+                    help="write or merge confirmed Secrets gate rules from "
+                         "JSON on stdin; apply the commit/gitignore decision")
     ap.add_argument("--working-dir", default=None, metavar="PATH",
-                    help="working folder for --check-secrets (default: cwd); "
-                         "its git root, when in a repository, supplies "
-                         "modelrouter.secrets.json and the gitignored files")
+                    help="working folder for Secrets gate commands (default: "
+                         "cwd); its git root, when in a repository, supplies "
+                         "modelrouter.secrets.json and .gitignore")
     ap.add_argument("--check-policy", action="store_true",
                     help="report summary drift (ranked models without summaries, "
                          "stale summaries) and policy age; no --domain needed")
@@ -1886,6 +1985,8 @@ def main() -> None:
         # The gate reads the working folder, never the network: no policy and
         # no board are needed to decide whether a shape is Sensitive.
         raise SystemExit(run_secrets_check(working_dir=args.working_dir))
+    if args.write_secrets:
+        raise SystemExit(run_secrets_writer(working_dir=args.working_dir))
 
     policy: dict = {}
     if os.path.exists(args.policy):

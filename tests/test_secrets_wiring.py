@@ -381,6 +381,102 @@ class SecretsCliTests(TempDirMixin):
         self.assertIn("phrase", str(code))
 
 
+class SecretsWriterCliTests(TempDirMixin):
+    """`--write-secrets` merges confirmed rules without removing prior rules."""
+
+    def run_writer(self, payload):
+        out, err, code = io.StringIO(), io.StringIO(), None
+        with mock.patch.object(sys, "argv", [
+                "bind.py", "--write-secrets", "--working-dir", self.root]), \
+                mock.patch.object(sys, "stdin", io.StringIO(payload)), \
+                mock.patch("bind.fetch_json",
+                           side_effect=AssertionError("no network in writer")), \
+                redirect_stdout(out), redirect_stderr(err):
+            try:
+                bind.main()
+            except SystemExit as exc:
+                code = exc.code
+        return out.getvalue(), err.getvalue(), code
+
+    def test_rerun_keeps_existing_rules_and_deduplicates_exact_repeats(self):
+        self.write_rules({"phrases": ["existing client name"],
+                          "patterns": [r"old-key-\d+"]})
+        payload = json.dumps({
+            "phrases": ["existing client name", "new client name",
+                        "new client name"],
+            "patterns": [r"old-key-\d+", r"new-key-\d+",
+                         r"new-key-\d+"],
+            "identifying": False, "commit": True,
+        })
+
+        first, _, code = self.run_writer(payload)
+        second, _, second_code = self.run_writer(payload)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(second_code, 0)
+        rules = bind.load_secrets_rules(
+            os.path.join(self.root, "modelrouter.secrets.json"))
+        self.assertEqual(rules["phrases"],
+                         ["existing client name", "new client name"])
+        self.assertEqual(rules["patterns"],
+                         [r"old-key-\d+", r"new-key-\d+"])
+        self.assertIn("added phrase", first)
+        self.assertIn("already present phrase", second)
+
+    def test_identifying_rules_add_gitignore_entry_only_once(self):
+        self.write(".gitignore", "cache")
+        payload = json.dumps({"phrases": ["client codename"], "patterns": [],
+                              "identifying": True, "commit": True})
+
+        first, _, code = self.run_writer(payload)
+        second, _, second_code = self.run_writer(payload)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(second_code, 0)
+        with open(os.path.join(self.root, ".gitignore"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(lines, ["cache", "modelrouter.secrets.json"])
+        self.assertIn("gitignore: appended modelrouter.secrets.json", first)
+        self.assertIn("gitignore: already contains modelrouter.secrets.json", second)
+
+    def test_committed_rules_leave_gitignore_untouched(self):
+        original = "# Existing ignores\n.env\n"
+        self.write(".gitignore", original)
+        payload = json.dumps({"phrases": ["public codename"], "patterns": [],
+                              "identifying": False, "commit": True})
+
+        out, _, code = self.run_writer(payload)
+
+        self.assertEqual(code, 0)
+        with open(os.path.join(self.root, ".gitignore"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), original)
+        self.assertIn("meant to be committed", out)
+
+    def test_commit_false_adds_gitignore_entry_even_when_not_identifying(self):
+        payload = json.dumps({"phrases": ["local project alias"], "patterns": [],
+                              "identifying": False, "commit": False})
+
+        out, _, code = self.run_writer(payload)
+
+        self.assertEqual(code, 0)
+        with open(os.path.join(self.root, ".gitignore"), encoding="utf-8") as f:
+            self.assertIn("modelrouter.secrets.json", f.read().splitlines())
+        self.assertIn("gitignore: appended", out)
+
+    def test_invalid_json_and_rule_shapes_fail_loudly(self):
+        cases = (("{", "invalid JSON"),
+                 (json.dumps({"phrases": "not a list", "patterns": [],
+                              "identifying": False, "commit": True}), "phrases"),
+                 (json.dumps({"phrases": [], "patterns": ["("],
+                              "identifying": False, "commit": True}), "patterns"))
+        for payload, problem in cases:
+            with self.subTest(problem=problem):
+                _, _, code = self.run_writer(payload)
+                self.assertIn(problem, str(code))
+                self.assertFalse(os.path.exists(
+                    os.path.join(self.root, "modelrouter.secrets.json")))
+
+
 class SecretsEndToEndTests(TempDirMixin):
     """The whole mechanism, unpatched: real machine facts, real files, real
     git. A file on disk changes the verdict for the same material — the gap
