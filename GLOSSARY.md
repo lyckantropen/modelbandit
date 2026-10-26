@@ -103,9 +103,9 @@ price anchor for Δ columns; anchors serve the research. Keep the two distinct.
 _Avoid_: price anchor, baseline
 
 **Refresh scope**
-What a summaries-refresh cycle covers, as of one policy check with scope: the
-gaps, the stale summaries and the stale signals current at that run. A
-snapshot of what is due, not a standing queue.
+What a summaries-refresh cycle covers at the moment it runs: the gaps, the
+stale summaries and the stale signals current at that moment. A snapshot of
+what is due, not a standing queue.
 _Avoid_: backlog, to-do
 
 **Gap**
@@ -115,6 +115,7 @@ _Avoid_: missing entry (implies error)
 
 **Stale**
 A summary or signal whose key no longer ranks on any domain board. The model
-may still rank below the depth the boards show — the scope's fact lines say
-where, if anywhere. A drift state of the policy, not of the model.
+may still rank below the depth the boards show; whether and where it does is
+something to look up at run time, not part of the state. A drift state of the
+policy, not of the model.
 _Avoid_: expired, deprecated (those are vendor statuses, not drift states)

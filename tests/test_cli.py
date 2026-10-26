@@ -149,6 +149,7 @@ def build_world():
              "display_name": "Xiaomi MiMo v2.6 Pro",
              "benchmark_type": "math_agent", "accuracy": 0.9,
              "avg_cost_per_task": 0.02,
+             "avg_latency_per_task_ms": 15000,
              "last_run_timestamp": "2026-10-20T09:00:00.000Z",
              "pricing": {"prompt": "0.0000005", "completion": "0.000001"}},
         ],
@@ -402,7 +403,7 @@ class CliTests(unittest.TestCase):
                       flash)
         self.assertIn("catalog: created ?, context ?, "
                       "$0.20/$1.00 per 1M in/out, "
-                      "window: 0.00T tokens, 0/30 days",
+                      "window: 0.00T tokens, 0/1 days",
                       " ".join(flash.split()))
         mimo = out[out.index("- xiaomi/mimo-v2.6-pro (coding)"):
                    out.index("## Stale summaries")]
@@ -413,7 +414,7 @@ class CliTests(unittest.TestCase):
                     out.index("- xiaomi/mimo-v2.6-pro (coding)")]
         self.assertIn("  ranks: writing #3/4", ghost)
         self.assertIn("  catalog: not in model list, "
-                      "window: 0.00T tokens, 1/30 days", ghost)
+                      "window: 0.00T tokens, 1/1 days", ghost)
 
     def test_stale_bullets_carry_absent_phrase_and_keep_the_note(self):
         out, _, _, _ = self.run_cli("--scope")
@@ -422,7 +423,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("  ranks: absent from all 4 tags and all 2 domains",
                       stale)
         self.assertIn("  catalog: not in model list, "
-                      "window: 0.00T tokens, 0/30 days", stale)
+                      "window: 0.00T tokens, 0/1 days", stale)
 
     def test_stale_signal_bullets_carry_the_same_facts(self):
         out, _, _, _ = self.run_cli("--scope")
@@ -512,11 +513,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("  ranks: writing #9/10", stale)
         self.assertIn("catalog: created 2026-02-01, context 128K, "
                       "$2.00/$6.00 per 1M in/out, "
-                      "window: 5.50T tokens, 2/30 days",
+                      "window: 5.50T tokens, 2/3 days",
                       " ".join(stale.split()))
         sig = out[out.index("## Stale signals"):out.index("## Signal coverage gaps")]
         self.assertIn("- acme/ten", sig)
         self.assertIn("  ranks: writing #10/10", sig)
+        # No meta in this fixture: the window denominator is the days the
+        # feed itself carries (10-20, 10-23, 10-24), not a hardcoded 30.
 
     def test_none_placeholder_carries_no_facts(self):
         # "— none" is a placeholder, not a model: no facts hang off it.
@@ -552,8 +555,9 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli("--anchors")
         self.assertIsNone(code)
         self.assertIn("# Benchmark anchors", out)
-        self.assertIn("feed as of 2026-10-26T00:01:10.159Z — "
-                      "2 of 419 feed models matched", out)
+        self.assertIn("feed as of 2026-10-26T00:01:10.159Z — 2 of the "
+                      "scope's models have rows; the feed carries 419 models",
+                      out)
         aa = out[out.index("## Artificial Analysis"):out.index("## Design Arena")]
         self.assertLess(aa.index("deepseek/deepseek-v4-flash"),
                         aa.index("xiaomi/mimo-v2.6-pro"))
@@ -565,10 +569,23 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli("--anchors", "deepseek/deepseek-v4-pro")
         self.assertIsNone(code)
         self.assertIn("deepseek/deepseek-v4-pro-20260813", out)
-        self.assertIn("1 of 419 feed models matched", out)
+        self.assertIn("1 of the scope's models have rows; the feed carries "
+                      "419 models", out)
         self.assertNotIn("deepseek/deepseek-v4-flash", out)
         self.assertNotIn("xiaomi/mimo-v2.6-pro", out)
         self.assertNotIn("stale/model", out)
+        self.assertIn("no benchmark rows: — none", out)
+
+    def test_anchors_explicit_dated_catalog_id_finds_permaslug_rows(self):
+        # A dated-catalog id (…-0813) does not prefix-match the feed's
+        # permaslug (…-20260813); it must resolve through canonical_slug like
+        # every other id and reach the rows under that permaslug.
+        out, _, code, _ = self.run_cli("--anchors", "deepseek/deepseek-v4-pro-0813")
+        self.assertIsNone(code)
+        self.assertIn("deepseek/deepseek-v4-pro-20260813", out)
+        self.assertIn("57.6", out)  # the AA row under the permaslug renders
+        self.assertIn("1 of the scope's models have rows; the feed carries "
+                      "419 models", out)
         self.assertIn("no benchmark rows: — none", out)
 
     def test_anchors_prints_three_source_tables_with_citations(self):
@@ -601,12 +618,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("| models | 3d | 1102 | 48% | $0.20/$1.00 |", da)
         self.assertIn("| models | coding | 1301 | 61% | $0.50/$1.00 |", da)
 
-    def test_anchors_openrouter_rows_carry_accuracy_cost_and_run_date(self):
+    def test_anchors_openrouter_rows_carry_accuracy_cost_and_latency(self):
         out, _, _, _ = self.run_cli("--anchors")
         orr = out[out.index("## OpenRouter evals"):out.index("no benchmark rows:")]
-        self.assertIn("| gpqa_diamond | 62.0% | $0.0110 | 2026-10-14 | — |", orr)
-        self.assertIn("| math_agent | 90.0% | $0.0200 | 2026-10-20 | "
-                      "$0.50/$1.00 |", orr)
+        # No latency in the feed row renders an em dash, like any missing number.
+        self.assertIn("| gpqa_diamond | 62.0% | $0.0110 | — | — |", orr)
+        self.assertIn("| math_agent | 90.0% | $0.0200 | 15000 | $0.50/$1.00 |", orr)
 
     def test_anchors_names_models_without_rows(self):
         out, _, _, _ = self.run_cli("--anchors")
@@ -629,6 +646,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(open(self.policy_path).read(), before)
 
     def test_anchors_works_from_cache_without_a_key(self):
+        # Deliberate seam widening beyond the spec's mocked-fetch decision:
+        # these two tests drive the real fetch_json offline (patched cache
+        # dir + api key, no network) to pin the cache-before-key ordering.
         # A fresh cached feed must render with no key at all: the real
         # fetch path returns the cache before consulting api_key.
         world = build_world()
@@ -644,6 +664,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("| 55.1 | 48.0 | 41.3 | $0.50/$1.00 |", out)
 
     def test_anchors_keyless_without_cache_surfaces_the_fetch_error(self):
+        # Same deliberate seam widening as above: real fetch_json, offline
+        # (patched cache dir + api key, no network).
         cache = os.path.join(self._tmp.name, "empty-cache")
         os.makedirs(cache)
         with mock.patch.object(bind, "CACHE_DIR", cache), \

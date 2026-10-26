@@ -550,14 +550,15 @@ def catalog_row(model: dict | None) -> str:
 
 def scope_facts(key: str, exact: bool, models: dict, by_canon: dict,
                 classif: dict, domains: dict, share_by_domain: dict,
-                top: int, ranks) -> list[str]:
+                ranks) -> list[str]:
     """The two wrapped fact lines under one gap/stale bullet.
 
     ranks: full-board per-domain positions (a stale key can only sit below
     the cut; a gap's own in-cut domains come with the bullet), then
     non-domain task tags, or the explicit absent phrase when nowhere.
-    catalog: the model row plus daily-token window totals from the rankings
-    feed's meta. Facts only — the refresh-or-retire judgment stays human.
+    catalog: the model row plus daily-token window totals, the window taken
+    from the rankings feed's meta when it states one. Facts only — the
+    refresh-or-retire judgment stays human.
     """
     board = {name: sorted(share.items(), key=lambda kv: -kv[1])
              for name, share in share_by_domain.items()}
@@ -606,8 +607,21 @@ def scope_facts(key: str, exact: bool, models: dict, by_canon: dict,
     meta = ranks.get("meta", {}) if isinstance(ranks, dict) else {}
     span = (f"{meta['start_date']}..{meta['end_date']}"
             if meta.get("start_date") and meta.get("end_date") else "")
+    window = None
+    if span:
+        # The feed's own window: inclusive of both end dates.
+        try:
+            window = ((datetime.date.fromisoformat(meta["end_date"])
+                       - datetime.date.fromisoformat(meta["start_date"])).days + 1)
+        except ValueError:
+            window = None
+    if window is None:
+        # No meta (or unparseable dates): the observable window is the set of
+        # days the feed itself carries rows for, so the denominator is that
+        # count, "D/D days" — never a hardcoded 30.
+        window = len({row.get("date") for row in rows if row.get("date")})
     window_txt = (f"window {span}: " if span else "window: ") \
-        + f"{tokens / 1e12:.2f}T tokens, {len(days)}/30 days"
+        + f"{tokens / 1e12:.2f}T tokens, {len(days)}/{window} days"
 
     lines = []
     for text in (ranks_txt, f"catalog: {catalog_row(model)}, {window_txt}"):
@@ -660,7 +674,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         if ranks is None:
             return
         for line in scope_facts(key, exact, models, by_canon, classif,
-                                domains, share_by_domain, top, ranks):
+                                domains, share_by_domain, ranks):
             print(line)
 
     coverage = []
@@ -787,7 +801,7 @@ SOURCE_COLUMNS = {
     "design-arena":
         "| model | arena | category | elo | win rate | $/1M in/out |",
     "openrouter":
-        "| model | benchmark | accuracy | cost/task | last run | $/1M in/out |",
+        "| model | benchmark | accuracy | cost/task | latency (ms) | $/1M in/out |",
 }
 
 
@@ -795,11 +809,19 @@ def anchor_scope(explicit: list, models: dict, by_canon: dict, classif: dict,
                  domains: dict, policy: dict, top: int) -> list[str]:
     """The anchor model set: explicit ids when given (deduplicated, in given
     order), else the check's drift set — gaps, then stale summaries, then
-    stale signals, via the shared drift_keys helper."""
+    stale signals, via the shared drift_keys helper.
+
+    Explicit ids resolve through resolve_model like every other id in this
+    file, so a dated-catalog form (…-0813) lands on the same id a gap would
+    carry; an id that resolves to nothing keeps its given form and falls
+    through to the no-rows line in the anchors output."""
     if explicit:
         out, seen = [], set()
         for mid in explicit:
             key = norm_id(mid)
+            resolved, _ = resolve_model(models, by_canon, key)
+            if resolved:
+                key = resolved["id"]
             if key not in seen:
                 seen.add(key)
                 out.append(key)
@@ -848,11 +870,15 @@ def anchor_row(source: str, row: dict) -> str:
                  anchor_cell(row.get("elo"), lambda v: f"{v:.0f}"),
                  anchor_cell(row.get("win_rate"), lambda v: f"{v:g}%")]
     else:  # openrouter
+        # Latency replaces last run: the evals table's substance is accuracy,
+        # cost and speed, and with latency added a seventh column read
+        # unwieldy next to the other sources' five and six.
         cells = [str(row.get("benchmark_type", "?")),
                  anchor_cell(row.get("accuracy"), lambda v: f"{v:.1%}"),
                  anchor_cell(row.get("avg_cost_per_task"),
                              lambda v: f"${v:.4f}"),
-                 str(row.get("last_run_timestamp") or "—")[:10]]
+                 anchor_cell(row.get("avg_latency_per_task_ms"),
+                             lambda v: f"{v:.0f}")]
     return f"| {slug} | " + " | ".join(cells) + f" | {anchor_price(row)} |"
 
 
@@ -871,19 +897,29 @@ def run_anchors(explicit: list, models: dict, by_canon: dict, classif: dict,
 
     # Each feed row joins the first scope id it prefixes-matches (family
     # semantics, as for the policy keys); buckets keep feed order within
-    # their id, so iterating scope order yields scope-ordered tables.
+    # their id, so iterating scope order yields scope-ordered tables. Every
+    # scope id matches on its given form and its canonical_slug: an id given
+    # in dated-catalog form (deepseek/...-0813) reaches its permaslug rows
+    # (…-20260813) through the same resolution the rest of the file uses.
+    keys: dict[int, tuple] = {}
+    for idx, sid in enumerate(scope):
+        resolved, _ = resolve_model(models, by_canon, sid)
+        canon = norm_id(resolved["canonical_slug"]) \
+            if resolved and resolved.get("canonical_slug") else None
+        keys[idx] = (sid, canon) if canon and canon != sid else (sid,)
     assigned: dict[tuple, list] = {}
     for row in rows:
         slug = norm_id(str(row.get("model_permaslug", "")))
         for idx, sid in enumerate(scope):
-            if slug.startswith(sid):
+            if any(slug.startswith(k) for k in keys[idx]):
                 assigned.setdefault((row.get("source"), idx), []).append(row)
                 break
     matched = {idx for _, idx in assigned}
 
     print("# Benchmark anchors")
-    print(f"feed as of {meta.get('as_of', '?')} — {len(matched)} of "
-          f"{meta.get('model_count', '?')} feed models matched")
+    print(f"feed as of {meta.get('as_of', '?')} — {len(matched)} of the "
+          f"scope's models have rows; the feed carries "
+          f"{meta.get('model_count', '?')} models")
     for source in SOURCE_ORDER:
         print(f"\n## {SOURCE_HEADINGS[source]}")
         print(f"{SOURCE_CITATIONS[source]}\n")
