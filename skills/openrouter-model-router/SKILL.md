@@ -153,10 +153,12 @@ to a rung on each candidate's ladder.
   for the effort intent. The exponent *ratio* decides the ordering, their
   *scale* the sharpness. α, β live in `policy.json` `scoring` and are accepted
   only against the balance thresholds (top-1 score mass 20–50%, top-2 ≤ 75% per
-  pool): neither uniform nor dominated by one or two entries.
-  `--check-policy` re-measures and calls for a re-tune when the balance
-  drifts — a Free route priced at the Nominal floor can move it, and that drift
-  is a diagnosed re-tune.
+  paid pool): neither uniform nor dominated by one or two entries. Balance is
+  measured on the paid competition — a Free route enters no balance pool, its
+  participation is the Free share signal's answer, and a pool with fewer than
+  three paid candidates is reported not judgeable rather than judged.
+  `--check-policy` re-measures and calls for a re-tune when the paid balance
+  drifts; that drift is a diagnosed re-tune.
 
 - **Nominal floor** — the score's cost term for a Free route:
   `scoring.free_risk` times the pool's cheapest priced paid ticket (default

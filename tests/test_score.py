@@ -5,6 +5,7 @@ standing = score * fit/5. The exponents' ratio orders, their scale
 concentrates; mass_balance is the acceptance criterion for any coefficient.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -142,6 +143,71 @@ class BalanceTests(unittest.TestCase):
 
     def test_single_candidate(self):
         self.assertEqual(bind.mass_balance([2.0]), (1.0, 1.0))
+
+
+# A domain's candidates with two Free routes outranking every paid row: the
+# case the balance criterion must stop seeing.
+BALANCE_SHARE = {"vendor/free:free": 9.5, "opencode/free-model": 9.2,
+                 "a/paid-1": 9.0, "b/paid-2": 4.0, "c/paid-3": 2.0,
+                 "d/paid-4": 1.0}
+BALANCE_MODELS = {mid: {} for mid in BALANCE_SHARE}
+BALANCE_FREE = {"vendor/free:free", "opencode/free-model"}
+
+
+class PaidBalancePoolTests(unittest.TestCase):
+    """Score mass is measured over the paid competition: Free routes' share is
+    the Free share signal's answer, never a threshold's."""
+
+    def test_free_routes_leave_before_the_cut(self):
+        # Filtering after the cut would leave one paid row here; the paid pool
+        # is the top-K among paid candidates.
+        pool = bind.paid_pool(BALANCE_SHARE, BALANCE_MODELS, BALANCE_FREE, 3)
+        self.assertEqual([mid for mid, _ in pool],
+                         ["a/paid-1", "b/paid-2", "c/paid-3"])
+
+    def test_pool_is_popularity_ordered_and_capped(self):
+        pool = bind.paid_pool(BALANCE_SHARE, BALANCE_MODELS, BALANCE_FREE, 2)
+        self.assertEqual([mid for mid, _ in pool], ["a/paid-1", "b/paid-2"])
+
+    def test_no_free_routes_leaves_the_popularity_pool_unchanged(self):
+        self.assertEqual(
+            bind.paid_pool(BALANCE_SHARE, BALANCE_MODELS, frozenset(), 5),
+            bind.popularity_ranking(BALANCE_SHARE, BALANCE_MODELS)[:5])
+
+    def test_all_free_pool_is_empty(self):
+        self.assertEqual(bind.paid_pool(BALANCE_SHARE, BALANCE_MODELS,
+                                        set(BALANCE_SHARE), 5), [])
+
+    def test_unresolved_rows_still_never_play(self):
+        share = dict(BALANCE_SHARE, **{"ghost/unresolved": 100.0})
+        pool = bind.paid_pool(share, BALANCE_MODELS, BALANCE_FREE, 3)
+        self.assertNotIn("ghost/unresolved", [mid for mid, _ in pool])
+
+
+class ShippedPolicyTests(unittest.TestCase):
+    """The shipped policy's balance criterion: the band is the calibrated one,
+    and the exponents carry a dated tuning record that names them."""
+
+    POLICY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "skills", "openrouter-model-router",
+                               "policy.json")
+
+    def setUp(self):
+        with open(self.POLICY_PATH, encoding="utf-8") as f:
+            self.scoring = json.load(f)["scoring"]
+
+    def test_thresholds_are_the_calibrated_band(self):
+        self.assertEqual(self.scoring["thresholds"],
+                         {"top1_min": 0.2, "top1_max": 0.5, "top2_max": 0.75})
+
+    def test_scoring_notes_date_the_coefficient_tuning(self):
+        self.assertRegex(self.scoring["notes"], r"Re-tuned \d{4}-\d{2}-\d{2}")
+
+    def test_the_dated_retune_names_the_shipped_exponents(self):
+        notes = self.scoring["notes"]
+        latest = notes[notes.rindex("Re-tuned"):]
+        self.assertIn(f"alpha {self.scoring['alpha']:.1f}", latest)
+        self.assertIn(f"beta {self.scoring['beta']:.1f}", latest)
 
 
 if __name__ == "__main__":

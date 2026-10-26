@@ -927,46 +927,55 @@ class CliTests(unittest.TestCase):
         self.assertIn("| 8.64 |", row)
         self.assertIn("default pick", out)
 
-    def test_risk_priced_free_route_can_stay_inside_the_balance_band(self):
+    def balance_world(self, free_share, paid_shares):
+        """One writing pool: `vendor/model:free` beside priced paid models."""
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["affinity"]["eligibility_top_k"] = 5
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["hints"] = {}
+        pol["summaries"] = {}
+        pol["free_models"] = {"vendor/model": self.FREE_CATALOG["vendor/model"]}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        world = build_world()
+        world["models"] = [make_model(f"m{i}/model", "0.000001", "0.000002",
+                                      "0.000001")
+                           for i in range(len(paid_shares))]
+        world["models"].append(make_model("vendor/model:free", "0", "0", "0"))
+        world["classifications"]["classifications"][0]["models"] = (
+            [{"id": "vendor/model:free", "tag_usage_share": free_share}]
+            + [{"id": f"m{i}/model", "tag_usage_share": share}
+               for i, share in enumerate(paid_shares)])
+        return world
+
+    def test_free_dominant_pool_reads_ok_on_the_paid_competition(self):
         # Four paid models at one price are in balance (top-1 25%, top-2 50%).
-        # A fifth Free route at the default 35% risk price can join the pool
-        # without dominating: Free share is governed by score, not a cap.
-        paid = [make_model(f"m{i}/model", "0.000001", "0.000002", "0.000001")
-                for i in range(4)]
-        board = ([{"id": "vendor/model:free", "tag_usage_share": 0.3}]
-                 + [{"id": f"m{i}/model", "tag_usage_share": 0.25}
-                    for i in range(4)])
+        # A Free route at five times any paid share would top the combined
+        # pool (~63% mass) — the balance criterion now judges the paid
+        # competition, so the verdict is the paid reading, not Free's share.
+        out, _, code, _ = self.run_cli(
+            "--check-policy",
+            world=self.balance_world(1.25, (0.25, 0.25, 0.25, 0.25)))
+        self.assertIsNone(code)
+        balance = out[out.index("## Score balance"):]
+        self.assertIn("writing: top-1 25%, top-2 50%", balance)
+        self.assertIn("— ok", balance)
+        self.assertNotIn("OUT OF BALANCE", balance)
+        self.assertIn("coefficient re-tune due: no", out)
 
-        def run(with_free):
-            pol = json.loads(json.dumps(POLICY))
-            pol["scoring"].update(alpha=1.0, beta=1.0)
-            pol["affinity"]["eligibility_top_k"] = 5
-            pol["domains"] = {"writing": ["content_writing"]}
-            pol["hints"] = {}
-            pol["summaries"] = {}
-            pol["free_models"] = ({"vendor/model":
-                                   self.FREE_CATALOG["vendor/model"]}
-                                  if with_free else {})
-            with open(self.policy_path, "w") as f:
-                json.dump(pol, f)
-            world = build_world()
-            world["models"] = paid + ([make_model("vendor/model:free", "0",
-                                                  "0", "0")]
-                                      if with_free else [])
-            world["classifications"]["classifications"][0]["models"] = (
-                board[1:] if not with_free else board)
-            out, _, code, _ = self.run_cli("--check-policy", world=world)
-            self.assertIsNone(code)
-            return out
-
-        balanced = run(False)
-        self.assertIn("writing: top-1 25%, top-2 50%", balanced)
-        self.assertIn("coefficient re-tune due: no", balanced)
-
-        with_free = run(True)
-        balance = with_free[with_free.index("## Score balance"):]
-        self.assertIn("writing: top-1 46%, top-2 60%", balance)
-        self.assertIn("coefficient re-tune due: no", with_free)
+    def test_pool_with_fewer_than_three_paid_candidates_is_not_judgeable(self):
+        # Five candidates, two of them paid: Free's participation cannot trip
+        # a criterion meant for the paid ranking.
+        out, _, code, _ = self.run_cli(
+            "--check-policy",
+            world=self.balance_world(0.9, (0.6, 0.05)))
+        self.assertIsNone(code)
+        balance = out[out.index("## Score balance"):]
+        self.assertIn("writing: 2 paid candidates — balance not judgeable "
+                      "(needs 3+)", balance)
+        self.assertNotIn("OUT OF BALANCE", balance)
+        self.assertIn("coefficient re-tune due: no", out)
 
     def test_uncatalogued_free_route_is_visible_but_never_picked(self):
         world = build_world()

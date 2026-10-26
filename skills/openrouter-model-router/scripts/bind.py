@@ -1114,6 +1114,20 @@ def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
             if mid in models]
 
 
+def paid_pool(share: dict, models: dict, free: set[str],
+              top_k: int) -> list[tuple[str, float]]:
+    """The balance criterion's players: the top_k most popular paid models.
+
+    Score mass judges the paid competition — the band was calibrated for a
+    landscape in which Free routes were not scored at all, and Free's
+    participation is answered by the Free share signal, not by a threshold.
+    Free routes leave before the cut, so a pool that Free dominates wholly
+    still has a paid competition to judge.
+    """
+    return [entry for entry in popularity_ranking(share, models)
+            if entry[0] not in free][:top_k]
+
+
 def eligibility_pool(share: dict, models: dict, aff: dict, top_k: int,
                      admitted: frozenset | None = None) -> list[tuple[str, float]]:
     """The deal's players, computed once for every consumer.
@@ -1438,18 +1452,21 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
 
     alpha, beta = config.alpha, config.beta
     thresholds = config.thresholds
-    print(f"\n## Score balance (top-{pool_k} pool, {basis} basis)")
+    print(f"\n## Score balance (top-{pool_k} paid pool, {basis} basis)")
     re_tune = False
     judged = False
     for name in domains:
-        pool = popularity_ranking(share_by_domain[name], models)[:pool_k]
+        # The band judges the paid competition. Free routes' participation is
+        # answered by the Free share signal above, never by this threshold.
+        free = free_route_ids(share_by_domain[name], policy, local=local_ids)
+        pool = paid_pool(share_by_domain[name], models, free, pool_k)
         if not pool:
             continue
         if len(pool) < 3:
-            # Below three candidates the balance criterion has nothing to
-            # judge: a one-candidate pool is 100% top mass by definition,
-            # not a tuning failure. Report and never trip the verdict.
-            print(f"- {name}: {len(pool)} candidate"
+            # Below three paid candidates the balance criterion has nothing to
+            # judge: a one-candidate pool is 100% top mass by definition, not a
+            # tuning failure. Report and never trip the verdict.
+            print(f"- {name}: {len(pool)} paid candidate"
                   f"{'s' if len(pool) != 1 else ''} — balance not judgeable "
                   f"(needs 3+)")
             continue
@@ -1479,7 +1496,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     if not judged and any(popularity_ranking(share_by_domain[name], models)[:pool_k]
                           for name in domains):
         # Every non-empty pool was thin: no domain's balance was measurable.
-        print("(no domain with 3+ candidates — balance not judgeable)")
+        print("(no domain with 3+ paid candidates — balance not judgeable)")
 
     due = bool(gaps) or bool(stale) or bool(stale_signals) or bool(coverage) \
         or bool(free_share_zeros) \
