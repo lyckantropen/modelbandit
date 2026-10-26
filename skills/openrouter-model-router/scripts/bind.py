@@ -741,12 +741,14 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                                                   policy.get("summaries", {})))))
 
 
-def free_route_ids(mids, policy: dict) -> set[str]:
-    """The Free routes among `mids`, by the serving rule: a ':free' slug or an
-    OpenCode 'opencode/' model — the verdict candidate_for reports as is_free.
-    Never the price: a paid route may be cheap, and Free is what the harness
-    serves for nothing."""
-    return {mid for mid in mids if candidate_for(mid, policy).is_free}
+def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
+    """The Free routes among `mids`, by the serving rule: a ':free' slug, an
+    OpenCode 'opencode/' model, or one this machine serves (`local`) — the
+    verdict candidate_for reports as is_free. Never the price: a paid route
+    may be cheap, and Free is what the harness serves for nothing."""
+    local = set(local)
+    return {mid for mid in mids
+            if candidate_for(mid, policy, local=mid in local).is_free}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1248,7 +1250,7 @@ def main() -> None:
         pers,
         free_floor=nominal_floor_cost(config.free_floor, out_tok,
                                       EFFORT_MULTIPLIERS[args.effort]),
-        free=free_route_ids(pers, policy))
+        free=free_route_ids(pers, policy, local=local_ids))
 
     rows_out = []
     for mid, s in ranked:

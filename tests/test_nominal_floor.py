@@ -103,6 +103,14 @@ class FreeRouteIdsTests(unittest.TestCase):
         # The rule is given no prices at all: Free is a serving fact.
         self.assertEqual(bind.free_route_ids(["vendor/cheap"], {}), set())
 
+    def test_a_locally_served_model_is_a_free_route(self):
+        # A local route is Free by where it runs, not by its id: the same id
+        # is a paid route when this machine is not serving it.
+        self.assertEqual(bind.free_route_ids(["qwen3-coder-30b"], {},
+                                             local={"qwen3-coder-30b"}),
+                         {"qwen3-coder-30b"})
+        self.assertEqual(bind.free_route_ids(["qwen3-coder-30b"], {}), set())
+
 
 class FreeFloorScoreTests(unittest.TestCase):
     """What the floor buys: a Free route outranks the same popularity at a

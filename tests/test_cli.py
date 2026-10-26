@@ -691,6 +691,30 @@ class CliTests(unittest.TestCase):
                 self.assertIn("| 416.67 |", free_row)
                 self.assertIn(ticket, paid_row)
 
+    def test_served_local_route_scores_at_the_floor(self):
+        # A model this machine serves is a Free route by where it runs, not by
+        # its id: the score prices it at the Nominal floor like any other Free
+        # route (0.05 share / $0.00012 = 416.67).
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["free_models"] = {"qwen/qwen3-coder": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        world = build_world()
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": "qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", world=world,
+            local_models={"qwen/qwen3-coder-30b":
+                          {"id": "qwen/qwen3-coder-30b"}})
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and "qwen/qwen3-coder-30b |" in ln)
+        self.assertIn("| 416.67 |", row)
+        self.assertIn("| local |", row)
+
     def test_a_floor_above_the_cheapest_paid_ticket_stops_the_run(self):
         # A configured floor of $5/M output is $0.06/ticket at the authoring
         # profile — above the pool's cheapest paid ticket. That is an invalid
