@@ -15,7 +15,43 @@
   "summaries": {
     "example/model-id": "EXAMPLE ENTRY - replace with a research summary: what the model is known for, its caveats, every claim cited. Summaries are produced and refreshed by the summaries-refresh procedure (research/README.md)."
   },
-  "free_models": {},
+  "free_models": {
+    "opencode/deepseek-v4.1-flash-free": {
+      "context_length": 1048576,
+      "exposure": "no-retention",
+      "summary_ref": "deepseek/deepseek-v4.1-flash"
+    },
+    "opencode/glm-5.3-flash-free": {
+      "context_length": 1048576,
+      "exposure": "no-retention",
+      "summary_ref": "z-ai/glm-5.3-flash"
+    },
+    "opencode/mimo-v2.6-flash-free": {
+      "context_length": 1050000,
+      "exposure": "trains",
+      "summary_ref": "xiaomi/mimo-v2.6-flash"
+    },
+    "opencode/nemotron-3-ultra-free": {
+      "context_length": 1000000,
+      "exposure": "trains",
+      "summary_ref": "nvidia/nemotron-3-ultra-550b-a55b"
+    },
+    "opencode/nemotron-3.5-lightning-free": {
+      "context_length": 1000000,
+      "exposure": "trains",
+      "summary_ref": "nvidia/nemotron-3.5-lightning:free"
+    },
+    "opencode/nemotron-3.5-super-vl-free": {
+      "context_length": 1000000,
+      "exposure": "trains",
+      "summary_ref": "nvidia/nemotron-3.5-super-vl:free"
+    },
+    "opencode/flint-40b-free": {
+      "context_length": 262144,
+      "exposure": "trains",
+      "summary_ref": "recursive/flint-v1.0:free"
+    }
+  },
   "domains": {
     "research": [
       "research_report",
@@ -53,8 +89,8 @@
     ]
   },
   "scoring": {
-    "notes": "Task order = share^alpha / cost^beta (cost at the candidate's effort rung; Free routes priced at the Nominal floor — free_floor, $/M output, applied to every Free route whatever its Exposure: below every paid ticket so free can win where fit and context allow, never zero so it cannot win by division). The exponent ratio decides the ordering, their scale the sharpness. Tuned 2026-10-18 against the balance thresholds across all five domains (top-1 score mass 24-47%, top-2 <= 74%): neither uniform nor dominated. A Free route in the pool moves that balance — expected, and surfaced by --check-policy as the coefficient re-tune verdict rather than silently absorbed. Thresholds are the acceptance criterion for any coefficient change.",
-    "alpha": 0.7,
+    "notes": "Task order = share^alpha / cost^beta (cost at the candidate's effort rung; Free routes priced at the Nominal floor — free_floor, $/M output, applied to every Free route whatever its Exposure: below every paid ticket so free can win where fit and context allow, never zero so it cannot win by division). The exponent ratio decides the ordering, their scale the sharpness. Tuned 2026-10-26 (alpha 0.6, beta 1.0) once the Nominal floor entered scoring — the floor lifted ops' top-1 past the limit at 0.7 (52%), compression at 0.6 restores balance across all five domains (top-1 score mass 27-49%, top-2 <= 70%): neither uniform nor dominated. A Free route in the pool moves that balance — expected, and surfaced by --check-policy as the coefficient re-tune verdict rather than silently absorbed. Thresholds are the acceptance criterion for any coefficient change.",
+    "alpha": 0.6,
     "beta": 1.0,
     "free_floor": 0.01,
     "thresholds": {
