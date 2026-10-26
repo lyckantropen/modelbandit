@@ -235,6 +235,16 @@ def endpoint_pricings(slug: str, refresh: bool) -> list[dict]:
     return payload.get("endpoints", []) or []
 
 
+def endpoint_completion_cap(endpoints: list[dict] | None) -> int | None:
+    """Use the tightest reported endpoint completion cap, if any is known."""
+    caps = [endpoint.get("max_completion_tokens") for endpoint in endpoints or ()
+            if isinstance(endpoint, dict)
+            and isinstance(endpoint.get("max_completion_tokens"), int)
+            and not isinstance(endpoint.get("max_completion_tokens"), bool)
+            and endpoint["max_completion_tokens"] > 0]
+    return min(caps) if caps else None
+
+
 def per_million(price_str: str) -> float:
     return float(price_str) * 1_000_000
 
@@ -496,6 +506,12 @@ def load_free_models(policy: dict) -> dict:
         window = entry.get("context_length")
         if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
             raise SystemExit(f"policy {path}.context_length must be a positive integer")
+        completion_cap = entry.get("max_completion_tokens")
+        if (completion_cap is not None
+                and (isinstance(completion_cap, bool)
+                     or not isinstance(completion_cap, int)
+                     or completion_cap <= 0)):
+            raise SystemExit(f"policy {path}.max_completion_tokens must be a positive integer")
         if "exposure" not in entry:
             raise SystemExit(f"policy missing required key: {path}.exposure")
         try:
@@ -751,16 +767,19 @@ class Shape:
     input_tokens: int | None = None
     context_headroom: float = 2.0
     context_margin: float = 0.5
+    output_tokens: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
 class Candidate:
-    """The candidate facts admission judges: Exposure, serving and window."""
+    """The candidate facts admission judges: Exposure, serving and Footprint."""
     id: str
     exposure: str
     is_free: bool = False
     context_length: int | None = None
     cataloged: bool = True
+    completion_cap: int | None = None
+    output_multiplier: float = 1.0
 
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
@@ -798,10 +817,12 @@ def known_exposure(mid: str, value: str) -> str:
 
 
 def candidate_for(mid: str, policy: dict, *, local: bool = False,
-                  model: dict | None = None) -> Candidate:
+                  model: dict | None = None,
+                  endpoints: list[dict] | None = None,
+                  intent: str = "measured") -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
     the policy's `exposure` override map and `free_models` catalog, plus its
-    serving price class and context window."""
+    serving price class and Footprint capacities."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
     is_free = is_free_route(mid, local=local)
@@ -809,13 +830,20 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                       if isinstance(catalog_entry, dict) else None)
     if context_length is None and model:
         context_length = model.get("context_length")
+    completion_cap = endpoint_completion_cap(endpoints)
+    if (completion_cap is None and is_free
+            and isinstance(catalog_entry, dict)):
+        completion_cap = catalog_entry.get("max_completion_tokens")
     return Candidate(id=mid,
                       exposure=resolve_exposure(
                           mid, free_models=policy.get("free_models", {}),
                           overrides=policy.get("exposure", {}), local=local),
                       is_free=is_free,
                       context_length=context_length,
-                       cataloged=(not is_free or (
+                      completion_cap=completion_cap,
+                      output_multiplier=(mult_for(model, intent) if model
+                                         else EFFORT_MULTIPLIERS[intent]),
+                      cataloged=(not is_free or (
                            _free_summary(catalog_entry,
                                          policy.get("summaries", {}), mid)
                            and (not local and not mid.startswith("opencode/")
@@ -862,18 +890,30 @@ def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
 
 
 def context_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """Exclude only a Free route whose growth-adjusted input exceeds its
-    configured share of the context window. Paid routes remain judge-only."""
-    if (not candidate.is_free or shape.input_tokens is None
-            or candidate.context_length is None):
+    """Compare both Footprint dimensions to capacity using shared policy.
+
+    A Free route that overruns either dimension is excluded. Paid routes remain
+    admitted, but return the same reasons for the ranked table to flag.
+    """
+    reasons = []
+    if shape.input_tokens is not None and candidate.context_length is not None:
+        required = shape.input_tokens * shape.context_headroom
+        available = candidate.context_length * shape.context_margin
+        if required > available:
+            reasons.append(
+                f"over window (context input budget {required:,.0f} exceeds "
+                f"{available:,.0f} tokens)")
+    if shape.output_tokens is not None and candidate.completion_cap is not None:
+        required = shape.output_tokens * candidate.output_multiplier
+        available = candidate.completion_cap * shape.context_margin
+        if required > available:
+            reasons.append(
+                f"over completion cap (rung-priced output {required:,.0f} "
+                f"exceeds {available:,.0f} tokens)")
+    if not reasons:
         return ADMITTED
-    required = shape.input_tokens * shape.context_headroom
-    available = candidate.context_length * shape.context_margin
-    if required > available:
-        return Decision(False,
-                        f"context (input budget {required:,.0f} exceeds "
-                        f"{available:,.0f} tokens)")
-    return ADMITTED
+    reason = "; ".join(reasons)
+    return Decision(not candidate.is_free, reason)
 
 
 def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
@@ -892,11 +932,14 @@ GATES = (exposure_gate, context_gate, catalog_gate)
 def admit(shape: Shape, candidate: Candidate) -> Decision:
     """Admission: may this candidate serve this shape? Pure, and the single
     decision both the ranked table and the deal consult."""
+    flags = []
     for gate in GATES:
         decision = gate(shape, candidate)
         if not decision.admitted:
             return decision
-    return ADMITTED
+        if decision.reason:
+            flags.append(decision.reason)
+    return Decision(True, "; ".join(flags)) if flags else ADMITTED
 
 
 def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
@@ -1440,18 +1483,43 @@ def main() -> None:
     fit_map = parse_fit(args.fit) if args.fit else {}
     alpha, beta = config.alpha, config.beta
     aff = domain_weights(policy.get("hints", {}), args.domain, config.factors)
+    ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
+    ranked_ids = {mid for mid, _ in ranked}
+    ranked.extend((mid, share[mid]) for mid in sorted(share)
+                  if is_free_route(mid, local=mid in local_ids)
+                  and mid not in ranked_ids)
+
+    # Admission needs the same endpoint facts that the table later displays.
+    # Cache them here so an endpoint's completion cap gates Free routes and
+    # flags paid rows without fetching its metadata twice.
+    endpoint_cache = {}
+    completion_fact_ids = {
+        mid for mid in share if mid in models
+        and is_free_route(mid, local=mid in local_ids)
+    }
+    completion_fact_ids.update(
+        mid for mid, _ in ranked
+        if mid in models and not is_free_route(mid, local=mid in local_ids))
+    for mid in completion_fact_ids:
+        is_harness_free = (mid.startswith("opencode/") or mid in local_ids)
+        endpoint_cache[mid] = ([] if is_harness_free else
+                               endpoint_pricings(mid, args.refresh))
+
     # The one admission decision: the table marks with it, the deal draws
     # from it. Excluded rows stay visible; only the pick and the pool shun
     # them.
     shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
+                  output_tokens=out_tok,
                   context_headroom=config.context.headroom,
                   context_margin=config.context.margin)
     decisions = {mid: admit(shape, candidate_for(
-        mid, policy, local=mid in local_ids, model=models.get(mid)))
+        mid, policy, local=mid in local_ids, model=models.get(mid),
+        endpoints=endpoint_cache.get(mid, ()), intent=args.effort))
         for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
     show_admission = shape.sensitive or any(
-        not decision.admitted for decision in decisions.values())
+        not decisions[mid].admitted or decisions[mid].reason
+        for mid, _ in ranked)
     # One eligibility pool: the deal plays it, and this run prices it, so a
     # favored model below --top still scores at the same scale as the rows
     # above it.
@@ -1468,11 +1536,6 @@ def main() -> None:
     print("|---" * (11 + (2 if fit_map else 0) + (1 if show_admission else 0))
           + "|")
 
-    ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
-    ranked_ids = {mid for mid, _ in ranked}
-    ranked.extend((mid, share[mid]) for mid in sorted(share)
-                  if is_free_route(mid, local=mid in local_ids)
-                  and mid not in ranked_ids)
     table_mids = {mid for mid, _ in ranked}
     priced = {}
     pers = {}
@@ -1481,9 +1544,11 @@ def main() -> None:
         m = models.get(mid)
         if not m:
             continue
-        eps = ([] if (is_free_route(mid, local=mid in local_ids)
-                      and (mid.startswith("opencode/") or mid in local_ids))
-               else endpoint_pricings(mid, args.refresh))
+        if mid not in endpoint_cache:
+            is_harness_free = (mid.startswith("opencode/") or mid in local_ids)
+            endpoint_cache[mid] = ([] if is_harness_free else
+                                   endpoint_pricings(mid, args.refresh))
+        eps = endpoint_cache[mid]
         pr = price_model(m, eps,
                          in_tok, out_tok, cached,
                          mult_for(m, args.effort))
