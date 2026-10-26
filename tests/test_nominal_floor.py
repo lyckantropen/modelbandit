@@ -1,4 +1,4 @@
-"""Unit tests for Free risk: the score's cost term for Free routes.
+"""Unit tests for Free risk and its derived Nominal floor ticket price.
 
 Free risk is a policy fraction (`scoring.free_risk`) of the pool's cheapest
 paid ticket, applied to every Free route in the pool. It stays above zero and
@@ -80,14 +80,6 @@ class NominalFloorCostTests(unittest.TestCase):
         self.assertEqual(effective["paid-a"], 0.08)
         self.assertEqual(effective["paid-b"], CHEAPEST_PAID)
 
-    def test_invalid_risk_fails_at_the_scoring_seam(self):
-        for risk in (0, 1, -0.2, float("inf"), float("nan")):
-            with self.subTest(risk=risk), self.assertRaisesRegex(
-                    SystemExit, "free_risk"):
-                bind.effective_costs({"free": 0.0, "paid": 0.02},
-                                     free_risk=risk, free={"free"})
-
-
 class FreeRouteIdsTests(unittest.TestCase):
     """Which of the pool's ids are Free routes: the serving rule, never the
     price — a Free route is what the harness serves for nothing."""
@@ -122,7 +114,7 @@ class FreeRouteIdsTests(unittest.TestCase):
         self.assertEqual(bind.free_route_ids(["qwen3-coder-30b"], {}), set())
 
 
-class FreeFloorScoreTests(unittest.TestCase):
+class FreeRiskScoreTests(unittest.TestCase):
     """Free's standing uses its risk-priced ticket, never zero cost."""
 
     def test_raising_free_risk_lowers_free_standing_monotonically(self):

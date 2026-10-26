@@ -131,14 +131,17 @@ Policy: `skills/openrouter-model-router/SKILL.md`.
 
 ## Data
 
-Two endpoints need an OpenRouter API key (`OPENROUTER_API_KEY`, or an OpenCode
+These endpoints need an OpenRouter API key (`OPENROUTER_API_KEY`, or an OpenCode
 `auth.json` with an `openrouter` entry is picked up automatically):
 
 - `/api/v1/classifications/task` — task-tag leaderboards with per-tag model shares
 - `/api/v1/datasets/rankings-daily` — daily token usage per model
+- `/api/v1/key` — the account's daily `free_model_daily_requests` quota counter
+- per-model `/api/v1/models/{slug}/endpoints` — provider pricing and capacity
 
-`/api/v1/models` (and per-model `/endpoints`) is keyless. Everything is cached
-24h in `~/.cache/modelbind/`; `--refresh` bypasses.
+`/api/v1/models` is keyless. The model catalogue, leaderboards and endpoint
+details are cached for 24h in `~/.cache/modelbind/`; the key payload is cached
+for 60 seconds and is never served stale. `--refresh` bypasses either cache.
 
 Rankings data is licensed **CC BY 4.0**. When quoting figures outside the tool's
 own output, carry: `Source: OpenRouter (openrouter.ai/rankings), as of <as_of>`.

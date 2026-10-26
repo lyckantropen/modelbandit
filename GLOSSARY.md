@@ -113,9 +113,10 @@ _Avoid_: quota, free budget, cap
 OpenRouter's daily free-request counter: one figure shared by every `:free`
 route on the account, reset at UTC midnight, spent only by the routes
 OpenRouter serves for nothing. Read before a plan is priced and reported in the
-run header; when it cannot cover the plan's tickets plus the reserve, `:free`
-routes leave the pool. The provider's allowance, never a judgement of Free
-share.
+run header; the reserve is protected, and `:free` routes leave the pool only
+when remaining quota is below it. Plan size does not gate eligibility because
+the deal may draw fewer Free tickets than planned. The provider's allowance,
+never a judgement of Free share.
 _Avoid_: free budget, cap, rate limit (that is per minute, and unqueryable)
 
 ### Taste
@@ -170,5 +171,6 @@ A Free route's effective ticket price in the score: Free risk times the pool's
 cheapest paid ticket. Never zero, so free cannot win by division, and always
 below a healthy paid row, so it can still win. Applied uniformly to Free routes
 regardless of Exposure — the Exposure difference is decided by the Sensitive
-gate, not by price.
+gate, not by price. If the pool has no priced paid ticket, use the $1 nominal
+reference ticket as the basis for Free risk.
 _Avoid_: free price, effective cost, shadow price

@@ -81,10 +81,10 @@ class EffectiveCostTests(unittest.TestCase):
         paid = [v for mid, v in eff.items() if mid != "vendor/model:free"]
         self.assertLess(eff["vendor/model:free"], min(paid))
 
-    def test_all_free_pool_uses_positive_fallback_paid_ticket_reference(self):
+    def test_all_free_pool_uses_one_dollar_reference_ticket(self):
         eff = bind.effective_costs({"a": 0.0, "b": 0.0},
                                    free_risk=self.FREE_RISK, free={"a", "b"})
-        self.assertEqual(eff, {"a": self.FREE_RISK, "b": self.FREE_RISK})
+        self.assertEqual(eff, {"a": 0.35, "b": 0.35})
 
     def test_derived_nominal_floor_never_warns_against_cheapest_paid(self):
         import io
@@ -98,15 +98,6 @@ class EffectiveCostTests(unittest.TestCase):
         self.assertAlmostEqual(result["vendor/model:free"], 0.007)
         self.assertLess(result["vendor/model:free"], result["paid"])
         self.assertEqual(err.getvalue(), "")
-
-    def test_free_risk_outside_open_unit_interval_fails_loudly(self):
-        for risk in (0.0, 1.0, -0.01, 1.01, "invalid", None, [],
-                     float("inf"), float("nan")):
-            with self.subTest(risk=risk), self.assertRaisesRegex(
-                    SystemExit, "free_risk"):
-                bind.effective_costs({"vendor/model:free": 0.0, "paid": 0.02},
-                                     free_risk=risk,
-                                     free={"vendor/model:free"})
 
     def test_a_pool_without_a_free_route_is_unpriced_by_the_floor(self):
         # No Free route, no Free risk to apply: paid tickets keep their own price

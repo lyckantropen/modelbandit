@@ -65,6 +65,8 @@ BASES = ("worst", "primary", "best")
 # The Nominal floor is derived from this Free-risk fraction of the cheapest
 # priced paid ticket in the same pool.
 DEFAULT_FREE_RISK = 0.35
+# All-Free pools need a positive price reference when no paid ticket is priced.
+NOMINAL_REFERENCE_TICKET = 1.0
 FREE_SHARE_CHECK_TICKETS = 100
 FREE_SHARE_CHECK_SEED = "policy-check-free-share"
 FREE_SHARE_HISTORY_LIMIT = 10
@@ -158,7 +160,7 @@ def probe_local_models(fetcher=None) -> dict[str, dict]:
             continue
         model = {"id": mid}
         window = row.get("context_length")
-        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        if _is_plain_int(window) and window > 0:
             model["context_length"] = window
         served[mid] = model
     return served
@@ -166,6 +168,11 @@ def probe_local_models(fetcher=None) -> dict[str, dict]:
 
 def norm_id(model_id: str) -> str:
     return model_id.removeprefix("openrouter/")
+
+
+def _is_plain_int(value) -> bool:
+    """True for integers, excluding bool (which is an int subclass)."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def is_free_route(mid: str, *, local: bool = False) -> bool:
@@ -252,8 +259,7 @@ def endpoint_completion_cap(endpoints: list[dict] | None) -> int | None:
     """Use the tightest reported endpoint completion cap, if any is known."""
     caps = [endpoint.get("max_completion_tokens") for endpoint in endpoints or ()
             if isinstance(endpoint, dict)
-            and isinstance(endpoint.get("max_completion_tokens"), int)
-            and not isinstance(endpoint.get("max_completion_tokens"), bool)
+            and _is_plain_int(endpoint.get("max_completion_tokens"))
             and endpoint["max_completion_tokens"] > 0]
     return min(caps) if caps else None
 
@@ -488,9 +494,7 @@ def load_policy_config(policy: dict) -> PolicyConfig:
     # The reserve is a count of requests held back from planning, so a
     # fractional or negative one is a misconfiguration, not a rounding.
     raw_reserve = scoring.get("free_quota_reserve", DEFAULT_FREE_QUOTA_RESERVE)
-    quota_reserve = (raw_reserve
-                     if isinstance(raw_reserve, int)
-                     and not isinstance(raw_reserve, bool) else None)
+    quota_reserve = raw_reserve if _is_plain_int(raw_reserve) else None
     if quota_reserve is None and isinstance(raw_reserve, float) \
             and math.isfinite(raw_reserve) and raw_reserve.is_integer():
         quota_reserve = int(raw_reserve)
@@ -531,12 +535,11 @@ def load_free_models(policy: dict) -> dict:
         if not isinstance(entry, dict):
             raise SystemExit(f"policy {path} must be an object")
         window = entry.get("context_length")
-        if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        if not _is_plain_int(window) or window <= 0:
             raise SystemExit(f"policy {path}.context_length must be a positive integer")
         completion_cap = entry.get("max_completion_tokens")
         if (completion_cap is not None
-                and (isinstance(completion_cap, bool)
-                     or not isinstance(completion_cap, int)
+                and (not _is_plain_int(completion_cap)
                      or completion_cap <= 0)):
             raise SystemExit(f"policy {path}.max_completion_tokens must be a positive integer")
         if "exposure" not in entry:
@@ -712,18 +715,10 @@ def effective_costs(costs: dict, *, free_risk: float,
     ticket that priced at nothing keeps the pool's cheapest paid ticket.
     """
     paid = [v for mid, v in costs.items() if mid not in free and v > 0]
-    cheapest_paid = min(paid, default=1.0)
+    cheapest_paid = min(paid, default=NOMINAL_REFERENCE_TICKET)
     has_free = any(mid in free for mid in costs)
-    if has_free:
-        try:
-            free_risk = float(free_risk)
-        except (TypeError, ValueError, OverflowError):
-            raise SystemExit("scoring.free_risk must be strictly between 0 and 1") \
-                from None
-        if not math.isfinite(free_risk) or not 0.0 < free_risk < 1.0:
-            raise SystemExit("scoring.free_risk must be strictly between 0 and 1")
-    free_cost = nominal_floor_cost(free_risk, cheapest_paid) if has_free else None
-    return {mid: (free_cost if mid in free else (v if v > 0 else cheapest_paid))
+    nominal_floor = nominal_floor_cost(free_risk, cheapest_paid) if has_free else None
+    return {mid: (nominal_floor if mid in free else (v if v > 0 else cheapest_paid))
             for mid, v in costs.items()}
 
 
@@ -882,6 +877,11 @@ def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
     return {mid for mid in mids if is_free_route(mid, local=mid in local)}
 
 
+def _is_harness_free(mid: str, local_ids) -> bool:
+    """Whether endpoint pricing is absent because the harness serves this id."""
+    return mid.startswith("opencode/") or mid in local_ids
+
+
 def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, int]:
     """Count tickets dealt to Free routes, independent of their Exposure."""
     free = free_route_ids((row["mid"] for row in rows), policy, local=local)
@@ -960,6 +960,7 @@ def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
     machine serves spends none of it, so a spent counter says nothing about
     them; a paid route is charged credits, not free requests.
     """
+    # This OpenRouter serving counter does not apply to harness-served Free routes.
     if not verdict.eligible and candidate.id.endswith(":free"):
         return Decision(False, verdict.reason)
     return ADMITTED
@@ -1021,7 +1022,7 @@ class QuotaVerdict:
 
 def _count(value) -> int | None:
     """A reported count, or None for anything that is not a plain integer."""
-    if isinstance(value, bool) or not isinstance(value, int):
+    if not _is_plain_int(value):
         return None
     return value
 
@@ -1245,7 +1246,7 @@ def record_free_share_measurement(shape: dict, zero: bool) -> tuple[bool, int]:
     elif isinstance(previous, dict):
         measurements = previous.get("measurements", [])
         previous_streak = previous.get("zero_streak", 0)
-        if isinstance(previous_streak, bool) or not isinstance(previous_streak, int):
+        if not _is_plain_int(previous_streak):
             previous_streak = 0
         if not previous_streak and isinstance(measurements, list):
             for item in reversed(measurements):
@@ -1368,8 +1369,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         costs = {}
         for mid, _ in pool:
             model = models[mid]
-            eps = ([] if (is_free_route(mid, local=mid in local_ids)
-                          and (mid.startswith("opencode/") or mid in local_ids))
+            eps = ([] if _is_harness_free(mid, local_ids)
                    else endpoint_pricings(mid, False))
             pricing = price_model(model, eps,
                                   in_tok, out_tok, cached, mult_for(model, intent))
@@ -1474,8 +1474,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         costs = {}
         for mid, s in pool:
             m_mult = mult_for(models[mid], intent)
-            eps = ([] if (is_free_route(mid, local=mid in local_ids)
-                          and (mid.startswith("opencode/") or mid in local_ids))
+            eps = ([] if _is_harness_free(mid, local_ids)
                    else endpoint_pricings(mid, False))
             pricing = price_model(models[mid], eps,
                                   in_tok, out_tok, cached, m_mult)
@@ -1660,13 +1659,13 @@ def main() -> None:
           f"| effort={args.effort} | basis={args.pricing_basis} | policy: {age_txt} "
           f"| source: OpenRouter (openrouter.ai/rankings), as of "
           f"{classif.get('as_of', '?')}\n")
-    # Scarcity before the plan is drawn: any ticket may draw a ':free' route,
-    # so the plan's free demand is every ticket it deals.
+    # Protect the reserve before the deal; planned tickets are not known Free
+    # demand until after the draw.
     quota = free_quota(args.refresh) or FreeQuota()
     verdict = free_quota_decision(used=quota.used, limit=quota.limit,
                                   remaining=quota.remaining,
                                   reserve=config.free_quota_reserve,
-                                  planned_free=args.tickets)
+                                  planned_free=0)
     if quota.reported:
         left = quota.remaining
         if left is None and quota.limit is not None and quota.used is not None:
@@ -1675,8 +1674,8 @@ def main() -> None:
         limit_txt = "?" if quota.limit is None else str(quota.limit)
         print(f"free quota: {used_txt}/{limit_txt} used"
               + (f" ({left} left)" if left is not None else "")
-              + f" | plan {args.tickets} + reserve "
-                f"{config.free_quota_reserve}")
+              + f" | reserve {config.free_quota_reserve} protected; "
+                "plan size does not gate")
     else:
         print("free quota: unavailable | :free routes stay in the pool")
     if not verdict.eligible:
@@ -1703,8 +1702,7 @@ def main() -> None:
         mid for mid, _ in ranked
         if mid in models and not is_free_route(mid, local=mid in local_ids))
     for mid in completion_fact_ids:
-        is_harness_free = (mid.startswith("opencode/") or mid in local_ids)
-        endpoint_cache[mid] = ([] if is_harness_free else
+        endpoint_cache[mid] = ([] if _is_harness_free(mid, local_ids) else
                                endpoint_pricings(mid, args.refresh))
 
     # The one admission decision: the table marks with it, the deal draws
@@ -1748,8 +1746,7 @@ def main() -> None:
         if not m:
             continue
         if mid not in endpoint_cache:
-            is_harness_free = (mid.startswith("opencode/") or mid in local_ids)
-            endpoint_cache[mid] = ([] if is_harness_free else
+            endpoint_cache[mid] = ([] if _is_harness_free(mid, local_ids) else
                                    endpoint_pricings(mid, args.refresh))
         eps = endpoint_cache[mid]
         pr = price_model(m, eps,

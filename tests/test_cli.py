@@ -1219,7 +1219,7 @@ class CliTests(unittest.TestCase):
 
         self.assertIsNone(code)
         self.assertIn("free quota: 50/50 used (0 left)", out)
-        self.assertIn("plan 12 + reserve 5", out)
+        self.assertIn("reserve 5 protected; plan size does not gate", out)
         free_row = next(ln for ln in out.splitlines()
                         if ln.startswith("|") and "vendor/model:free |" in ln)
         self.assertIn("free quota exhausted (50/50 used)", free_row)
@@ -1249,8 +1249,9 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("free quota", err)
         self.assertIn("default pick (top of task order): vendor/model:free", out)
 
-    def test_reserve_is_held_back_from_the_plan(self):
-        # 10 left, a 3-ticket plan and a 10 reserve: 10 < 13, so free leaves.
+    def test_plan_size_does_not_gate_when_reserve_is_available(self):
+        # Plan size is not known Free demand before drawing: at the reserve
+        # boundary, the route remains eligible regardless of ticket count.
         self.free_only_policy(reserve=10)
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--tickets", "3",
@@ -1258,10 +1259,24 @@ class CliTests(unittest.TestCase):
             key_payload=self.key_counter(40, 50))
 
         self.assertIsNone(code)
-        self.assertIn("plan 3 + reserve 10", out)
+        self.assertIn("reserve 10 protected; plan size does not gate", out)
         free_row = next(ln for ln in out.splitlines()
                         if ln.startswith("|") and "vendor/model:free |" in ln)
-        self.assertIn("free quota thin (10 left < 3 planned + 10 reserve)",
+        self.assertNotIn("free quota", free_row)
+        self.assertIn("default pick (top of task order): vendor/model:free", out)
+
+    def test_quota_below_reserve_excludes_openrouter_free_routes(self):
+        self.free_only_policy(reserve=10)
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "3",
+            world=self.free_world(("vendor/model:free", 0.5)),
+            key_payload=self.key_counter(41, 50))
+
+        self.assertIsNone(code)
+        self.assertIn("reserve 10 protected; plan size does not gate", out)
+        free_row = next(ln for ln in out.splitlines()
+                        if ln.startswith("|") and "vendor/model:free |" in ln)
+        self.assertIn("free quota thin (9 left < 0 planned + 10 reserve)",
                       free_row)
 
     def test_unreachable_quota_warns_once_and_leaves_the_pool_unchanged(self):
@@ -1282,6 +1297,27 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         self.assertFalse(any(name == "key.json" for _, name, *_ in calls))
         self.assertNotIn("free quota", err)
+
+    def test_deal_can_send_all_tickets_to_free_when_paid_candidates_are_inadmissible(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["exposure"] = {"deepseek/": "trains"}
+        pol["free_models"] = {"vendor/model": {
+            "context_length": 262_144, "exposure": "no-retention",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", "--tickets", "12",
+            "--deal", "--seed", "all-free-valid",
+            world=self.free_world(("vendor/model:free", 0.5)))
+
+        self.assertIsNone(code)
+        self.assertIn("vendor/model:free", out)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("vendor/model:free", deal)
+        self.assertIn("free share: 12/12 tickets (100%)", out)
+        self.assertNotIn("deepseek/deepseek-v4-pro |", deal)
 
 
 if __name__ == "__main__":

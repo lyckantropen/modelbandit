@@ -48,9 +48,11 @@ to a rung on each candidate's ladder.
     written to policy. A Free route without a resolving summary remains
     visible but is not selectable; OpenCode and local routes also need their
     own catalog entries. The same run reads the account's daily free-request
-    counter and reports it in the header (`free quota: used/limit`): when it
-    cannot cover the run's tickets plus `scoring.free_quota_reserve`, `:free`
-    routes leave the pick and the deal with that reason. Harness `opencode/*`
+    counter and reports it in the header (`free quota: used/limit`): the
+    configured `scoring.free_quota_reserve` is protected, and `:free` routes
+    leave the pick and deal only when remaining quota is below that reserve.
+    Plan size does not gate eligibility because the draw may use fewer Free
+    tickets than the plan size. Harness `opencode/*`
     models and locally served models spend none of it. An unreachable key
     endpoint warns once and leaves the pool unchanged.
 
@@ -77,8 +79,10 @@ to a rung on each candidate's ladder.
    judged: input × `context_gate.headroom` against the context window, and
    rung-priced output (profile output × the rung's multiplier) against the
    completion cap — each against a `context_gate.margin` share of capacity
-   (defaults: headroom 2×, margin half). For Free routes the Context gate
-   mechanically excludes on either dimension, the reason naming the bound
+   (defaults: headroom 2×, margin half). Headroom applies only to input growth;
+    output demand is already inflated by its rung multiplier. For Free routes,
+    the Context gate mechanically excludes on either dimension, the reason
+    naming the bound
    (`over window`, `over completion cap`); a paid candidate that overruns is
    flagged with the same reason and stays in — capacity can be bought
    deliberately, and the judgment decides. Standing = score × fit/5
@@ -117,10 +121,10 @@ to a rung on each candidate's ladder.
 
 7. **Offer to refresh stale policy.** Every run prints `policy.json`'s age in
    the header — check it. `--check-policy` adds the drift detail: ranked models
-   without summaries, summaries no longer ranked, stale fit keys, and signal
+   without summaries, summaries no longer ranked, stale fit keys, signal
    coverage gaps (a hint that favors or avoids a model in one domain while the
-   model ranks in another where the hint is silent), and Free-share zeros (a
-   deals that drew no Free tickets, watched across checks). It also re-measures
+   model ranks in another where the hint is silent), and Free-share zeros
+   (deals that drew no Free tickets, watched across checks). It also re-measures
    score balance against `scoring.thresholds` — a `coefficient re-tune due: yes`
    verdict is coefficient work; surface it with the same offer. When the policy
    is older than one rankings window (~30 days) or the check reports drift, tell
@@ -183,13 +187,14 @@ to a rung on each candidate's ladder.
 - **Free quota** — OpenRouter's daily free-request counter
   (`free_model_daily_requests` on the key payload): one figure shared by every
   `:free` route, reset at UTC midnight, cached for a minute and never answered
-  from a stale copy. The header reports `free quota: used/limit` and the plan
-  it has to cover. A plan needs one request per ticket plus
-  `scoring.free_quota_reserve` (default 5; a negative or fractional reserve
-  stops the run) — the last few requests are not the plan's. When the counter
-  cannot cover that, `:free` routes are excluded from the pick and the deal
-  with the numbers stated (`free quota exhausted (50/50 used)`, `free quota
-  thin (2 left < 1 planned + 5 reserve)`). Harness `opencode/*` models and
+  from a stale copy. The header reports `free quota: used/limit` and the
+  protected reserve. `scoring.free_quota_reserve` (default 5; a negative or
+  fractional reserve stops the run) protects the last few requests; plan size
+  does not gate eligibility because a deal may draw fewer Free tickets than
+  its ticket count. If remaining quota is below the reserve, `:free` routes
+  are excluded from the pick and deal with the numbers stated (`free quota
+  exhausted (50/50 used)`, `free quota thin (2 left < 0 planned + 5 reserve)`).
+  Harness `opencode/*` models and
   locally served models never spend the counter, so this gate never removes
   them; a paid route is charged credits instead. An unreachable endpoint or a
   missing key reports `free quota: unavailable`, warns once, and leaves the
@@ -238,8 +243,9 @@ to a rung on each candidate's ladder.
   one word for both. Footprint is a Ticket shape's measured demand on a
   candidate — input × `context_gate.headroom` against the context window,
   rung-priced output against the completion cap, each against a
-  `context_gate.margin` share of capacity; measured, never judged, and the
-  reason a Free route is excluded names the bound (`over window`,
+  `context_gate.margin` share of capacity. Headroom applies only to input
+  growth; output demand is already inflated by the rung multiplier. Footprint
+  is measured, never judged; a Free route's exclusion reason names the bound (`over window`,
   `over completion cap`). A paid route is flagged with the same reasons and
   stays in — capacity is buyable. Difficulty is how much deliberation a
   ticket needs — the effort intent plus the task-fit judgment; judged, never

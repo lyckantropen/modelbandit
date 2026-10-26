@@ -45,13 +45,17 @@ looked at.
   when it does not stack up. Nothing in the deal reserves tickets for paid
   models or forbids free ones beyond the ordinary admission rules.
 - The OpenRouter daily free-request counter is a cliff, not a rule: read up
-  front, reported in the header, and when it cannot cover the plan plus the
-  reserve, `:free` routes leave the pool. It is the provider's allowance,
-  never a judgement of Free share — harness-served `opencode/*` models and
-  locally served models spend none of it and are never excluded by it.
+  front, reported in the header, and `:free` routes leave the pool only when
+  remaining quota is below the protected reserve. Plan size does not gate
+  eligibility because the deal may draw fewer Free tickets than planned. It is
+  the provider's allowance, never a judgement of Free share — harness-served
+  `opencode/*` models and locally served models spend none of it and are never
+  excluded by it.
 - A misconfigured `scoring.free_risk` fails loudly: the derived floor must
   stay strictly positive and strictly below the cheapest paid ticket, so
   free can neither win by division nor be priced out of existence.
+- When a pool has no priced paid ticket, Free risk uses a $1 nominal reference
+  ticket; this keeps an all-Free pool's Nominal floor positive and scoreable.
 - Supersedes, from the first free-tier delivery: the fixed
   `scoring.free_floor`, the input-only Context gate, and the all-candidate
   balance measurement. The rest of that decision stands — Exposure gates
