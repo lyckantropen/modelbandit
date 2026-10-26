@@ -344,6 +344,69 @@ class CliTests(unittest.TestCase):
                              if ln.startswith("| ")
                              and ln.split("|")[1].strip().isdigit()), 12)
 
+    # --- Sensitive shape: the admission seam in the output --------------
+
+    def sensitive_policy(self, exposure):
+        pol = json.loads(json.dumps(POLICY))
+        pol["exposure"] = exposure
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+    def test_sensitive_marks_the_exposed_row_and_keeps_it_visible(self):
+        self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
+        out, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
+        self.assertIsNone(code)
+        self.assertIn("| admit |", out)
+        row = next(ln for ln in out.splitlines()
+                   if "deepseek/deepseek-v4-flash |" in ln)
+        self.assertIn("exposed (trains)", row)      # visible with a reason
+        other = next(ln for ln in out.splitlines()
+                     if "deepseek/deepseek-v4-pro |" in ln)
+        self.assertNotIn("exposed", other)
+
+    def test_sensitive_pick_shuns_the_exposed_top_row(self):
+        # v4-pro tops the task order at alpha .7 / beta 1 (0.005^... priced at
+        # $0.0077), but exposure excludes it: the pick falls to the best
+        # admitted row and the exclusion is stated.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=0.7, beta=1.0)
+        pol["exposure"] = {"deepseek/deepseek-v4-pro": "trains"}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
+        self.assertIsNone(code)
+        self.assertIn("top of task order deepseek/deepseek-v4-pro is excluded",
+                      out)
+        self.assertIn("default pick (top of task order): "
+                      "deepseek/deepseek-v4-flash", out)
+        # the same run without the flag picks the top row, as today
+        out, _, _, _ = self.run_cli("--domain", "writing")
+        self.assertIn("default pick (top of task order): "
+                      "deepseek/deepseek-v4-pro", out)
+
+    def test_ordinary_shape_prints_no_admission_column(self):
+        out, _, _, _ = self.run_cli("--domain", "writing")
+        self.assertNotIn("| admit |", out)
+        self.assertNotIn("exposed", out)
+
+    def test_sensitive_deal_never_draws_an_exposed_candidate(self):
+        self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
+                                       "--deal", "--seed", "proj",
+                                       "--sensitive")
+        self.assertIsNone(code)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn("deepseek/deepseek-v4-flash", block)
+        self.assertEqual(sum(int(ln.split("|")[7].strip())
+                             for ln in block.splitlines()
+                             if ln.startswith("| ")
+                             and ln.split("|")[1].strip().isdigit()), 12)
+
+    def test_sensitive_shape_with_no_admitted_candidate_exits(self):
+        self.sensitive_policy({"deepseek/": "trains"})
+        _, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
+        self.assertIn("no candidate admitted", code)
+
     def test_missing_scoring_block_exits_with_key(self):
         pol = json.loads(json.dumps(POLICY))
         del pol["scoring"]

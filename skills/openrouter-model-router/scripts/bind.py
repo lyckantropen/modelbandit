@@ -295,6 +295,7 @@ class DealParameters:
     seed: str
     tickets: int
     fit_adjusted_task_scores: dict | None = None
+    admitted: frozenset | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -397,6 +398,110 @@ def weight_for(mid: str, table: dict) -> float:
     return match[1] if match is not None else 1.0
 
 
+# --- Admission seam --------------------------------------------------------
+# What a candidate exposes of the material it is fed. Exposure is a property
+# of the serving route, never inferred from price: free does not imply trains,
+# paid does not imply no-retention. Unknown free defaults to trains.
+EXPOSURES = ("no-retention", "trains", "local")
+
+
+@dataclasses.dataclass(frozen=True)
+class Shape:
+    """A Ticket shape's admission-relevant elements.
+
+    Sensitive is the shape's fifth element: the Secrets gate's verdict on the
+    material, bound per invocation, never a mood declared mid-run.
+    """
+    sensitive: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class Candidate:
+    """The candidate facts admission judges: its Exposure, resolved."""
+    id: str
+    exposure: str
+
+
+def resolve_exposure(mid: str, *, free_models: dict | None = None,
+                     overrides: dict | None = None, local: bool = False) -> str:
+    """One candidate's Exposure, by precedence:
+
+    explicit policy override (prefix-keyed) > locally served > curated free
+    catalog entry > ':free'-suffixed slug => trains > default no-retention.
+
+    The default is the paid route's assumption — the account's data policy
+    already holds it. A free route the catalog does not carry is exposed until
+    the user says otherwise.
+    """
+    match = longest_prefix_match(mid, overrides or {})
+    if match is not None:
+        return known_exposure(mid, match[1])
+    if local:
+        return "local"
+    match = longest_prefix_match(mid, free_models or {})
+    entry = match[1] if match is not None else {}
+    if isinstance(entry, dict) and entry.get("exposure"):
+        return known_exposure(mid, entry["exposure"])
+    if mid.endswith(":free"):
+        return "trains"
+    return "no-retention"
+
+
+def known_exposure(mid: str, value: str) -> str:
+    """A policy-named Exposure, or a loud stop: a misspelt class would
+    silently widen the gate."""
+    if value not in EXPOSURES:
+        raise SystemExit(f"unknown exposure '{value}' for {mid}; "
+                         f"known: {', '.join(EXPOSURES)}")
+    return value
+
+
+def candidate_for(mid: str, policy: dict, *, local: bool = False) -> Candidate:
+    """The candidate facts a policy implies for one model id: Exposure from
+    the policy's `exposure` override map and `free_models` catalog."""
+    return Candidate(id=mid,
+                     exposure=resolve_exposure(
+                         mid, free_models=policy.get("free_models", {}),
+                         overrides=policy.get("exposure", {}), local=local))
+
+
+@dataclasses.dataclass(frozen=True)
+class Decision:
+    """An admission verdict: admitted, or excluded with a visible reason.
+
+    An excluded candidate is never hidden — the ranked table marks it and the
+    deal does not draw it.
+    """
+    admitted: bool
+    reason: str = ""
+
+
+ADMITTED = Decision(True)
+
+
+def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """The Exposure<->Sensitive gate: exposed candidates never serve a
+    Sensitive shape, whether free or paid. No-retention and local candidates
+    are admitted — Exposure, not price, decides Eligibility."""
+    if shape.sensitive and candidate.exposure == "trains":
+        return Decision(False, f"exposed ({candidate.exposure})")
+    return ADMITTED
+
+
+# The gates, in order, behind the one decision. The Context gate joins here.
+GATES = (exposure_gate,)
+
+
+def admit(shape: Shape, candidate: Candidate) -> Decision:
+    """Admission: may this candidate serve this shape? Pure, and the single
+    decision both the ranked table and the deal consult."""
+    for gate in GATES:
+        decision = gate(shape, candidate)
+        if not decision.admitted:
+            return decision
+    return ADMITTED
+
+
 def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
     """Share-ranked selectable models: the popularity order every pool starts
     from. Unranked or unresolved models never play, so they drop out here."""
@@ -404,15 +509,19 @@ def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
             if mid in models]
 
 
-def eligibility_pool(share: dict, models: dict, aff: dict,
-                     top_k: int) -> list[tuple[str, float]]:
+def eligibility_pool(share: dict, models: dict, aff: dict, top_k: int,
+                     admitted: frozenset | None = None) -> list[tuple[str, float]]:
     """The deal's players, computed once for every consumer.
 
     Eligibility stays popularity: the top_k selectable models, plus ranked
-    models the user favors (weight > 1) below the cut. Returns [(mid, share)]
-    in popularity order; the candidate table prices these same players.
+    models the user favors (weight > 1) below the cut — the admission seam's
+    verdict applied first (``admitted``: the ids it admits; None admits all).
+    An excluded player is never replaced by a lower-ranked one: popularity
+    orders, admission only removes. Returns [(mid, share)] in popularity
+    order; the candidate table prices these same players.
     """
-    ranked = popularity_ranking(share, models)
+    ranked = [entry for entry in popularity_ranking(share, models)
+              if admitted is None or entry[0] in admitted]
     return ranked[:top_k] + [(mid, s) for mid, s in ranked[top_k:]
                              if weight_for(mid, aff) > 1.0]
 
@@ -445,13 +554,16 @@ def plan_deal(share: dict, models: dict, aff: dict,
 
     where every pool member's base is its fit-adjusted task score, supplied
     for the whole pool by the caller (blend_bases). Deterministic in seed.
+    The pool is admission-filtered before the draw (parameters.admitted), so
+    the deal and the ranked table agree about what may serve the shape.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
     """
     blend_weight = parameters.blend_weight
     seed = parameters.seed
     tickets = parameters.tickets
-    pool = eligibility_pool(share, models, aff, parameters.top_k)
+    pool = eligibility_pool(share, models, aff, parameters.top_k,
+                            parameters.admitted)
     if not pool:
         return []
     bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
@@ -657,6 +769,11 @@ def main() -> None:
     ap.add_argument("--fit", default=None, metavar="SPEC",
                     help="agent's task-fit judgments, 'mid=score,...' on 0-5; "
                          "composes as score * fit/5 (longest prefix wins)")
+    ap.add_argument("--sensitive", action="store_true",
+                    help="Sensitive ticket shape (the Secrets gate's verdict): "
+                         "exposed candidates — trains — are excluded from the "
+                         "pick and the deal, and marked with a reason in the "
+                         "table; no-retention free and local routes stay in")
     ap.add_argument("--budget", type=float, help="run budget in USD")
     ap.add_argument("--top", type=int, default=8, help="ranking rows to show")
     ap.add_argument("--policy", default=DEFAULT_POLICY,
@@ -744,16 +861,27 @@ def main() -> None:
     fit_map = parse_fit(args.fit) if args.fit else {}
     alpha, beta = config.alpha, config.beta
     aff = domain_weights(policy.get("hints", {}), args.domain, config.factors)
+    # The one admission decision: the table marks with it, the deal draws
+    # from it. Excluded rows stay visible; only the pick and the pool shun
+    # them.
+    shape = Shape(sensitive=args.sensitive)
+    decisions = {mid: admit(shape, candidate_for(mid, policy)) for mid in share}
+    admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
     # One eligibility pool: the deal plays it, and this run prices it, so a
     # favored model below --top still scores at the same scale as the rows
     # above it.
-    pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k)
+    pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k,
+                             admitted)
             if args.deal else [])
 
+    if shape.sensitive:
+        print("shape: sensitive — exposed candidates are excluded from the "
+              "pick and the deal (marked below, never hidden)\n")
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
           + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
-          "ctx | rung |")
-    print("|---" * (10 + (2 if fit_map else 0)) + "|")
+          "ctx | rung |" + (" admit |" if shape.sensitive else ""))
+    print("|---" * (10 + (2 if fit_map else 0) + (1 if shape.sensitive else 0))
+          + "|")
 
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
     table_mids = {mid for mid, _ in ranked}
@@ -805,19 +933,27 @@ def main() -> None:
         if fit_map:
             shown = f"{fit:.1f}" if fit is not None else "—"
             fit_cell = f" {shown} | {adj:.2f} |"
+        admit_cell = ""
+        if shape.sensitive:
+            admit_cell = f" {decisions[mid].reason or '—'} |"
         print(f"| {i} | {mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
-              f"{delta} | {ctx} | {rung} |")
-        if pick is None:
-            pick = (mid, per, pr)
-            floor_total = pr["best"] * args.tickets
-        if cheapest is None or per < cheapest[1]:
-            cheapest = (mid, per)
+              f"{delta} | {ctx} | {rung} |{admit_cell}")
+        if decisions[mid].admitted:
+            if pick is None:
+                pick = (mid, per, pr)
+                floor_total = pr["best"] * args.tickets
+            if cheapest is None or per < cheapest[1]:
+                cheapest = (mid, per)
+    excluded = sorted(mid for mid, d in decisions.items() if not d.admitted)
     for mid, s in sorted(((mid, s) for mid, s in ranked if mid not in priced),
                          key=lambda t: -t[1]):
         i += 1
+        admit_cell = ""
+        if shape.sensitive:
+            admit_cell = f" {decisions[mid].reason or '—'} |"
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
-              f"— unresolved to a priced model | | | |")
+              f"— unresolved to a priced model | | | |{admit_cell}")
 
     odd = {k: v for k, v in matches.items() if v in ("heuristic", "unresolved")}
     if odd:
@@ -836,7 +972,16 @@ def main() -> None:
                 print(f"  {mid}: {note}")
 
     if pick is None:
+        if excluded:
+            raise SystemExit(
+                "sensitive shape: no candidate admitted — every ranked "
+                f"candidate is excluded ({', '.join(excluded)}); drop "
+                "--sensitive or pick another domain")
         raise SystemExit("domain has no ranked candidates in the model list")
+    if shape.sensitive and excluded and rows_out \
+            and not decisions[rows_out[0][0]].admitted:
+        print(f"\nnote: top of task order {rows_out[0][0]} is excluded "
+              f"({decisions[rows_out[0][0]].reason}) — not picked")
     print(f"\ndefault pick (top of task order): {pick[0]}")
     pr_pick = pick[2]
     if pr_pick.get("best_ep") and pr_pick.get("worst_ep") \
@@ -860,6 +1005,7 @@ def main() -> None:
             seed=args.seed,
             tickets=args.tickets,
             fit_adjusted_task_scores=fit_adjusted_task_scores,
+            admitted=admitted,
         )
         rows = plan_deal(share, models, aff, parameters=deal_parameters)
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
