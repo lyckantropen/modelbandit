@@ -72,12 +72,18 @@ to a rung on each candidate's ladder.
 4. **Judge task fit.** Score every candidate 0–5 for THIS task (fractions
    fine), from the summaries: 5 = summaries explicitly endorse it here;
    3 = no evidence either way; 1 = summaries warn against; 0 = cannot do the
-    task. Context window and rung coverage are judged too; for Free routes,
-    the Context gate mechanically excludes a candidate when the input budget
-    times `context_gate.headroom` exceeds its window times
-    `context_gate.margin` (defaults: 2× and half-window). Paid candidates remain
-    judge-only for context. Standing = score × fit/5 (unscored = 5). Pass the
-    fit judgments to the script (`--fit`) so the order and the deal use them.
+   task. That judgment plus the effort intent is the shape's **Difficulty** —
+   judged, never measured. Its counterpart is **Footprint**, measured, never
+   judged: input × `context_gate.headroom` against the context window, and
+   rung-priced output (profile output × the rung's multiplier) against the
+   completion cap — each against a `context_gate.margin` share of capacity
+   (defaults: headroom 2×, margin half). For Free routes the Context gate
+   mechanically excludes on either dimension, the reason naming the bound
+   (`over window`, `over completion cap`); a paid candidate that overruns is
+   flagged with the same reason and stays in — capacity can be bought
+   deliberately, and the judgment decides. Standing = score × fit/5
+   (unscored = 5). Pass the fit judgments to the script (`--fit`) so the
+   order and the deal use them.
    Done when: every considered candidate carries a fit score and a one-line
    reason.
 
@@ -89,7 +95,10 @@ to a rung on each candidate's ladder.
    pool by seeded draw from a preference-tilted blend of the fit-adjusted
    scores (`policy.json` `affinity`). Deterministic in the seed: the same
    project replays the same deal. Budget pressure moves within the order
-   toward cheaper rows — never outside the popularity set.
+   toward cheaper rows — never outside the popularity set. The deal reports
+   its Free share — the fraction of tickets Free routes drew — reported,
+   never capped and never floored: a shape may be dealt entirely to Free
+   routes.
    One invocation deals one ticket shape — a run's domain, effort, token
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
@@ -110,8 +119,9 @@ to a rung on each candidate's ladder.
    the header — check it. `--check-policy` adds the drift detail: ranked models
    without summaries, summaries no longer ranked, stale fit keys, and signal
    coverage gaps (a hint that favors or avoids a model in one domain while the
-   model ranks in another where the hint is silent). It also re-measures score
-   balance against `scoring.thresholds` — a `coefficient re-tune due: yes`
+   model ranks in another where the hint is silent), and Free-share zeros (a
+   deals that drew no Free tickets, watched across checks). It also re-measures
+   score balance against `scoring.thresholds` — a `coefficient re-tune due: yes`
    verdict is coefficient work; surface it with the same offer. When the policy
    is older than one rankings window (~30 days) or the check reports drift, tell
    the user and offer to run a summaries refresh — the summaries-refresh
@@ -133,7 +143,9 @@ to a rung on each candidate's ladder.
 
 - **Free catalog** — `policy.json`'s `free_models` maps id prefixes to
   `context_length` (positive tokens), `exposure` (`no-retention`, `trains`, or
-  `local`), and optional `summary_ref` (an exact key in `summaries`).
+  `local`), optional `summary_ref` (an exact key in `summaries`), and optional
+  `max_completion_tokens` (a Free entry's completion cap when no endpoint
+  reports one).
   `opencode/*` and local entries need their own window and a resolving summary.
   Ranked OpenRouter `:free` routes use their own slug and may resolve a summary
   by longest prefix without a `free_models` entry; their context window comes
@@ -204,7 +216,9 @@ to a rung on each candidate's ladder.
   hint's fit for the domain and its evidence map through `affinity.factors`
   (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
   avoid/suspected ×0.5). Longest prefix wins. The deal is the only place taste
-  acts — the ranking itself is never reordered.
+  acts — the ranking itself is never reordered. Its Free share — the fraction
+  of tickets Free routes drew — is a report, never a cap and never a floor:
+  some tickets, all of them, or none, as the draw falls.
 
 - **Exposure & Sensitive** — Sensitive is the Ticket shape's fifth element,
   bound per invocation (`--sensitive`) from the Secrets gate's verdict at
@@ -219,6 +233,17 @@ to a rung on each candidate's ladder.
   models stay admitted. Exposure, not price, decides — and one admission
   verdict serves both the table and the deal, so the two never disagree
   about what may serve a shape.
+
+- **Footprint & Difficulty** — two words for two different questions, never
+  one word for both. Footprint is a Ticket shape's measured demand on a
+  candidate — input × `context_gate.headroom` against the context window,
+  rung-priced output against the completion cap, each against a
+  `context_gate.margin` share of capacity; measured, never judged, and the
+  reason a Free route is excluded names the bound (`over window`,
+  `over completion cap`). A paid route is flagged with the same reasons and
+  stays in — capacity is buyable. Difficulty is how much deliberation a
+  ticket needs — the effort intent plus the task-fit judgment; judged, never
+  measured, and never compared to a window.
 
 - **Token profiles** — cost is output-weighted for authoring: a `.md` research
   note is mostly completion tokens (authoring: 20K in / 12K out / 40% cached),
