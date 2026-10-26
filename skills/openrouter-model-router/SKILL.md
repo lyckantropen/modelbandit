@@ -79,7 +79,9 @@ to a rung on each candidate's ladder.
    is older than one rankings window (~30 days) or the check reports drift, tell
    the user and offer to run a summaries refresh — the summaries-refresh
    procedure; when you have the repository checkout, its path is
-   `research/README.md`. With only the skill
+   `research/README.md`, and the offer names the scope command —
+   `bind.py --check-policy --scope`, which reports the drift plus the facts
+   behind each finding — as where the cycle starts. With only the skill
    folder installed (no checkout) the offer degrades: report what is due and
    name the summaries-refresh procedure — it lives in the repository
    checkout, beyond this skill folder — and never emit a path that cannot
