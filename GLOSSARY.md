@@ -27,8 +27,9 @@ everything.
 _Avoid_: assignment plan, binding schedule
 
 **Ticket shape**
-A run's (domain, effort, token profile, `--fit`) combination. One deal deals
-one shape; same-shape tickets share one task-fit assessment by construction.
+A run's (domain, effort, token profile, `--fit`, `--sensitive`) combination.
+One deal deals one shape; same-shape tickets share one task-fit assessment by
+construction.
 _Avoid_: batch, group
 
 **Score**
