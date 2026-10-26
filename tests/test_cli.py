@@ -126,13 +126,19 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_cli(self, *argv, world=None, local_models=None):
+    def run_cli(self, *argv, world=None, local_models=None, key_payload=None):
         world = world if world is not None else build_world()
         local_models = local_models if local_models is not None else {}
         calls = []
 
-        def fake_fetch(url, cache_name, *, auth, refresh):
+        def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
             calls.append((url, cache_name, auth, refresh))
+            if cache_name == "key.json":
+                if key_payload is None:
+                    # No key, or an unreachable endpoint: the counter is not
+                    # reported and the run carries on without it.
+                    raise SystemExit("cannot reach https://openrouter.ai/api/v1/key")
+                return key_payload
             if cache_name == "models.json":
                 return {"data": world["models"]}
             if cache_name == "classifications.json":
@@ -1088,6 +1094,114 @@ class CliTests(unittest.TestCase):
         out, _, _, _ = self.run_cli("--domain", "writing",
                                     "--in-tokens", "0", "--out-tokens", "0")
         self.assertIn("projection at 1 ticket(s): $0.00", out)
+
+    # --- Free-request quota: a cliff before the plan is drawn --------------
+
+    QUOTA_CATALOG = {
+        "vendor/model": {"context_length": 262_144, "exposure": "no-retention",
+                         "summary_ref": "deepseek/deepseek-v4-pro"},
+        "opencode/flash": {"context_length": 262_144,
+                           "exposure": "no-retention",
+                           "summary_ref": "deepseek/deepseek-v4-pro"},
+    }
+
+    def quota_policy(self, reserve=None, catalog=None):
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        if reserve is not None:
+            pol["scoring"]["free_quota_reserve"] = reserve
+        pol["affinity"]["eligibility_top_k"] = 5
+        pol["free_models"] = (catalog if catalog is not None
+                              else self.QUOTA_CATALOG)
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+    def free_only_policy(self, reserve=None):
+        self.quota_policy(reserve=reserve,
+                          catalog={"vendor/model":
+                                   self.QUOTA_CATALOG["vendor/model"]})
+
+    def quota_world(self):
+        """A ':free' route and a harness 'opencode/*' free model together."""
+        return self.free_world(("vendor/model:free", 0.5))
+
+    @staticmethod
+    def key_counter(used, limit):
+        return {"data": {"free_model_daily_requests": {"used": used,
+                                                       "limit": limit}}}
+
+    def test_exhausted_quota_removes_free_routes_from_the_table_and_deal(self):
+        self.quota_policy()
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--tickets", "12",
+            world=self.quota_world(),
+            key_payload=self.key_counter(50, 50))
+
+        self.assertIsNone(code)
+        self.assertIn("free quota: 50/50 used (0 left)", out)
+        self.assertIn("plan 12 + reserve 5", out)
+        free_row = next(ln for ln in out.splitlines()
+                        if ln.startswith("|") and "vendor/model:free |" in ln)
+        self.assertIn("free quota exhausted (50/50 used)", free_row)
+        # The excluded route leaves the pick and the deal; the table keeps
+        # the row and states why it cannot serve.
+        self.assertNotIn("default pick (top of task order): vendor/model:free",
+                         out)
+        deal = out.split("\ndeal (", 1)[1]
+        self.assertNotIn("vendor/model:free", deal)
+
+        # A harness-served free model spends no OpenRouter free requests.
+        opencode_row = next(ln for ln in out.splitlines()
+                            if ln.startswith("|")
+                            and "opencode/flash |" in ln)
+        self.assertNotIn("free quota", opencode_row)
+        self.assertIn("opencode/flash", deal)
+
+    def test_covered_quota_keeps_the_free_route_in_the_pool(self):
+        self.free_only_policy()
+        out, err, code, _ = self.run_cli(
+            "--domain", "writing",
+            world=self.free_world(("vendor/model:free", 0.5)),
+            key_payload=self.key_counter(12, 50))
+
+        self.assertIsNone(code)
+        self.assertIn("free quota: 12/50 used (38 left)", out)
+        self.assertNotIn("free quota", err)
+        self.assertIn("default pick (top of task order): vendor/model:free", out)
+
+    def test_reserve_is_held_back_from_the_plan(self):
+        # 10 left, a 3-ticket plan and a 10 reserve: 10 < 13, so free leaves.
+        self.free_only_policy(reserve=10)
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "3",
+            world=self.free_world(("vendor/model:free", 0.5)),
+            key_payload=self.key_counter(40, 50))
+
+        self.assertIsNone(code)
+        self.assertIn("plan 3 + reserve 10", out)
+        free_row = next(ln for ln in out.splitlines()
+                        if ln.startswith("|") and "vendor/model:free |" in ln)
+        self.assertIn("free quota thin (10 left < 3 planned + 10 reserve)",
+                      free_row)
+
+    def test_unreachable_quota_warns_once_and_leaves_the_pool_unchanged(self):
+        self.free_only_policy()
+        out, err, code, _ = self.run_cli(
+            "--domain", "writing",
+            world=self.free_world(("vendor/model:free", 0.5)))
+
+        self.assertIsNone(code)
+        self.assertEqual(err.count("free quota"), 1)
+        self.assertIn(":free routes stay in the pool", err)
+        self.assertIn("free quota: unavailable", out)
+        self.assertIn("default pick (top of task order): vendor/model:free", out)
+
+    def test_check_policy_plans_no_tickets_and_reads_no_counter(self):
+        _, err, code, calls = self.run_cli("--check-policy")
+
+        self.assertIsNone(code)
+        self.assertFalse(any(name == "key.json" for _, name, *_ in calls))
+        self.assertNotIn("free quota", err)
 
 
 if __name__ == "__main__":

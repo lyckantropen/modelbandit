@@ -93,6 +93,7 @@
     "alpha": 0.6,
     "beta": 1.0,
     "free_floor": 0.01,
+    "free_quota_reserve": 5,
     "thresholds": {
       "top1_min": 0.2,
       "top1_max": 0.5,
