@@ -41,9 +41,12 @@ to a rung on each candidate's ladder.
 4. **Judge task fit.** Score every candidate 0–5 for THIS task (fractions
    fine), from the summaries: 5 = summaries explicitly endorse it here;
    3 = no evidence either way; 1 = summaries warn against; 0 = cannot do the
-   task. Context window and rung coverage are judged too — shown as data,
-   never floored mechanically. Standing = score × fit/5 (unscored = 5). Pass
-   the judgments to the script (`--fit`) so the order and the deal use them.
+    task. Context window and rung coverage are judged too; for Free routes,
+    the Context gate mechanically excludes a candidate when the input budget
+    times `context_gate.headroom` exceeds its window times
+    `context_gate.margin` (defaults: 2× and half-window). Paid candidates remain
+    judge-only for context. Standing = score × fit/5 (unscored = 5). Pass the
+    fit judgments to the script (`--fit`) so the order and the deal use them.
    Done when: every considered candidate carries a fit score and a one-line
    reason.
 

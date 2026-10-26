@@ -125,6 +125,85 @@ class AdmissionTests(unittest.TestCase):
         self.assertTrue(decision.admitted)
         self.assertEqual(decision.reason, "")
 
+    def test_free_candidate_that_cannot_fit_is_excluded_with_context_reason(self):
+        shape = bind.Shape(input_tokens=20_000)
+        facts = bind.Candidate("nvidia/nemotron:free", "trains",
+                               is_free=True, context_length=65_536)
+
+        decision = bind.admit(shape, facts)
+
+        self.assertFalse(decision.admitted)
+        self.assertIn("context", decision.reason)
+
+    def test_paid_candidate_is_not_context_gated(self):
+        shape = bind.Shape(input_tokens=40_000)
+        facts = bind.Candidate("vendor/model", "no-retention",
+                               is_free=False, context_length=65_536)
+
+        self.assertTrue(bind.admit(shape, facts).admitted)
+
+    def test_context_gate_calibration_for_all_profiles_and_windows(self):
+        expected = {
+            65_536: {"authoring": False, "agentic": False, "chat": True},
+            262_144: {"authoring": True, "agentic": True, "chat": True},
+            1_048_576: {"authoring": True, "agentic": True, "chat": True},
+        }
+        for window, profiles in expected.items():
+            for profile, (input_tokens, _, _) in bind.PROFILES.items():
+                with self.subTest(window=window, profile=profile):
+                    shape = bind.Shape(input_tokens=input_tokens)
+                    facts = bind.Candidate("provider/route:free", "trains",
+                                           is_free=True,
+                                           context_length=window)
+                    self.assertEqual(bind.admit(shape, facts).admitted,
+                                     profiles[profile])
+
+
+class ContextPolicyTests(unittest.TestCase):
+    POLICY = {
+        "scoring": {"alpha": 1, "beta": 1,
+                    "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
+                                   "top2_max": 0.75}},
+        "affinity": {"blend_weight": 0.6, "eligibility_top_k": 5,
+                     "factors": {"favor_validated": 3, "favor_suspected": 2,
+                                 "avoid_validated": 0.3, "avoid_suspected": 0.5}},
+    }
+
+    def test_context_policy_defaults(self):
+        config = bind.load_policy_config(self.POLICY)
+        self.assertEqual(config.context.headroom, 2.0)
+        self.assertEqual(config.context.margin, 0.5)
+
+    def test_context_policy_is_configurable(self):
+        config = bind.load_policy_config(
+            {**self.POLICY,
+             "context_gate": {"headroom": 3, "margin": 0.75}})
+        self.assertEqual(config.context.headroom, 3.0)
+        self.assertEqual(config.context.margin, 0.75)
+
+    def test_configured_context_policy_changes_admission(self):
+        config = bind.load_policy_config(
+            {**self.POLICY,
+             "context_gate": {"headroom": 1, "margin": 0.75}})
+        shape = bind.Shape(input_tokens=20_000,
+                           context_headroom=config.context.headroom,
+                           context_margin=config.context.margin)
+        free_route = bind.Candidate("provider/route:free", "trains",
+                                    is_free=True, context_length=65_536)
+
+        self.assertTrue(bind.admit(shape, free_route).admitted)
+
+    def test_invalid_context_policy_boundaries_fail_loudly(self):
+        for policy in (
+                {"context_gate": {"headroom": 0.99}},
+                {"context_gate": {"headroom": float("inf")}},
+                {"context_gate": {"margin": 0}},
+                {"context_gate": {"margin": 1.01}},
+                {"context_gate": {"margin": float("nan")}},):
+            with self.subTest(policy=policy), self.assertRaisesRegex(
+                    SystemExit, "context_gate"):
+                bind.load_policy_config({**self.POLICY, **policy})
+
 
 class CandidateFactsTests(unittest.TestCase):
     """candidate_for binds the policy's override map and free catalog into the
@@ -141,6 +220,17 @@ class CandidateFactsTests(unittest.TestCase):
         facts = bind.candidate_for("opencode/glm-5.3-flash", self.POLICY)
         self.assertEqual(facts.exposure, "no-retention")
         self.assertTrue(bind.admit(SENSITIVE, facts).admitted)
+
+    def test_candidate_binds_free_serving_and_catalog_window(self):
+        facts = bind.candidate_for("opencode/glm-5.3-flash", self.POLICY)
+        self.assertTrue(facts.is_free)
+        self.assertEqual(facts.context_length, 262_144)
+
+    def test_free_route_uses_model_window_when_not_in_catalog(self):
+        facts = bind.candidate_for("vendor/model:free", {},
+                                  model={"context_length": 65_536})
+        self.assertTrue(facts.is_free)
+        self.assertEqual(facts.context_length, 65_536)
 
     def test_policy_override_is_read(self):
         facts = bind.candidate_for("z-ai/glm-5.3-flash:free", self.POLICY)

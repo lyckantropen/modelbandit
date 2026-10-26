@@ -61,6 +61,10 @@
       "top2_max": 0.75
     }
   },
+  "context_gate": {
+    "headroom": 2.0,
+    "margin": 0.5
+  },
   "affinity": {
     "notes": "Derivation policy for the multi-ticket deal, not stored weights: a hint's fit (favor/avoid, per domain) and evidence (validated/suspected) map to a multiplier through factors at run time. Eligibility stays popularity; the deal tilts by preference.",
     "blend_weight": 0.6,

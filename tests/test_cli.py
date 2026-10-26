@@ -389,6 +389,23 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("| admit |", out)
         self.assertNotIn("exposed", out)
 
+    def test_context_exclusion_is_visible_on_an_ordinary_shape(self):
+        world = build_world()
+        free_model = make_model("nvidia/nemotron:free", "0.000001",
+                                "0.000001", "0.000001")
+        free_model["context_length"] = 65_536
+        world["models"].append(free_model)
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": "nvidia/nemotron:free", "tag_usage_share": 0.25})
+
+        out, _, code, _ = self.run_cli("--domain", "writing", world=world)
+
+        self.assertIsNone(code)
+        self.assertIn("| admit |", out)
+        row = next(ln for ln in out.splitlines()
+                   if "nvidia/nemotron:free |" in ln)
+        self.assertIn("context", row)
+
     def test_sensitive_deal_never_draws_an_exposed_candidate(self):
         self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
         out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",

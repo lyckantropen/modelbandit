@@ -16,6 +16,7 @@ import argparse
 import collections
 import dataclasses
 import json
+import math
 import os
 import random
 import re
@@ -289,6 +290,12 @@ class DealPolicy:
 
 
 @dataclasses.dataclass(frozen=True)
+class ContextGatePolicy:
+    headroom: float = 2.0
+    margin: float = 0.5
+
+
+@dataclasses.dataclass(frozen=True)
 class DealParameters:
     blend_weight: float
     top_k: int
@@ -305,6 +312,7 @@ class PolicyConfig:
     thresholds: dict
     factors: dict
     deal: DealPolicy
+    context: ContextGatePolicy
 
 
 def load_policy_config(policy: dict) -> PolicyConfig:
@@ -326,6 +334,26 @@ def load_policy_config(policy: dict) -> PolicyConfig:
                   for key in threshold_keys}
     factors = {key: float(required(factor_values, key, f"affinity.factors.{key}"))
                for key in factor_keys}
+    context_values = policy.get("context_gate", {})
+    if not isinstance(context_values, dict):
+        raise SystemExit("policy context_gate must be an object")
+
+    def context_value(key: str, default: float) -> float:
+        value = context_values.get(key, default)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise SystemExit(f"policy context_gate.{key} must be a number") from None
+        if not math.isfinite(value):
+            raise SystemExit(f"policy context_gate.{key} must be finite")
+        return value
+
+    headroom = context_value("headroom", 2.0)
+    margin = context_value("margin", 0.5)
+    if headroom < 1.0:
+        raise SystemExit("policy context_gate.headroom must be at least 1")
+    if not 0.0 < margin <= 1.0:
+        raise SystemExit("policy context_gate.margin must be greater than 0 and at most 1")
     return PolicyConfig(
         alpha=float(required(scoring, "alpha", "scoring.alpha")),
         beta=float(required(scoring, "beta", "scoring.beta")),
@@ -337,6 +365,7 @@ def load_policy_config(policy: dict) -> PolicyConfig:
             eligibility_top_k=int(required(affinity, "eligibility_top_k",
                                            "affinity.eligibility_top_k")),
         ),
+        context=ContextGatePolicy(headroom=headroom, margin=margin),
     )
 
 
@@ -413,13 +442,18 @@ class Shape:
     material, bound per invocation, never a mood declared mid-run.
     """
     sensitive: bool = False
+    input_tokens: int | None = None
+    context_headroom: float = 2.0
+    context_margin: float = 0.5
 
 
 @dataclasses.dataclass(frozen=True)
 class Candidate:
-    """The candidate facts admission judges: its Exposure, resolved."""
+    """The candidate facts admission judges: Exposure, serving and window."""
     id: str
     exposure: str
+    is_free: bool = False
+    context_length: int | None = None
 
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
@@ -456,13 +490,25 @@ def known_exposure(mid: str, value: str) -> str:
     return value
 
 
-def candidate_for(mid: str, policy: dict, *, local: bool = False) -> Candidate:
+def candidate_for(mid: str, policy: dict, *, local: bool = False,
+                  model: dict | None = None) -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
-    the policy's `exposure` override map and `free_models` catalog."""
+    the policy's `exposure` override map and `free_models` catalog, plus its
+    serving price class and context window."""
+    catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
+    catalog_entry = catalog_match[1] if catalog_match is not None else {}
+    is_free = (local or mid.startswith("opencode/") or mid.endswith(":free")
+               or bool(catalog_match))
+    context_length = (catalog_entry.get("context_length")
+                      if isinstance(catalog_entry, dict) else None)
+    if context_length is None and model:
+        context_length = model.get("context_length")
     return Candidate(id=mid,
                      exposure=resolve_exposure(
                          mid, free_models=policy.get("free_models", {}),
-                         overrides=policy.get("exposure", {}), local=local))
+                         overrides=policy.get("exposure", {}), local=local),
+                     is_free=is_free,
+                     context_length=context_length)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -488,8 +534,23 @@ def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
     return ADMITTED
 
 
+def context_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """Exclude only a Free route whose growth-adjusted input exceeds its
+    configured share of the context window. Paid routes remain judge-only."""
+    if (not candidate.is_free or shape.input_tokens is None
+            or candidate.context_length is None):
+        return ADMITTED
+    required = shape.input_tokens * shape.context_headroom
+    available = candidate.context_length * shape.context_margin
+    if required > available:
+        return Decision(False,
+                        f"context (input budget {required:,.0f} exceeds "
+                        f"{available:,.0f} tokens)")
+    return ADMITTED
+
+
 # The gates, in order, behind the one decision. The Context gate joins here.
-GATES = (exposure_gate,)
+GATES = (exposure_gate, context_gate)
 
 
 def admit(shape: Shape, candidate: Candidate) -> Decision:
@@ -864,9 +925,14 @@ def main() -> None:
     # The one admission decision: the table marks with it, the deal draws
     # from it. Excluded rows stay visible; only the pick and the pool shun
     # them.
-    shape = Shape(sensitive=args.sensitive)
-    decisions = {mid: admit(shape, candidate_for(mid, policy)) for mid in share}
+    shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
+                  context_headroom=config.context.headroom,
+                  context_margin=config.context.margin)
+    decisions = {mid: admit(shape, candidate_for(
+        mid, policy, model=models.get(mid))) for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
+    show_admission = shape.sensitive or any(
+        "context" in decision.reason for decision in decisions.values())
     # One eligibility pool: the deal plays it, and this run prices it, so a
     # favored model below --top still scores at the same scale as the rows
     # above it.
@@ -879,8 +945,8 @@ def main() -> None:
               "pick and the deal (marked below, never hidden)\n")
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
           + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
-          "ctx | rung |" + (" admit |" if shape.sensitive else ""))
-    print("|---" * (10 + (2 if fit_map else 0) + (1 if shape.sensitive else 0))
+          "ctx | rung |" + (" admit |" if show_admission else ""))
+    print("|---" * (10 + (2 if fit_map else 0) + (1 if show_admission else 0))
           + "|")
 
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
@@ -934,7 +1000,7 @@ def main() -> None:
             shown = f"{fit:.1f}" if fit is not None else "—"
             fit_cell = f" {shown} | {adj:.2f} |"
         admit_cell = ""
-        if shape.sensitive:
+        if show_admission:
             admit_cell = f" {decisions[mid].reason or '—'} |"
         print(f"| {i} | {mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
@@ -950,7 +1016,7 @@ def main() -> None:
                          key=lambda t: -t[1]):
         i += 1
         admit_cell = ""
-        if shape.sensitive:
+        if show_admission:
             admit_cell = f" {decisions[mid].reason or '—'} |"
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | |{admit_cell}")
@@ -974,11 +1040,11 @@ def main() -> None:
     if pick is None:
         if excluded:
             raise SystemExit(
-                "sensitive shape: no candidate admitted — every ranked "
+                "shape: no candidate admitted — every ranked "
                 f"candidate is excluded ({', '.join(excluded)}); drop "
-                "--sensitive or pick another domain")
+                "the restrictive shape setting or pick another domain")
         raise SystemExit("domain has no ranked candidates in the model list")
-    if shape.sensitive and excluded and rows_out \
+    if excluded and rows_out \
             and not decisions[rows_out[0][0]].admitted:
         print(f"\nnote: top of task order {rows_out[0][0]} is excluded "
               f"({decisions[rows_out[0][0]].reason}) — not picked")
