@@ -19,19 +19,25 @@ to a rung on each candidate's ladder.
 1. **Collect the demand.** Domain (one of the five in `policy.json`), effort
    intent, tickets, budget. The token profile defaults to the domain; output
    volume is the cost driver for authoring work and is stated before pricing.
-   Apply the Secrets gate to the shape's material: consult the project's
-   optional secrets file
-   (`modelrouter.secrets.json` — a gitignoreable file in the working tree),
-   falling back to the built-in default. Content-inclusion, any-of: the shape
-   is **Sensitive** when its material carries content drawn from files
-   outside the working folder, or passwords/tokens/keys, or identifiers
+   Apply the Secrets gate to the shape's material — always, before choosing a
+   model. Run `scripts/bind.py --check-secrets --working-dir <folder>` with the
+   shape's material on stdin. It does the mechanics itself: it reads the
+   project's `modelrouter.secrets.json` (at the folder's git root, when it is
+   in a repository), gathers this machine's hostname, login, home path and
+   local address, and reads content from the folder's **gitignored** files —
+   no assembly by you. It prints `secrets gate: safe` or `secrets gate:
+   sensitive` with the rule that tripped it (`hostname`, `username`,
+   `home path`, `local address`, `gitignored content (.env)`, a credential
+   pattern, `phrase #N`, `pattern #N`), and exits 0 for safe, 1 for sensitive,
+   3 for **not certified** — no material given, which is never read as safe.
+   Content-inclusion, any-of: the shape is **Sensitive** when its material
+   carries content drawn from a file outside the working folder, or from a
+   gitignored file inside it, or passwords/tokens/keys, or identifiers
    readable from this machine's state — a mere path mention does not trip
    it; any one item does. The project file can tighten the default, never
    silently loosen it. The verdict is decided at collection — never a mood
-    declared mid-run. When working in the repository, use the pure
-    `scripts/bind.py` `secrets_gate(material, machine=..., rules=...)` function
-    to test and apply that verdict; pass relevant machine-state contents and
-    identifiers in `machine`.
+   declared mid-run — and a Sensitive shape goes to the ranking run as
+   `--sensitive`.
    Done when: each input is stated or defaulted and none is guessed — the
    Secrets gate's verdict included; a Sensitive shape goes to the script as
    `--sensitive`.
@@ -224,6 +230,25 @@ to a rung on each candidate's ladder.
   acts — the ranking itself is never reordered. Its Free share — the fraction
   of tickets Free routes drew — is a report, never a cap and never a floor:
   some tickets, all of them, or none, as the draw falls.
+
+- **Secrets gate** — the collect-demand check that makes a shape Sensitive,
+  run as `scripts/bind.py --check-secrets [--working-dir PATH]` with the
+  material on stdin. It needs no policy and no network; the material is the
+  agent's to supply (the tool never reads it for you). The verdict names the
+  rule that tripped it and sets the exit status: **0** safe, **1** sensitive,
+  **3** not certified — no material given, never "safe". The tool assembles
+  everything mechanical: the project's `modelrouter.secrets.json` at the
+  working-folder root (the git root when in a repository, else the folder),
+  this machine's identifiers (hostname, login, home path, non-loopback local
+  address, each best effort and never shorter than four characters), and the
+  significant lines of the folder's gitignored untracked files
+  (`git ls-files --others --ignored --exclude-standard`, twenty files of up
+  to 8 KB each) — `.gitignore` is the repository's own list of what must not
+  leave it. Rules are additive only: `phrases` are literal inclusions,
+  `patterns` are regular expressions, both validated at load — an unknown key,
+  an empty phrase or a broken regex stops the check loudly, and the built-in
+  credential rules always apply. The verdict echoes no rule *value*, only its
+  class or index (`phrase #1`), so its output is safe to quote back.
 
 - **Exposure & Sensitive** — Sensitive is the Ticket shape's fifth element,
   bound per invocation (`--sensitive`) from the Secrets gate's verdict at

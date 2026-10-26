@@ -15,12 +15,15 @@ from __future__ import annotations
 import argparse
 import collections
 import dataclasses
+import getpass
 import hashlib
 import json
 import math
 import os
 import random
 import re
+import socket
+import subprocess
 import sys
 import time
 import urllib.request
@@ -202,35 +205,317 @@ def _string_values(value) -> list[str]:
     return []
 
 
-def secrets_gate(material: str, *, machine: dict, rules: dict | None = None) -> bool:
-    """Pure Secrets gate verdict: True when sensitive content is included.
+RULES_FILE = "modelrouter.secrets.json"
+RULES_KEYS = ("phrases", "patterns")
 
-    ``machine`` supplies content and identifiers readable from machine state
-    under ``outside_file_contents``, ``identifiers``, ``passwords``,
-    ``tokens``, and ``keys``. Project ``rules`` may add literal ``phrases``
-    and regular-expression ``patterns``; they cannot disable the built-ins.
-    A path mention by itself is not a content inclusion.
+
+def load_secrets_rules(path: str) -> dict:
+    """The project's Secrets rules, validated — additive only.
+
+    `phrases` are literal inclusions, `patterns` regular expressions; both
+    tighten the built-in default and neither can disable it, so an empty or
+    absent file changes nothing. Anything else in the file is a loud stop:
+    a rule the tool silently ignores is a rule the user believes in.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"cannot read secrets rules {path}: {exc}") from None
+    if not isinstance(payload, dict):
+        raise SystemExit(f"secrets rules {path} must be a JSON object with "
+                         f"{' / '.join(RULES_KEYS)}")
+    unknown = sorted(set(payload) - set(RULES_KEYS))
+    if unknown:
+        raise SystemExit(f"unknown secret rule key(s) in {path}: "
+                         f"{', '.join(unknown)}; known: {', '.join(RULES_KEYS)}")
+    rules: dict = {}
+    for key in RULES_KEYS:
+        if key not in payload:
+            continue
+        values = payload[key]
+        if not isinstance(values, list):
+            raise SystemExit(f"{key} in {path} must be a list of strings")
+        for entry in values:
+            if not isinstance(entry, str) or not entry.strip():
+                raise SystemExit(f"every {key} entry in {path} must be a "
+                                 f"non-empty string, got {entry!r}")
+        rules[key] = list(values)
+    for source in rules.get("patterns", []):
+        try:
+            re.compile(source)
+        except re.error as exc:
+            raise SystemExit(f"invalid regex in {RULES_FILE} patterns: "
+                             f"{source!r} ({exc})") from None
+    return rules
+
+
+# Machine facts are matched as inclusions, so an identifier short enough to
+# occur in ordinary prose would make every shape Sensitive.
+MIN_IDENTIFIER_LEN = 4
+_LOOPBACK = ("127.", "0.0.0.0", "::1", "localhost")
+# Fact class -> the rule name reported when it trips. The class keys are what
+# machine_facts gathers; `identifiers` stays the flat form the gate accepts.
+_IDENTIFIER_CLASSES = (("hostname", "hostname"), ("username", "username"),
+                       ("home", "home path"), ("addresses", "local address"),
+                       ("identifiers", "identifier"),
+                       ("outside_file_contents", "outside-file content"),
+                       ("passwords", "password"), ("tokens", "token"),
+                       ("keys", "key"))
+# The built-in credential rules, each named so the verdict says which bound.
+_CREDENTIAL_RULES = (
+    ("password, token or key assignment", _SECRET_VALUE_PATTERNS[0]),
+    ("bearer token", _SECRET_VALUE_PATTERNS[1]),
+    ("private key block", _SECRET_VALUE_PATTERNS[2]),
+)
+
+
+def _gather(reader):
+    """One fact from the machine, best effort: never crash, never block."""
+    try:
+        return reader()
+    except Exception:
+        return None
+
+
+def _local_addresses() -> list[str]:
+    """This machine's non-loopback address, without sending a packet."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))
+        return [sock.getsockname()[0]]
+    finally:
+        sock.close()
+
+
+def machine_facts(*, hostname=None, username=None, home=None,
+                  addresses=None) -> dict:
+    """The identifiers readable from this machine, gathered for the gate.
+
+    Hostname, login, home path and local addresses, each best effort: a source
+    that fails contributes nothing and the run carries on. The readers are
+    injectable so a test states the machine instead of borrowing this one.
+    Values shorter than ``MIN_IDENTIFIER_LEN`` and loopback/root paths are
+    dropped — they identify nothing a reader of the material does not know,
+    and they trip on ordinary prose.
+    """
+    readers = {"hostname": hostname or socket.gethostname,
+               "username": username or getpass.getuser,
+               "home": home or (lambda: os.path.expanduser("~")),
+               "addresses": addresses or _local_addresses}
+    facts: dict = {"identifiers": []}
+    for field, reader in readers.items():
+        value = _gather(reader)
+        if field == "addresses":
+            value = [address for address in (value or [])
+                     if isinstance(address, str) and len(address) >= MIN_IDENTIFIER_LEN
+                     and not address.startswith(_LOOPBACK)]
+        elif not isinstance(value, str):
+            value = ""
+        else:
+            # A bare root ("/", "C:\") identifies nothing.
+            value = value.rstrip("/\\")
+            value = value if len(value) >= MIN_IDENTIFIER_LEN else ""
+        if not value:
+            continue
+        facts[field] = value
+        facts["identifiers"].extend(value if isinstance(value, list) else [value])
+    return facts
+
+
+# Gitignored content is read, never scanned: a capped slice of a capped number
+# of files, enough to catch a shape quoting a line of one.
+GITIGNORED_MAX_FILES = 20
+GITIGNORED_MAX_BYTES = 8192
+# Below this a line is a label, not content a shape could quote.
+GITIGNORED_MIN_LINE = 8
+
+
+def _run_git(root: str):
+    """A `git` runner bound to `root`, or None when git is unavailable."""
+    def run(args):
+        completed = subprocess.run(["git", "-C", root, *args],
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace",
+                                   timeout=10, check=False)
+        if completed.returncode != 0:
+            raise OSError(completed.stderr.strip() or "git failed")
+        return completed.stdout
+    return run
+
+
+def gitignored_facts(root: str, *, run=None, reader=None,
+                     max_files: int = GITIGNORED_MAX_FILES,
+                     max_bytes: int = GITIGNORED_MAX_BYTES) -> list[dict]:
+    """Significant lines from this tree's gitignored untracked files.
+
+    `.gitignore` is the repository's own maintained list of what must not
+    leave it, so a shape quoting one of those lines is carrying outside
+    content. `run(args)` lists the files (`git ls-files --others --ignored
+    --exclude-standard` by default) and `reader(path)` returns a file's text;
+    both are injectable and either failing is silent — a missing git costs the
+    run a rule, never a crash. Comments and short lines are dropped, and each
+    line is kept once.
+    """
+    if run is None:
+        run = _run_git(root)
+    if run is None:
+        return []
+    if reader is None:
+        def reader(path):
+            with open(os.path.join(root, path), "rb") as f:
+                return f.read(max_bytes).decode("utf-8", "replace")
+    try:
+        listed = run(["ls-files", "--others", "--ignored", "--exclude-standard"])
+    except Exception:
+        return []
+    if isinstance(listed, bytes):
+        listed = listed.decode("utf-8", "replace")
+    paths = [line.strip() for line in str(listed or "").splitlines() if line.strip()]
+    facts, seen = [], set()
+    for path in paths[:max_files]:
+        try:
+            text = reader(path)
+        except Exception:
+            continue
+        if not isinstance(text, str):
+            continue
+        text = text[:max_bytes]
+        if "\0" in text:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if len(line) < GITIGNORED_MIN_LINE or line.startswith("#"):
+                continue
+            if line in seen:
+                continue
+            seen.add(line)
+            facts.append({"path": path, "line": line})
+    return facts
+
+
+def secrets_verdict(material: str, *, machine: dict | None = None,
+                    rules: dict | None = None) -> tuple[bool, str]:
+    """The Secrets gate's decision with the rule that tripped it.
+
+    ``material`` is the shape's material; ``machine`` supplies content and
+    identifiers readable from machine state under the fact classes above and
+    under ``gitignored`` ([{"path", "line"}] from the tree's gitignored
+    files); ``rules`` adds literal ``phrases`` and regular-expression
+    ``patterns``. Content-inclusion, any-of: a path mention by itself is not a
+    content inclusion. Returns (sensitive, rule) where rule names the class or
+    the project rule's index — never the matched value, which may itself be
+    the secret.
     """
     if not isinstance(material, str) or not material:
-        return False
+        return False, ""
     machine = machine if isinstance(machine, dict) else {}
-    if any(value in material
-           for field in ("outside_file_contents", "identifiers", "passwords",
-                         "tokens", "keys")
-           for value in _string_values(machine.get(field))):
-        return True
-    if any(pattern.search(material) for pattern in _SECRET_VALUE_PATTERNS):
-        return True
+    for field, rule in _IDENTIFIER_CLASSES:
+        if any(value in material
+               for value in _string_values(machine.get(field))):
+            return True, rule
+    for entry in machine.get("gitignored") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("line"), str) \
+                and entry["line"] in material:
+            return True, f"gitignored content ({entry.get('path', '?')})"
+    for rule, pattern in _CREDENTIAL_RULES:
+        if pattern.search(material):
+            return True, rule
     if isinstance(rules, dict):
-        if any(value in material for value in _string_values(rules.get("phrases"))):
-            return True
-        for source in _string_values(rules.get("patterns")):
+        for index, value in enumerate(_string_values(rules.get("phrases")), 1):
+            if value in material:
+                return True, f"phrase #{index}"
+        for index, source in enumerate(_string_values(rules.get("patterns")), 1):
             try:
                 if re.search(source, material):
-                    return True
+                    return True, f"pattern #{index}"
             except re.error:
                 continue
-    return False
+    return False, ""
+
+
+def secrets_gate(material: str, *, machine: dict | None = None,
+                 rules: dict | None = None) -> bool:
+    """Pure Secrets gate verdict: True when sensitive content is included.
+
+    The boolean form of `secrets_verdict`; see it for the fact classes.
+    """
+    return secrets_verdict(material, machine=machine, rules=rules)[0]
+
+
+def resolve_working_root(root: str | None = None, *, run=None) -> str:
+    """The working folder whose rules and gitignored files the gate reads.
+
+    The git root when the folder is inside a repository — a project's rules
+    file belongs to the project — else the folder itself. A missing or failing
+    git leaves the folder as given, never blocks the check.
+    """
+    base = os.path.abspath(root or os.getcwd())
+    if run is None:
+        run = _run_git(base)
+    if run is None:
+        return base
+    try:
+        top = str(run(["rev-parse", "--show-toplevel"]) or "").strip()
+    except Exception:
+        return base
+    return os.path.abspath(top) if top else base
+
+
+def secrets_check(material: str, *, root: str | None = None,
+                  rules: dict | None = None, machine: dict | None = None,
+                  gitignored: list | None = None) -> tuple[bool, str]:
+    """The collect-demand verdict, assembled at the edge.
+
+    Rules come from `modelrouter.secrets.json` at the working-folder root,
+    machine facts are gathered here, and gitignored content is read from the
+    tree — so the gate holds without the agent assembling anything. Each part
+    is injectable, keeping the decision itself pure. Returns
+    (sensitive, rule) as `secrets_verdict` does.
+    """
+    working_root = resolve_working_root(root)
+    if rules is None:
+        rules = load_secrets_rules(os.path.join(working_root, RULES_FILE))
+    facts = dict(machine_facts() if machine is None else machine)
+    facts["gitignored"] = (gitignored_facts(working_root)
+                           if gitignored is None else list(gitignored))
+    return secrets_verdict(material, machine=facts, rules=rules)
+
+
+SECRETS_SAFE, SECRETS_SENSITIVE, SECRETS_NOT_CERTIFIED = 0, 1, 3
+
+
+def run_secrets_check(*, working_dir: str | None = None,
+                      material: str | None = None,
+                      stream=None) -> int:
+    """Print the Secrets gate's verdict for one shape's material.
+
+    Material is read from stdin; the verdict, the rule that tripped and the
+    rules file in force are printed. Exit status distinguishes them: 0 safe,
+    1 sensitive, 3 not certified. A shape with no material given cannot be
+    certified — silence is never read as safe.
+    """
+    if material is None:
+        try:
+            material = (stream or sys.stdin).read()
+        except Exception:
+            material = ""
+    root = resolve_working_root(working_dir)
+    rules_path = os.path.join(root, RULES_FILE)
+    if not isinstance(material, str) or not material.strip():
+        print("secrets gate: not certified (no material given)")
+        return SECRETS_NOT_CERTIFIED
+    sensitive, rule = secrets_check(material, root=root)
+    if sensitive:
+        print("secrets gate: sensitive")
+        print(f"rule: {rule}")
+    else:
+        print("secrets gate: safe")
+    if os.path.exists(rules_path):
+        print(f"rules: {rules_path}")
+    return SECRETS_SENSITIVE if sensitive else SECRETS_SAFE
 
 
 def resolve_model(models: dict, by_canon: dict, permaslug: str):
@@ -1549,6 +1834,15 @@ def main() -> None:
     ap.add_argument("--domain", help="domain from policy.json (see --list-domains)")
     ap.add_argument("--list-domains", action="store_true",
                     help="show domains and their leaderboard tags")
+    ap.add_argument("--check-secrets", action="store_true",
+                    help="Secrets gate check: reads the shape's material from "
+                         "stdin and prints the verdict with the rule that "
+                         "tripped it; exit 0 safe, 1 sensitive, 3 not "
+                         "certified (no material). No network, no policy.")
+    ap.add_argument("--working-dir", default=None, metavar="PATH",
+                    help="working folder for --check-secrets (default: cwd); "
+                         "its git root, when in a repository, supplies "
+                         "modelrouter.secrets.json and the gitignored files")
     ap.add_argument("--check-policy", action="store_true",
                     help="report summary drift (ranked models without summaries, "
                          "stale summaries) and policy age; no --domain needed")
@@ -1587,6 +1881,11 @@ def main() -> None:
                     help="policy file: domains + baseline (default: beside script)")
     ap.add_argument("--refresh", action="store_true", help="bypass the 24h cache")
     args = ap.parse_args()
+
+    if args.check_secrets:
+        # The gate reads the working folder, never the network: no policy and
+        # no board are needed to decide whether a shape is Sensitive.
+        raise SystemExit(run_secrets_check(working_dir=args.working_dir))
 
     policy: dict = {}
     if os.path.exists(args.policy):
