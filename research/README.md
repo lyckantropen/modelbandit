@@ -6,23 +6,35 @@ the trigger, this is the procedure.
 
 ## 1. Scope the cycle
 
-- Run `python3 skills/openrouter-model-router/scripts/bind.py --check-policy --top 15` — 15 is the research
+- Run `python3 skills/openrouter-model-router/scripts/bind.py --check-policy --top 15 --scope` — 15 is the research
   depth; the default 8 is stricter than the research scope and over-reports
-  stale.
+  stale. `--scope` prints two fact lines under each gap, stale-summary and
+  stale-signal bullet: where the model still ranks, and its catalog row with
+  daily-token window totals.
 - **Gap models** (ranked, no summary) are what to research. **Stale summaries**
   are what to retire or re-research. Models gone from the model list keep a
-  summary only to document their exit (e.g. "not selectable").
+  summary only to document their exit (e.g. "not selectable"). The fact lines
+  tell which case a model is before anything is researched.
 - Fetch first-party anchors before briefing agents:
-  `GET /api/v1/benchmarks?source=artificial-analysis` (and the OpenRouter
-  sources if relevant). Embed the numbers in the briefs as facts to verify or
+  `bind.py --anchors` renders the benchmark tables for the refresh scope —
+  the policy's gaps then stale entries — one table per source (Artificial
+  Analysis, Design Arena, OpenRouter evals), plus a closing line naming the
+  scoped models the feed does not cover. Explicit model ids anchor just
+  those instead. Embed the numbers in the briefs as facts to verify or
   extend — they also expose index rescales between research dates.
+- The anchors command fetches the combined, unfiltered benchmarks feed once;
+  do not fetch the sources one by one — one unfiltered fetch is fresher than
+  per-source fetches. The data endpoints behind the check and the anchors
+  need a key: `OPENROUTER_API_KEY`, or an OpenCode auth.json with an
+  openrouter entry. The models catalog is keyless and needs nothing.
 
 ## 2. Research
 
 - Split the models into groups of ~5, keeping families together (variants of
   one model belong in one group).
 - One background agent per group, with the standard brief: for each model —
-  **benchmark standing** (first-party numbers where possible), **opinions**
+  **benchmark standing** (the step-1 anchor tables carry the first-party
+  numbers; the agent verifies and extends them), **opinions**
   (community and press, every claim cited with a URL), **known for** (one
   sentence), **caveats** (quality, quantization, provider routing, licensing).
 - The brief demands honesty over completeness: when sources disagree or a
