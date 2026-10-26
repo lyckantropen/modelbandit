@@ -89,8 +89,73 @@ def build_world():
                                            "input_cache_read": "0.00000012"}},
         ],
     }
+    # Real feed shapes (unfiltered https://openrouter.ai/api/v1/benchmarks):
+    # {"data": [rows from all three sources], "meta": {as_of, source: null,
+    # citation: null, model_count}}; the per-row "source" field discriminates.
+    benchmarks = {
+        "meta": {"as_of": "2026-10-26T00:01:10.159Z", "source": None,
+                 "citation": None, "model_count": 419},
+        "data": [
+            {"source": "artificial-analysis",
+             "model_permaslug": "deepseek/deepseek-v4-flash-20260101",
+             "display_name": "DeepSeek V4 Flash",
+             "intelligence_index": 40.2, "coding_index": None,
+             "agentic_index": None,
+             "pricing": {"prompt": "0.0000002", "completion": "0.000001"}},
+            {"source": "artificial-analysis",
+             "model_permaslug": "xiaomi/mimo-v2.6-pro-20260921",
+             "display_name": "Xiaomi MiMo v2.6 Pro",
+             "intelligence_index": 55.1, "coding_index": 48.0,
+             "agentic_index": 41.3,
+             "pricing": {"prompt": "0.0000005", "completion": "0.000001"}},
+            {"source": "artificial-analysis",
+             "model_permaslug": "deepseek/deepseek-v4-pro-20260813",
+             "display_name": "DeepSeek V4 Pro (Aug)",
+             "intelligence_index": 57.6, "coding_index": 52.4,
+             "agentic_index": 49.9,
+             "pricing": {"prompt": "0.00000066", "completion": "0.00000198"}},
+            {"source": "artificial-analysis",
+             "model_permaslug": "openai/gpt-5.6-sol-20261001",
+             "display_name": "GPT-5.6 Sol",
+             "intelligence_index": 60.0, "coding_index": 58.0,
+             "agentic_index": 55.0,
+             "pricing": {"prompt": "0.000001", "completion": "0.000004"}},
+            {"source": "design-arena",
+             "model_permaslug": "deepseek/deepseek-v4-flash-20260101",
+             "display_name": "DeepSeek V4 Flash",
+             "arena": "models", "category": "writing", "elo": 1180,
+             "win_rate": 55,
+             "pricing": {"prompt": "0.0000002", "completion": "0.000001"}},
+            {"source": "design-arena",
+             "model_permaslug": "deepseek/deepseek-v4-flash-20260101",
+             "display_name": "DeepSeek V4 Flash",
+             "arena": "models", "category": "3d", "elo": 1102,
+             "win_rate": 48,
+             "pricing": {"prompt": "0.0000002", "completion": "0.000001"}},
+            {"source": "design-arena",
+             "model_permaslug": "xiaomi/mimo-v2.6-pro-20260921",
+             "display_name": "Xiaomi MiMo v2.6 Pro",
+             "arena": "models", "category": "coding", "elo": 1301,
+             "win_rate": 61,
+             "pricing": {"prompt": "0.0000005", "completion": "0.000001"}},
+            {"source": "openrouter",
+             "model_permaslug": "deepseek/deepseek-v4-flash-20260101",
+             "display_name": "DeepSeek V4 Flash",
+             "benchmark_type": "gpqa_diamond", "accuracy": 0.62,
+             "avg_cost_per_task": 0.011,
+             "last_run_timestamp": "2026-10-14T15:00:03.588Z"},
+            {"source": "openrouter",
+             "model_permaslug": "xiaomi/mimo-v2.6-pro-20260921",
+             "display_name": "Xiaomi MiMo v2.6 Pro",
+             "benchmark_type": "math_agent", "accuracy": 0.9,
+             "avg_cost_per_task": 0.02,
+             "last_run_timestamp": "2026-10-20T09:00:00.000Z",
+             "pricing": {"prompt": "0.0000005", "completion": "0.000001"}},
+        ],
+    }
     return {"models": models, "classifications": classifications,
-            "rankings": rankings, "endpoints": endpoints}
+            "rankings": rankings, "endpoints": endpoints,
+            "benchmarks": benchmarks}
 
 
 POLICY = {
@@ -137,18 +202,25 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_cli(self, *argv, world=None):
+    def run_cli(self, *argv, world=None, real_benchmarks=False):
         world = world if world is not None else build_world()
         calls = []
+        real_fetch = bind.fetch_json  # captured before the mock patches it
 
         def fake_fetch(url, cache_name, *, auth, refresh):
             calls.append((url, cache_name, auth, refresh))
+            if real_benchmarks and cache_name == "benchmarks.json":
+                # Real fetch path: exercises the cache/key handling seam.
+                return real_fetch(url, cache_name, auth=auth,
+                                  refresh=refresh)
             if cache_name == "models.json":
                 return {"data": world["models"]}
             if cache_name == "classifications.json":
                 return {"data": world["classifications"]}
             if cache_name == "rankings.json":
                 return world["rankings"]
+            if cache_name == "benchmarks.json":
+                return world["benchmarks"]
             if url.endswith("/endpoints"):
                 slug = url[len(bind.MODELS_URL) + 1:-len("/endpoints")]
                 return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
@@ -470,6 +542,114 @@ class CliTests(unittest.TestCase):
         ghost = out[out.index("- ghost/unknown-20260101"):
                     out.index("- xiaomi/mimo-v2.6-pro (coding)")]
         self.assertIn("  catalog: not in model list", ghost)
+
+    # --- anchors -----------------------------------------------------------
+
+    def test_anchors_derives_scope_gaps_then_stale(self):
+        # Derived scope: gaps (flash, ghost, mimo), then stale summaries
+        # (stale/model), then stale signals (gone/hinted) — the check's
+        # section order. Table rows follow that same scope order.
+        out, _, code, _ = self.run_cli("--anchors")
+        self.assertIsNone(code)
+        self.assertIn("# Benchmark anchors", out)
+        self.assertIn("feed as of 2026-10-26T00:01:10.159Z — "
+                      "2 of 419 feed models matched", out)
+        aa = out[out.index("## Artificial Analysis"):out.index("## Design Arena")]
+        self.assertLess(aa.index("deepseek/deepseek-v4-flash"),
+                        aa.index("xiaomi/mimo-v2.6-pro"))
+        tail = out[out.index("no benchmark rows:"):].splitlines()[0]
+        self.assertIn("stale/model", tail)
+        self.assertIn("gone/hinted", tail)
+
+    def test_anchors_explicit_ids_override_the_derived_set(self):
+        out, _, code, _ = self.run_cli("--anchors", "deepseek/deepseek-v4-pro")
+        self.assertIsNone(code)
+        self.assertIn("deepseek/deepseek-v4-pro-20260813", out)
+        self.assertIn("1 of 419 feed models matched", out)
+        self.assertNotIn("deepseek/deepseek-v4-flash", out)
+        self.assertNotIn("xiaomi/mimo-v2.6-pro", out)
+        self.assertNotIn("stale/model", out)
+        self.assertIn("no benchmark rows: — none", out)
+
+    def test_anchors_prints_three_source_tables_with_citations(self):
+        out, _, _, _ = self.run_cli("--anchors")
+        for heading, cite in (
+                ("## Artificial Analysis",
+                 "Source: Artificial Analysis (artificialanalysis.ai) via "
+                 "OpenRouter (openrouter.ai/rankings)."),
+                ("## Design Arena",
+                 "Source: Design Arena (www.designarena.ai) via OpenRouter "
+                 "(openrouter.ai/rankings)."),
+                ("## OpenRouter evals",
+                 "Source: OpenRouter evals (openrouter.ai) via OpenRouter "
+                 "(openrouter.ai/rankings).")):
+            self.assertIn(heading, out)
+            self.assertIn(cite, out)
+
+    def test_anchors_null_indexes_render_missing_and_prices_per_1m(self):
+        out, _, _, _ = self.run_cli("--anchors")
+        aa = out[out.index("## Artificial Analysis"):out.index("## Design Arena")]
+        flash = next(ln for ln in aa.splitlines() if "v4-flash" in ln)
+        self.assertIn("| 40.2 | — | — | $0.20/$1.00 |", flash)
+        mimo = next(ln for ln in aa.splitlines() if "mimo" in ln)
+        self.assertIn("| 55.1 | 48.0 | 41.3 | $0.50/$1.00 |", mimo)
+
+    def test_anchors_design_arena_rows_carry_arena_elo_win_rate(self):
+        out, _, _, _ = self.run_cli("--anchors")
+        da = out[out.index("## Design Arena"):out.index("## OpenRouter evals")]
+        self.assertIn("| models | writing | 1180 | 55% | $0.20/$1.00 |", da)
+        self.assertIn("| models | 3d | 1102 | 48% | $0.20/$1.00 |", da)
+        self.assertIn("| models | coding | 1301 | 61% | $0.50/$1.00 |", da)
+
+    def test_anchors_openrouter_rows_carry_accuracy_cost_and_run_date(self):
+        out, _, _, _ = self.run_cli("--anchors")
+        orr = out[out.index("## OpenRouter evals"):out.index("no benchmark rows:")]
+        self.assertIn("| gpqa_diamond | 62.0% | $0.0110 | 2026-10-14 | — |", orr)
+        self.assertIn("| math_agent | 90.0% | $0.0200 | 2026-10-20 | "
+                      "$0.50/$1.00 |", orr)
+
+    def test_anchors_names_models_without_rows(self):
+        out, _, _, _ = self.run_cli("--anchors")
+        line = out[out.index("no benchmark rows:"):].splitlines()[0]
+        self.assertIn("ghost/unknown-20260101", line)
+        self.assertIn("stale/model", line)
+        self.assertIn("gone/hinted", line)
+        self.assertNotIn("deepseek/deepseek-v4-flash", line)
+
+    def test_anchors_makes_one_unfiltered_authenticated_fetch(self):
+        _, _, _, calls = self.run_cli("--anchors")
+        bench = [c for c in calls if c[1] == "benchmarks.json"]
+        self.assertEqual(len(bench), 1)
+        self.assertEqual(bench[0][0], bind.BENCHMARKS_URL)
+        self.assertTrue(bench[0][2])   # authenticated
+
+    def test_anchors_writes_nothing_to_the_policy(self):
+        before = open(self.policy_path).read()
+        self.run_cli("--anchors")
+        self.assertEqual(open(self.policy_path).read(), before)
+
+    def test_anchors_works_from_cache_without_a_key(self):
+        # A fresh cached feed must render with no key at all: the real
+        # fetch path returns the cache before consulting api_key.
+        world = build_world()
+        cache = os.path.join(self._tmp.name, "cache")
+        os.makedirs(cache)
+        with open(os.path.join(cache, "benchmarks.json"), "w") as f:
+            json.dump(world["benchmarks"], f)
+        with mock.patch.object(bind, "CACHE_DIR", cache), \
+                mock.patch.object(bind, "api_key", return_value=None):
+            out, _, code, _ = self.run_cli("--anchors", real_benchmarks=True)
+        self.assertIsNone(code)
+        self.assertIn("# Benchmark anchors", out)
+        self.assertIn("| 55.1 | 48.0 | 41.3 | $0.50/$1.00 |", out)
+
+    def test_anchors_keyless_without_cache_surfaces_the_fetch_error(self):
+        cache = os.path.join(self._tmp.name, "empty-cache")
+        os.makedirs(cache)
+        with mock.patch.object(bind, "CACHE_DIR", cache), \
+                mock.patch.object(bind, "api_key", return_value=None):
+            _, _, code, _ = self.run_cli("--anchors", real_benchmarks=True)
+        self.assertIn("OpenRouter Data API needs a key", code)
 
     # --- preference-tilted deal -----------------------------------------
 
