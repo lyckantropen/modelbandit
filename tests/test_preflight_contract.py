@@ -25,8 +25,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
-                                "openrouter-model-router", "scripts"))
-import bind  # noqa: E402
+                                "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
 
 ENTRY = {"context_length": 262_144, "summary_ref": "s"}
 SUMMARIES = {"s": "fixture summary"}
@@ -58,17 +58,17 @@ class PreflightNeverLooserThanPlanTests(unittest.TestCase):
     def assert_never_looser(self, mid, policy, *, local, sensitive_plan,
                             sensitive_preflight):
         for regime in REGIMES:
-            zone = bind.Zone(path="z", regime=regime)
+            zone = modelbandit.Zone(path="z", regime=regime)
             with self.subTest(mid=mid, regime=regime,
                               sensitive_plan=sensitive_plan,
                               sensitive_preflight=sensitive_preflight):
-                preflight = bind.zone_block(mid, zone, policy=policy,
+                preflight = modelbandit.zone_block(mid, zone, policy=policy,
                                             sensitive=sensitive_preflight)
-                shape = bind.Shape(
+                shape = modelbandit.Shape(
                     sensitive=sensitive_plan,
-                    regime=bind.shape_regime(zone,
+                    regime=modelbandit.shape_regime(zone,
                                              sensitive=sensitive_plan))
-                plan = bind.admit(shape, bind.candidate_for(mid, policy,
+                plan = modelbandit.admit(shape, modelbandit.candidate_for(mid, policy,
                                                             local=local))
                 if preflight is None:
                     self.assertTrue(plan.admitted, (
@@ -115,23 +115,23 @@ class LocalLabelRefusedByBothGatesTests(unittest.TestCase):
             policy = policy_for(prefix, exposure)
             with self.subTest(kind=kind):
                 # The plan's source filter: the route never enters the pool.
-                shape = bind.Shape(sensitive=True, regime="sensitive")
-                plan = bind.admit(shape, bind.candidate_for(mid, policy,
+                shape = modelbandit.Shape(sensitive=True, regime="sensitive")
+                plan = modelbandit.admit(shape, modelbandit.candidate_for(mid, policy,
                                                             local=local))
                 self.assertFalse(plan.admitted)
                 self.assertIn("exposed (trains)", plan.reason)
-                closed = bind.Shape(regime="closed")
-                source = bind.zone_prohibition(
-                    closed, bind.candidate_for(mid, policy, local=local))
+                closed = modelbandit.Shape(regime="closed")
+                source = modelbandit.zone_prohibition(
+                    closed, modelbandit.candidate_for(mid, policy, local=local))
                 self.assertIn("remote free route is prohibited", source)
                 # The pre-flight: the same refusals, zone_block answering.
                 self.assertIn(
                     "remote free route is prohibited",
-                    bind.zone_block(mid, bind.Zone(path="z", regime="closed"),
+                    modelbandit.zone_block(mid, modelbandit.Zone(path="z", regime="closed"),
                                     policy=policy))
                 self.assertIn(
                     "exposed (trains)",
-                    bind.zone_block(mid, bind.Zone(path="z",
+                    modelbandit.zone_block(mid, modelbandit.Zone(path="z",
                                                    regime="sensitive"),
                                     policy=policy, sensitive=True))
 

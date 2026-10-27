@@ -9,8 +9,8 @@ import subprocess
 import sys
 
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      "..", "skills", "openrouter-model-router", "scripts",
-                      "bind.py")
+                      "..", "skills", "modelbandit", "scripts",
+                      "modelbandit.py")
 
 
 def main() -> int:

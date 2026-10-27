@@ -5,8 +5,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
-                                "openrouter-model-router", "scripts"))
-import bind  # noqa: E402
+                                "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
 
 
 FREE_MODELS = {
@@ -23,30 +23,30 @@ SUMMARIES = {"family/flash": "Flash is suitable for short coding tasks.",
 
 class FreeCatalogPolicyTests(unittest.TestCase):
     def test_catalog_entries_load_with_window_exposure_and_summary_ref(self):
-        self.assertEqual(bind.load_free_models({"free_models": FREE_MODELS}),
+        self.assertEqual(modelbandit.load_free_models({"free_models": FREE_MODELS}),
                          FREE_MODELS)
 
     def test_missing_window_fails_loudly(self):
         with self.assertRaisesRegex(SystemExit, "free_models.opencode/flash.context_length"):
-            bind.load_free_models({"free_models": {
+            modelbandit.load_free_models({"free_models": {
                 "opencode/flash": {"exposure": "trains"}}})
 
     def test_invalid_exposure_fails_loudly(self):
         with self.assertRaisesRegex(SystemExit, "free_models.vendor/model.exposure"):
-            bind.load_free_models({"free_models": {
+            modelbandit.load_free_models({"free_models": {
                 "vendor/model": {"context_length": 65536,
                                  "exposure": "maybe"}}})
 
     def test_non_integer_window_fails_loudly(self):
         with self.assertRaisesRegex(SystemExit, "free_models.vendor/model.context_length"):
-            bind.load_free_models({"free_models": {
+            modelbandit.load_free_models({"free_models": {
                 "vendor/model": {"context_length": "65536",
                                  "exposure": "trains"}}})
 
     def test_invalid_completion_cap_fails_loudly(self):
         with self.assertRaisesRegex(
                 SystemExit, "free_models.vendor/model.max_completion_tokens"):
-            bind.load_free_models({"free_models": {
+            modelbandit.load_free_models({"free_models": {
                 "vendor/model": {"context_length": 65_536,
                                   "max_completion_tokens": 0,
                                   "exposure": "trains"}}})
@@ -59,24 +59,24 @@ class FreeCatalogPolicyTests(unittest.TestCase):
         for prefix in ("opencode/flash", "vendor/model:free"):
             with self.subTest(prefix=prefix), self.assertRaisesRegex(
                     SystemExit, f"free_models.{prefix}.exposure"):
-                bind.load_free_models({"free_models": {
+                modelbandit.load_free_models({"free_models": {
                     prefix: {"context_length": 65_536,
                              "exposure": "local"}}})
 
     def test_local_exposure_override_on_a_remote_prefix_fails_loudly(self):
         with self.assertRaisesRegex(
                 SystemExit, r"exposure\.opencode/flash: exposure 'local'"):
-            bind.load_exposure_overrides(
+            modelbandit.load_exposure_overrides(
                 {"exposure": {"opencode/flash": "local"}})
         with self.assertRaisesRegex(
                 SystemExit, r"exposure\.vendor/model:free: exposure 'local'"):
-            bind.load_exposure_overrides(
+            modelbandit.load_exposure_overrides(
                 {"exposure": {"vendor/model:free": "local"}})
 
 
 class FreeCandidateTests(unittest.TestCase):
     def test_cataloged_opencode_route_is_merged_with_catalog_window(self):
-        share, models = bind.merge_free_candidates(
+        share, models = modelbandit.merge_free_candidates(
             {}, {}, FREE_MODELS, SUMMARIES)
         self.assertIn("opencode/flash", share)
         self.assertEqual(models["opencode/flash"]["context_length"], 262_144)
@@ -85,7 +85,7 @@ class FreeCandidateTests(unittest.TestCase):
         share = {"vendor/model:free": 0.25}
         models = {"vendor/model": {"id": "vendor/model", "pricing": {
             "prompt": "0", "completion": "0"}}}
-        got_share, got_models = bind.merge_free_candidates(
+        got_share, got_models = modelbandit.merge_free_candidates(
             share, models,
             {"vendor/model": FREE_MODELS["vendor/model"]}, SUMMARIES)
         self.assertEqual(got_share, {"vendor/model:free": 0.25})
@@ -98,7 +98,7 @@ class FreeCandidateTests(unittest.TestCase):
         classif = {"classifications": [{"tag": "coding", "usage_share": 1,
                                         "models": [{"id": "vendor/model:free",
                                                     "tag_usage_share": 0.4}]}]}
-        share, _, _ = bind.domain_candidates(
+        share, _, _ = modelbandit.domain_candidates(
             classif, ["coding"], {"vendor/model": base_model},
             {"vendor/model:free": base_model})
         self.assertEqual(share, {"vendor/model:free": 0.4})
@@ -106,10 +106,10 @@ class FreeCandidateTests(unittest.TestCase):
     def test_uncatalogued_free_route_is_visible_but_not_admitted(self):
         share = {"vendor/unknown:free": 0.8}
         models = {"vendor/unknown:free": {"id": "vendor/unknown:free"}}
-        got_share, _ = bind.merge_free_candidates(share, models, {}, SUMMARIES)
+        got_share, _ = modelbandit.merge_free_candidates(share, models, {}, SUMMARIES)
         self.assertIn("vendor/unknown:free", got_share)
-        facts = bind.candidate_for("vendor/unknown:free", {})
-        decision = bind.admit(bind.Shape(), facts)
+        facts = modelbandit.candidate_for("vendor/unknown:free", {})
+        decision = modelbandit.admit(modelbandit.Shape(), facts)
         self.assertFalse(decision.admitted)
         self.assertIn("catalog", decision.reason)
 
@@ -117,13 +117,13 @@ class FreeCandidateTests(unittest.TestCase):
         policy = {"free_models": {"vendor/model": {
             "context_length": 65_536, "exposure": "no-retention",
             "summary_ref": "missing"}}}
-        decision = bind.admit(bind.Shape(),
-                              bind.candidate_for("vendor/model:free", policy))
+        decision = modelbandit.admit(modelbandit.Shape(),
+                              modelbandit.candidate_for("vendor/model:free", policy))
         self.assertFalse(decision.admitted)
         self.assertIn("summary", decision.reason)
 
     def test_catalog_entry_without_summary_does_not_enter_candidate_set(self):
-        share, models = bind.merge_free_candidates(
+        share, models = modelbandit.merge_free_candidates(
             {}, {}, {"opencode/no-summary": {
                 "context_length": 65536, "exposure": "trains"}}, SUMMARIES)
         self.assertNotIn("opencode/no-summary", share)
@@ -135,29 +135,29 @@ class FreeCandidateTests(unittest.TestCase):
             "summaries": {"nvidia/nemotron-3-ultra-550b": "family summary"},
         }
         mid = "nvidia/nemotron-3-ultra-550b-a55b:free"
-        share, models = bind.merge_free_candidates(
+        share, models = modelbandit.merge_free_candidates(
             {mid: 0.2},
             {mid: {"id": mid, "context_length": 1_048_576,
                    "pricing": {"prompt": "0", "completion": "0"}}},
             policy["free_models"], policy["summaries"])
-        facts = bind.candidate_for(
+        facts = modelbandit.candidate_for(
             mid, policy, model=models[mid])
         self.assertEqual(share[mid], 0.2)
         self.assertEqual(facts.context_length, 1_048_576)
-        self.assertTrue(bind.admit(bind.Shape(), facts).admitted)
+        self.assertTrue(modelbandit.admit(modelbandit.Shape(), facts).admitted)
 
     def test_opencode_catalog_entry_still_requires_its_window_and_summary(self):
         policy = {"free_models": {"opencode/model": {
             "context_length": 65_536, "exposure": "trains"}},
             "summaries": {}}
-        facts = bind.candidate_for("opencode/model", policy)
-        self.assertFalse(bind.admit(bind.Shape(), facts).admitted)
+        facts = modelbandit.candidate_for("opencode/model", policy)
+        self.assertFalse(modelbandit.admit(modelbandit.Shape(), facts).admitted)
 
     def test_table_free_candidate_shows_window_and_exposure(self):
-        self.assertEqual(bind.free_candidate_details(
+        self.assertEqual(modelbandit.free_candidate_details(
             "opencode/flash", {"free_models": FREE_MODELS}),
             (262_144, "no-retention"))
-        self.assertEqual(bind.free_candidate_details(
+        self.assertEqual(modelbandit.free_candidate_details(
             "vendor/model:free", {"free_models": FREE_MODELS}),
             (65_536, "trains"))
 

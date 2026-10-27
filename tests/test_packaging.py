@@ -1,16 +1,16 @@
 """Packaging invariants for the skill subtree.
 
-The skill folder is the unit of deployment: skills/openrouter-model-router/
+The skill folder is the unit of deployment: skills/modelbandit/
 carries exactly the deployable set (skill file, script directory, policy
-file), the repository root keeps the research, tests and docs. Layout only —
-no selection, pricing or deal behavior is asserted here.
+file, migration file), the repository root keeps the research, tests and
+docs. Layout only — no selection, pricing or deal behavior is asserted here.
 """
 
 import os
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKILL_DIR = os.path.join(ROOT, "skills", "openrouter-model-router")
+SKILL_DIR = os.path.join(ROOT, "skills", "modelbandit")
 
 
 def inventory(root):
@@ -31,14 +31,16 @@ class PackagingInvariantTests(unittest.TestCase):
     def test_skill_subtree_is_exactly_the_deployable_set(self):
         with self.subTest("subtree top level is exactly the deployables"):
             self.assertEqual(set(os.listdir(SKILL_DIR)),
-                             {"SKILL.md", "scripts", "policy.json"})
+                             {"SKILL.md", "scripts", "policy.json",
+                              "migrate.md"})
             self.assertEqual(inventory(SKILL_DIR),
                              {"SKILL.md", "policy.json", "scripts",
-                              os.path.join("scripts", "bind.py")})
+                              "migrate.md",
+                              os.path.join("scripts", "modelbandit.py")})
 
         with self.subTest("script directory contains the CLI"):
             self.assertTrue(
-                os.path.isfile(os.path.join(SKILL_DIR, "scripts", "bind.py")))
+                os.path.isfile(os.path.join(SKILL_DIR, "scripts", "modelbandit.py")))
 
         with self.subTest("no skill file at the repository root"):
             self.assertFalse(os.path.exists(os.path.join(ROOT, "SKILL.md")))

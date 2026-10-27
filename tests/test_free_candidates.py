@@ -11,8 +11,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
-                                "openrouter-model-router", "scripts"))
-import bind  # noqa: E402
+                                "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
 
 
 def catalog(entries):
@@ -45,7 +45,7 @@ class OpenCodeInheritanceTests(unittest.TestCase):
                 "summary_ref": "z-ai/glm-5.3-flash",
             },
         })
-        share, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
+        share, _ = modelbandit.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
                                              inheritance=1.0)
         self.assertAlmostEqual(
             share["opencode/deepseek-v4.1-flash-free"], 0.008 + 0.0172)
@@ -56,7 +56,7 @@ class OpenCodeInheritanceTests(unittest.TestCase):
             "exposure": "trains",
             "summary_ref": "deepseek/deepseek-v4.1-flash",
         }})
-        share, _ = bind.merge_free_candidates(
+        share, _ = modelbandit.merge_free_candidates(
             {"z-ai/glm-5.3-flash": 0.003}, {}, cat, SUMMARIES)
         self.assertEqual(share["opencode/nope-free"], 0.0)
 
@@ -67,13 +67,13 @@ class OpenCodeInheritanceTests(unittest.TestCase):
             "exposure": "trains",
             "summary_ref": "nvidia/nemotron-3-ultra-550b-a55b",
         }})
-        share, _ = bind.merge_free_candidates(share2, {}, cat, SUMMARIES,
+        share, _ = modelbandit.merge_free_candidates(share2, {}, cat, SUMMARIES,
                                              inheritance=1.0)
         self.assertAlmostEqual(share["opencode/nemotron-3-ultra-free"], 0.0018)
 
     def test_entry_without_summary_ref_is_not_merged(self):
         cat = catalog({"opencode/unknown-free": {"exposure": "trains"}})
-        share, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES)
+        share, _ = modelbandit.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES)
         self.assertNotIn("opencode/unknown-free", share)
 
 
@@ -86,7 +86,7 @@ class LocalInheritanceTests(unittest.TestCase):
             },
         })
         served = {"lmstudio/qwen/qwen3-4b": {"context_length": 131072}}
-        share, _ = bind.merge_local_candidates(
+        share, _ = modelbandit.merge_local_candidates(
             dict(SHARE), {}, served, free_models, inheritance=1.0)
         self.assertAlmostEqual(share["lmstudio/qwen/qwen3-4b"],
                                0.008 + 0.0172)
@@ -101,18 +101,18 @@ class InheritanceDiscountTests(unittest.TestCase):
             "exposure": "no-retention",
             "summary_ref": "deepseek/deepseek-v4.1-flash",
         }})
-        share, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES)
+        share, _ = modelbandit.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES)
         self.assertAlmostEqual(share["opencode/deepseek-v4.1-flash-free"],
                                (0.008 + 0.0172)
-                               * bind.DEFAULT_FREE_SHARE_INHERITANCE)
+                               * modelbandit.DEFAULT_FREE_SHARE_INHERITANCE)
 
     def test_lower_inheritance_lowers_standing(self):
         cat = catalog({"opencode/deepseek-v4.1-flash-free": {
             "summary_ref": "deepseek/deepseek-v4.1-flash",
         }})
-        half, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
+        half, _ = modelbandit.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
                                              inheritance=0.5)
-        tenth, _ = bind.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
+        tenth, _ = modelbandit.merge_free_candidates(dict(SHARE), {}, cat, SUMMARIES,
                                               inheritance=0.1)
         self.assertLess(tenth["opencode/deepseek-v4.1-flash-free"],
                         half["opencode/deepseek-v4.1-flash-free"])
@@ -132,7 +132,7 @@ class InheritanceDiscountTests(unittest.TestCase):
                                                "avoid_suspected": 0.5}}}
             with self.assertRaisesRegex(SystemExit,
                                         "free_share_inheritance"):
-                bind.load_policy_config(policy)
+                modelbandit.load_policy_config(policy)
 
 
 if __name__ == "__main__":

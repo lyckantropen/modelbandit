@@ -1,4 +1,4 @@
-# OpenRouter Model Router
+# Modelbandit
 
 Selecting OpenRouter models for a unit of work by what real traffic runs in a
 domain, with live per-endpoint pricing and deliberate model diversity across a
@@ -92,7 +92,7 @@ _Avoid_: private folder (a folder name, not a posture), sensitive area
 
 **Secrets gate**
 The check run at collect-demand: the project's optional secrets file
-(`modelrouter.secrets.json`), falling back to the built-in default — content
+(`modelbandit.secrets.json`), falling back to the built-in default — content
 from a gitignored file inside the working folder, from files outside it
 (including content supplied from named outside files), passwords/tokens/keys,
 and identifiers readable from this machine's state — applied to the shape's

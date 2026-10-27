@@ -1,10 +1,10 @@
-# openrouter-model-router
+# modelbandit
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues and specs for this repo live as GitHub issues in `lyckantropen/openrouter-model-router`; use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues and specs for this repo live as GitHub issues in `lyckantropen/modelbandit`; use the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

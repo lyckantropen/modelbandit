@@ -1,10 +1,10 @@
 ---
-name: openrouter-model-router
-description: Pick OpenRouter models by domain popularity and price them live. Use when choosing a model for a domain — research, writing, coding, orchestration, ops — when ranking candidates by what traffic actually runs, or when costing a batch of agent runs against a budget.
+name: modelbandit
+description: Pick OpenRouter models by domain popularity and price them live. Use when choosing a model for a domain — research, writing, coding, orchestration, ops — when ranking candidates by what traffic actually runs, or when costing a batch of agent runs against a budget. Use when asked to migrate from the old names — `modelrouter`, `modelbind`, `bind.py`, old paths.
 compatibility: "Python 3, stdlib only — no dependencies, no environment to provision. The summaries-refresh procedure and the unit test suite live in the repository checkout (research/, tests/), not in this skill folder: with a skill-folder-only install the refresh offer reports what is due and where the procedure lives instead of running it."
 ---
 
-# OpenRouter Model Router
+# Modelbandit
 
 The ranking is popularity — what real traffic actually runs in the domain, not
 benchmarks, reputation, or curation. The task order is that ranking priced at
@@ -14,17 +14,19 @@ research cites it. The work also carries one effort coordinate — how hard the
 mind deliberates (`glance` / `measured` / `thorough` / `exhaustive`) — resolved
 to a rung on each candidate's ladder.
 
+On a migrate request or old-name keywords, read `migrate.md` and follow it.
+
 ## Steps
 
 1. **Collect the demand.** Domain (one of the five in `policy.json`), effort
    intent, tickets, budget. The token profile defaults to the domain; output
    volume is the cost driver for authoring work and is stated before pricing.
    Apply the Secrets gate to the shape's material — always, before choosing a
-   model. Run `scripts/bind.py --check-secrets --working-dir <folder>` with the
+   model. Run `scripts/modelbandit.py --check-secrets --working-dir <folder>` with the
    shape's material on stdin; add a repeatable `--outside-file PATH` for each
    named outside source that contributes content. Each named file contributes
    only a capped slice. The gate does the mechanics itself: it reads the
-   project's `modelrouter.secrets.json` (at the folder's git root, when it is
+   project's `modelbandit.secrets.json` (at the folder's git root, when it is
    in a repository), gathers this machine's hostname, login, home path and
    local address, reads content from the folder's **gitignored** files, and
    checks the named outside files — no assembly by you. It reports safe,
@@ -52,7 +54,7 @@ to a rung on each candidate's ladder.
    Secrets gate's verdict included; a Sensitive shape goes to the script as
    `--sensitive`.
 
-2. **Pull popularity.** Run `scripts/bind.py` (mechanics: `--help`). It reads
+2. **Pull popularity.** Run `scripts/modelbandit.py` (mechanics: `--help`). It reads
    the task-classification leaderboards and the daily token rankings, cached
    24h, and prices every candidate at live rates. Every run's header states
    the free-use zone that governed it - `zone: <path> (<regime>)`, or
@@ -126,7 +128,7 @@ to a rung on each candidate's ladder.
 5. **Pick — or deal.** A single task takes the top of the fit-adjusted order —
    unless the project already has that model bound, in which case deliberately
    step down: switching models across a project is good for the project. A
-   multi-ticket run gets a deal instead of a monoculture — `bind.py --deal
+   multi-ticket run gets a deal instead of a monoculture — `modelbandit.py --deal
    --seed <project-name>` spreads tickets per ticket shape across the eligible
    pool by seeded draw from a preference-tilted blend of the fit-adjusted
    scores (`policy.json` `affinity`). Deterministic in the seed: the same
@@ -206,7 +208,7 @@ area:
    agent — run the pre-flight below before launching it:
 
    ```bash
-   scripts/bind.py --assert-allowed --model <id> --working-dir <folder>
+   scripts/modelbandit.py --assert-allowed --model <id> --working-dir <folder>
    ```
 
    Exit **0** means the model may serve there; exit **5** means it is blocked by
@@ -244,7 +246,7 @@ worktree path.
 
 ## Set up the secrets file
 
-When `modelrouter.secrets.json` is missing, or the user wants to tighten it,
+When `modelbandit.secrets.json` is missing, or the user wants to tighten it,
 conduct this interview before relying on project-specific rules:
 
 1. Scan the repository for candidate identifiers, not credential values:
@@ -269,21 +271,21 @@ conduct this interview before relying on project-specific rules:
    }
    ```
 
-   Run `scripts/bind.py --write-secrets --working-dir <folder>` with that JSON
-   on stdin. It writes `modelrouter.secrets.json` at the folder's git root (or
+   Run `scripts/modelbandit.py --write-secrets --working-dir <folder>` with that JSON
+   on stdin. It writes `modelbandit.secrets.json` at the folder's git root (or
    the folder itself outside a repository), reports rules added and already
    present, and merges on every re-run: existing rules are never removed and
    exact duplicates are kept once. Its report gives counts, never rule values.
    If `identifying` is true **or** `commit` is false, it appends the file path
    to `.gitignore` once; if the rules file is already tracked, it refuses and
-   tells you to run `git rm --cached modelrouter.secrets.json` first.
+   tells you to run `git rm --cached modelbandit.secrets.json` first.
    Otherwise it leaves `.gitignore` alone and says the rules file is meant to
    be committed.
 4. Review the writer's report and show the resulting diff. Before a re-run,
    retain the previous rules-file contents; afterwards show a unified
    before/after diff as well as the `.gitignore` diff. An ignored, untracked
    rules file will not appear in ordinary `git diff`.
-5. Run `scripts/bind.py --check-secrets --working-dir <folder>` with the actual
+5. Run `scripts/modelbandit.py --check-secrets --working-dir <folder>` with the actual
    shape material on stdin, adding `--outside-file PATH` for each named outside
    source. The gate reads the rules file itself. Exit 0 is safe, 1 is Sensitive,
    2 is a usage error, 3 means **not certified**, and 4 means a rules/config
@@ -355,8 +357,8 @@ conduct this interview before relying on project-specific rules:
   network failure blocks a run.
 
 - **Free-use zones** — `zones.json` at the machine's config root
-  (`$XDG_CONFIG_HOME/modelrouter/zones.json`, else
-  `~/.config/modelrouter/zones.json`): `{"zones": [{"path": ..., "free":
+  (`$XDG_CONFIG_HOME/modelbandit/zones.json`, else
+  `~/.config/modelbandit/zones.json`): `{"zones": [{"path": ..., "free":
   "open" | "sensitive" | "closed"}], "default": "closed"}`. `~` and
   environment variables expand, paths compare the way the platform does, and
   the longest covering prefix wins; anything undeclared takes `default`. A
@@ -374,7 +376,7 @@ conduct this interview before relying on project-specific rules:
   they mark and never hide, and because `closed` implies `sensitive` an
   exposed *paid* route is excluded there exactly as under `sensitive`.
 
-- **Pre-flight (`--assert-allowed`)** — `scripts/bind.py --assert-allowed
+- **Pre-flight (`--assert-allowed`)** — `scripts/modelbandit.py --assert-allowed
   --model <id> --working-dir <folder>` answers one question for an
   orchestrator: may this model serve in that folder's effective zone? Exit
   **0** yes, **5** blocked by the free-use zone, or **4** policy/config error.
@@ -429,7 +431,7 @@ conduct this interview before relying on project-specific rules:
   some tickets, all of them, or none, as the draw falls.
 
 - **Secrets gate** — the collect-demand check that makes a shape Sensitive,
-  run as `scripts/bind.py --check-secrets [--working-dir PATH]` with the
+  run as `scripts/modelbandit.py --check-secrets [--working-dir PATH]` with the
   material on stdin and repeatable `--outside-file PATH` arguments for named
   outside content. It needs no policy and no network; the material is the
   agent's to supply (the tool never reads it for you). It prints the zone it
@@ -442,7 +444,7 @@ conduct this interview before relying on project-specific rules:
   `--outside-file` whose effective regime is `closed` (declared or the default,
   resolved with origin included), or a `--model` the effective zone cannot
   admit. The tool assembles
-  everything mechanical: the project's `modelrouter.secrets.json` at the
+  everything mechanical: the project's `modelbandit.secrets.json` at the
   working-folder root (the git root when in a repository, else the folder),
   this machine's identifiers (hostname, login, home path, non-loopback local
   address, each best effort and never shorter than four characters), and the

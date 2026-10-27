@@ -9,8 +9,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
-                                "openrouter-model-router", "scripts"))
-import bind  # noqa: E402
+                                "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
 
 POOL = {"a/model-1": 6.0, "b/model-2": 3.0, "c/model-3": 1.0}
 MODELS = {mid: {} for mid in POOL}
@@ -38,19 +38,19 @@ def plan(aff=None, **kw):
     params = dict(blend_weight=0.6, top_k=3, seed="s", tickets=100)
     params.update(kw)
     weights = params.pop("weights", SCORES)
-    return bind.plan_deal(POOL, MODELS, aff or {},
-                          bind.DealParameters(fit_adjusted_task_scores=weights,
+    return modelbandit.plan_deal(POOL, MODELS, aff or {},
+                          modelbandit.DealParameters(fit_adjusted_task_scores=weights,
                                               **params))
 
 
 class WeightTests(unittest.TestCase):
     def test_longest_prefix_wins(self):
         table = {"z-ai/glm-5.3": 3.0, "z-ai/glm-5.3-flash": 0.5}
-        self.assertEqual(bind.weight_for("z-ai/glm-5.3-flash-2026", table), 0.5)
-        self.assertEqual(bind.weight_for("z-ai/glm-5.3-prime", table), 3.0)
+        self.assertEqual(modelbandit.weight_for("z-ai/glm-5.3-flash-2026", table), 0.5)
+        self.assertEqual(modelbandit.weight_for("z-ai/glm-5.3-prime", table), 3.0)
 
     def test_neutral_default(self):
-        self.assertEqual(bind.weight_for("openai/gpt-6-luna",
+        self.assertEqual(modelbandit.weight_for("openai/gpt-6-luna",
                                          {"z-ai/glm-5.3": 3.0}), 1.0)
 
 
@@ -59,19 +59,19 @@ class PolicyConfigTests(unittest.TestCase):
         policy = dict(POLICY_CONFIG)
         del policy["scoring"]
         with self.assertRaisesRegex(SystemExit, "scoring"):
-            bind.load_policy_config(policy)
+            modelbandit.load_policy_config(policy)
 
     def test_missing_factors_map_fails_with_key(self):
         policy = {**POLICY_CONFIG, "affinity": dict(POLICY_CONFIG["affinity"])}
         del policy["affinity"]["factors"]
         with self.assertRaisesRegex(SystemExit, "affinity.factors"):
-            bind.load_policy_config(policy)
+            modelbandit.load_policy_config(policy)
 
     def test_missing_blend_weight_fails_with_key(self):
         policy = {**POLICY_CONFIG, "affinity": dict(POLICY_CONFIG["affinity"])}
         del policy["affinity"]["blend_weight"]
         with self.assertRaisesRegex(SystemExit, "affinity.blend_weight"):
-            bind.load_policy_config(policy)
+            modelbandit.load_policy_config(policy)
 
 
 class DerivationTests(unittest.TestCase):
@@ -80,36 +80,36 @@ class DerivationTests(unittest.TestCase):
     def test_favor_validated_derives_factor(self):
         hints = {"z-ai/glm-5.3": {"note": "n", "fit": {"writing": "favor"},
                                   "evidence": "validated"}}
-        self.assertEqual(bind.domain_weights(hints, "writing",
+        self.assertEqual(modelbandit.domain_weights(hints, "writing",
                                              FACTORS),
                          {"z-ai/glm-5.3": 3.0})
 
     def test_missing_fit_is_neutral(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "favor"},
                          "evidence": "validated"}}
-        self.assertEqual(bind.domain_weights(hints, "coding",
+        self.assertEqual(modelbandit.domain_weights(hints, "coding",
                                              FACTORS), {})
 
     def test_suspected_avoid_derives_weaker_avoidance(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "avoid"},
                          "evidence": "suspected"}}
-        self.assertEqual(bind.domain_weights(hints, "writing",
+        self.assertEqual(modelbandit.domain_weights(hints, "writing",
                                              FACTORS)["a/m"], 0.5)
 
     def test_plain_string_hint_is_ignored(self):
-        self.assertEqual(bind.domain_weights({"a/m": "just a note"}, "writing",
+        self.assertEqual(modelbandit.domain_weights({"a/m": "just a note"}, "writing",
                                              FACTORS), {})
 
     def test_explicit_neutral_derives_no_weight(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "neutral"},
                          "evidence": "validated"}}
-        self.assertEqual(bind.domain_weights(hints, "writing",
+        self.assertEqual(modelbandit.domain_weights(hints, "writing",
                                              FACTORS), {})
 
     def test_policy_factors_override(self):
         hints = {"a/m": {"note": "n", "fit": {"writing": "favor"},
                          "evidence": "validated"}}
-        w = bind.domain_weights(hints, "writing", {"favor_validated": 9.0})
+        w = modelbandit.domain_weights(hints, "writing", {"favor_validated": 9.0})
         self.assertEqual(w["a/m"], 9.0)
 
 
@@ -158,8 +158,8 @@ class AdmissionTests(unittest.TestCase):
 
     def test_unresolved_row_never_plays(self):
         share = dict(POOL, **{"ghost/unresolved": 100.0})
-        rows = bind.plan_deal(share, MODELS, {"ghost/unresolved": 9.0},
-                              bind.DealParameters(blend_weight=0.6, top_k=2,
+        rows = modelbandit.plan_deal(share, MODELS, {"ghost/unresolved": 9.0},
+                              modelbandit.DealParameters(blend_weight=0.6, top_k=2,
                                                   seed="s",
                                                   tickets=10,
                                                   fit_adjusted_task_scores=SCORES))
@@ -170,13 +170,13 @@ class EligibilityPoolTests(unittest.TestCase):
     """One pool construction for the candidate table and the deal."""
 
     def test_top_k_plus_favored_below_cut(self):
-        rows = bind.eligibility_pool(POOL, MODELS, {"c/model-3": 3.0}, 2)
+        rows = modelbandit.eligibility_pool(POOL, MODELS, {"c/model-3": 3.0}, 2)
         self.assertEqual([mid for mid, _ in rows],
                          ["a/model-1", "b/model-2", "c/model-3"])
 
     def test_unfavored_below_cut_and_unresolved_stay_out(self):
         share = dict(POOL, **{"ghost/unresolved": 100.0})
-        rows = bind.eligibility_pool(share, MODELS,
+        rows = modelbandit.eligibility_pool(share, MODELS,
                                      {"ghost/unresolved": 9.0}, 1)
         self.assertEqual([mid for mid, _ in rows], ["a/model-1"])
 
@@ -198,7 +198,7 @@ class ExposureAdmissionTests(unittest.TestCase):
                          ["a/model-1", "b/model-2", "c/model-3"])
 
     def test_eligibility_pool_admits_only_admitted_members(self):
-        rows = bind.eligibility_pool(POOL, MODELS, {}, 2,
+        rows = modelbandit.eligibility_pool(POOL, MODELS, {}, 2,
                                      admitted=frozenset({"a/model-1"}))
         self.assertEqual([mid for mid, _ in rows], ["a/model-1"])
 
@@ -233,8 +233,8 @@ class DrawTests(unittest.TestCase):
     def test_blend_uses_weights_over_share(self):
         share = {"a/1": 9.0, "b/2": 1.0}
         weights = {"a/1": 0.1, "b/2": 10.0}
-        rows = bind.plan_deal(share, {m: {} for m in share}, {},
-                              bind.DealParameters(blend_weight=0.0, top_k=2,
+        rows = modelbandit.plan_deal(share, {m: {} for m in share}, {},
+                              modelbandit.DealParameters(blend_weight=0.0, top_k=2,
                                                   seed="s",
                                                   tickets=100,
                                                   fit_adjusted_task_scores=weights))
@@ -252,8 +252,8 @@ class DrawTests(unittest.TestCase):
             self.assertEqual(sum(r["tickets"] for r in rows), 12)
 
     def test_empty_pool(self):
-        self.assertEqual(bind.plan_deal(
-            {}, {}, {}, bind.DealParameters(blend_weight=0.6, top_k=5,
+        self.assertEqual(modelbandit.plan_deal(
+            {}, {}, {}, modelbandit.DealParameters(blend_weight=0.6, top_k=5,
                                             seed="s",
                                             tickets=12)), [])
 

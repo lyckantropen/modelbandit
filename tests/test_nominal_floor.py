@@ -15,8 +15,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
-                                "openrouter-model-router", "scripts"))
-import bind  # noqa: E402
+                                "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
 
 FREE_RISK = 0.35
 CHEAPEST_PAID = 0.02
@@ -47,10 +47,10 @@ class FreeRiskPolicyTests(unittest.TestCase):
     """scoring.free_risk is configurable and strictly between zero and one."""
 
     def test_default_is_35_percent(self):
-        self.assertEqual(bind.load_policy_config(POLICY).free_risk, 0.35)
+        self.assertEqual(modelbandit.load_policy_config(POLICY).free_risk, 0.35)
 
     def test_configured_free_risk_is_read(self):
-        config = bind.load_policy_config(with_scoring(free_risk=0.25))
+        config = modelbandit.load_policy_config(with_scoring(free_risk=0.25))
         self.assertEqual(config.free_risk, 0.25)
 
     def test_free_risk_outside_open_unit_interval_fails_loudly(self):
@@ -58,7 +58,7 @@ class FreeRiskPolicyTests(unittest.TestCase):
                       float("inf"), float("nan")):
             with self.subTest(value=value), self.assertRaisesRegex(
                     SystemExit, "scoring.free_risk"):
-                bind.load_policy_config(with_scoring(free_risk=value))
+                modelbandit.load_policy_config(with_scoring(free_risk=value))
 
 
 class NominalFloorCostTests(unittest.TestCase):
@@ -66,7 +66,7 @@ class NominalFloorCostTests(unittest.TestCase):
 
     def test_nominal_floor_is_free_risk_times_cheapest_paid_ticket(self):
         self.assertAlmostEqual(
-            bind.nominal_floor_cost(FREE_RISK, CHEAPEST_PAID), FREE_COST)
+            modelbandit.nominal_floor_cost(FREE_RISK, CHEAPEST_PAID), FREE_COST)
 
     def test_risk_fraction_stays_below_the_paid_ticket(self):
         self.assertGreater(FREE_COST, 0.0)
@@ -74,7 +74,7 @@ class NominalFloorCostTests(unittest.TestCase):
 
     def test_effective_cost_uses_the_cheapest_paid_ticket_in_each_pool(self):
         costs = {"free-a": 0.0, "paid-a": 0.08, "paid-b": 0.02}
-        effective = bind.effective_costs(costs, free_risk=FREE_RISK,
+        effective = modelbandit.effective_costs(costs, free_risk=FREE_RISK,
                                          free={"free-a"})
         self.assertEqual(effective["free-a"], FREE_COST)
         self.assertEqual(effective["paid-a"], 0.08)
@@ -86,51 +86,51 @@ class FreeRouteIdsTests(unittest.TestCase):
 
     def test_free_suffix_and_opencode_prefix_are_free_routes(self):
         self.assertEqual(
-            bind.free_route_ids(["vendor/model:free", "opencode/flash",
+            modelbandit.free_route_ids(["vendor/model:free", "opencode/flash",
                                  "vendor/model"], {"free_models": FREE_MODELS}),
             {"vendor/model:free", "opencode/flash"})
 
     def test_shared_free_route_predicate(self):
-        self.assertTrue(bind.is_free_route("vendor/model:free"))
-        self.assertTrue(bind.is_free_route("opencode/flash"))
-        self.assertTrue(bind.is_free_route("local-coder", local=True))
-        self.assertFalse(bind.is_free_route("local-coder"))
+        self.assertTrue(modelbandit.is_free_route("vendor/model:free"))
+        self.assertTrue(modelbandit.is_free_route("opencode/flash"))
+        self.assertTrue(modelbandit.is_free_route("local-coder", local=True))
+        self.assertFalse(modelbandit.is_free_route("local-coder"))
 
     def test_a_paid_route_is_never_a_free_route(self):
-        self.assertEqual(bind.free_route_ids(["vendor/model"],
+        self.assertEqual(modelbandit.free_route_ids(["vendor/model"],
                                              {"free_models": FREE_MODELS}),
                          set())
 
     def test_an_unrelated_route_is_paid_whatever_it_costs(self):
         # The rule is given no prices at all: Free is a serving fact.
-        self.assertEqual(bind.free_route_ids(["vendor/cheap"], {}), set())
+        self.assertEqual(modelbandit.free_route_ids(["vendor/cheap"], {}), set())
 
     def test_a_locally_served_model_is_a_free_route(self):
         # A local route is Free by where it runs, not by its id: the same id
         # is a paid route when this machine is not serving it.
-        self.assertEqual(bind.free_route_ids(["qwen3-coder-30b"], {},
+        self.assertEqual(modelbandit.free_route_ids(["qwen3-coder-30b"], {},
                                              local={"qwen3-coder-30b"}),
                          {"qwen3-coder-30b"})
-        self.assertEqual(bind.free_route_ids(["qwen3-coder-30b"], {}), set())
+        self.assertEqual(modelbandit.free_route_ids(["qwen3-coder-30b"], {}), set())
 
 
 class FreeRiskScoreTests(unittest.TestCase):
     """Free's standing uses its risk-priced ticket, never zero cost."""
 
     def test_raising_free_risk_lowers_free_standing_monotonically(self):
-        cheap_risk_cost = bind.nominal_floor_cost(0.2, 0.02)
-        high_risk_cost = bind.nominal_floor_cost(0.6, 0.02)
-        cheap_risk_score = bind.task_score(0.01, cheap_risk_cost, 0.7, 1.0)
-        high_risk_score = bind.task_score(0.01, high_risk_cost, 0.7, 1.0)
+        cheap_risk_cost = modelbandit.nominal_floor_cost(0.2, 0.02)
+        high_risk_cost = modelbandit.nominal_floor_cost(0.6, 0.02)
+        cheap_risk_score = modelbandit.task_score(0.01, cheap_risk_cost, 0.7, 1.0)
+        high_risk_score = modelbandit.task_score(0.01, high_risk_cost, 0.7, 1.0)
         self.assertGreater(cheap_risk_score, high_risk_score)
 
     def test_free_risk_keeps_the_cost_term_above_zero(self):
         # The cost term is the denominator: a zero there is a division by
         # zero, so a Free route always prices above it.
-        eff = bind.effective_costs({"vendor/model:free": 0.0, "paid": 0.02},
+        eff = modelbandit.effective_costs({"vendor/model:free": 0.0, "paid": 0.02},
                                    free_risk=FREE_RISK,
                                    free={"vendor/model:free"})
-        score = bind.task_score(0.01, eff["vendor/model:free"], 0.7, 1.0)
+        score = modelbandit.task_score(0.01, eff["vendor/model:free"], 0.7, 1.0)
         self.assertEqual(eff["vendor/model:free"], FREE_COST)
         self.assertTrue(math.isfinite(score))
 

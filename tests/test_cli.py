@@ -15,8 +15,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
-                                "openrouter-model-router", "scripts"))
-import bind  # noqa: E402
+                                "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
 
 
 def make_model(mid, prompt, completion, cache_read, canonical=None,
@@ -132,8 +132,8 @@ class CliTests(unittest.TestCase):
         or the deal declares the machine open, so the zone gate stays out of
         its way; the machine default (closed) is covered in test_zones.py."""
         config_home = os.path.join(self._tmp.name, "config")
-        os.makedirs(os.path.join(config_home, "modelrouter"), exist_ok=True)
-        with open(os.path.join(config_home, "modelrouter", "zones.json"),
+        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
+        with open(os.path.join(config_home, "modelbandit", "zones.json"),
                   "w", encoding="utf-8") as f:
             json.dump({"zones": list(zones or []), "default": default}, f)
         return config_home
@@ -160,23 +160,23 @@ class CliTests(unittest.TestCase):
             if cache_name == "rankings.json":
                 return world["rankings"]
             if url.endswith("/endpoints"):
-                slug = url[len(bind.MODELS_URL) + 1:-len("/endpoints")]
+                slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
                 return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
             raise AssertionError(f"unexpected fetch: {url}")
 
         out, err = io.StringIO(), io.StringIO()
         code = None
-        argv = ["bind.py", "--policy", policy_path or self.policy_path, *argv]
-        with mock.patch("bind.fetch_json", side_effect=fake_fetch), \
-                mock.patch("bind.probe_local_models", return_value=local_models), \
-                mock.patch.object(bind, "CACHE_DIR",
+        argv = ["modelbandit", "--policy", policy_path or self.policy_path, *argv]
+        with mock.patch("modelbandit.fetch_json", side_effect=fake_fetch), \
+                mock.patch("modelbandit.probe_local_models", return_value=local_models), \
+                mock.patch.object(modelbandit, "CACHE_DIR",
                                   os.path.join(self._tmp.name, "cache")), \
                 mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
-                mock.patch("bind.git_origin", return_value=None), \
+                mock.patch("modelbandit.git_origin", return_value=None), \
                 mock.patch.object(sys, "argv", argv), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
-                bind.main()
+                modelbandit.main()
             except SystemExit as exc:
                 code = exc.code
         return out.getvalue(), err.getvalue(), code, calls
@@ -712,11 +712,11 @@ class CliTests(unittest.TestCase):
 
     def test_missing_policy_file_exits(self):
         out, err, code, _ = None, None, None, None
-        argv = ["bind.py", "--policy", "/nonexistent/policy.json",
+        argv = ["modelbandit", "--policy", "/nonexistent/policy.json",
                 "--domain", "writing"]
         with mock.patch.object(sys, "argv", argv):
             with self.assertRaises(SystemExit):
-                bind.main()
+                modelbandit.main()
 
     def test_profile_defaults_per_domain(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
@@ -800,7 +800,7 @@ class CliTests(unittest.TestCase):
 
         # The probe absorbs the unavailable-server result; main receives the
         # same empty per-run catalog it had before the probe existed.
-        absent_models = bind.probe_local_models(connection_refused)
+        absent_models = modelbandit.probe_local_models(connection_refused)
         absent = self.run_cli("--domain", "writing",
                               local_models=absent_models)
 
@@ -1146,6 +1146,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(calls, [])
 
+    def test_usage_prog_is_fixed_regardless_of_argv0(self):
+        # prog is a literal: usage names the tool, never argv[0].
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv",
+                               ["not-the-tool-name", "--no-such-flag"]), \
+                redirect_stdout(out), redirect_stderr(err):
+            with self.assertRaises(SystemExit) as exc:
+                modelbandit.main()
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("usage: modelbandit", err.getvalue())
+        self.assertNotIn("not-the-tool-name", err.getvalue())
+
     def test_assert_allowed_needs_no_policy_file(self):
         absent = os.path.join(self._tmp.name, "absent.json")
         _, _, code, calls = self.guard("vendor/model:free",
@@ -1164,21 +1176,21 @@ class CliTests(unittest.TestCase):
 
     def test_assert_allowed_reports_a_broken_zones_file_as_a_config_error(self):
         config_home = os.path.join(self._tmp.name, "broken-config")
-        os.makedirs(os.path.join(config_home, "modelrouter"))
-        with open(os.path.join(config_home, "modelrouter", "zones.json"),
+        os.makedirs(os.path.join(config_home, "modelbandit"))
+        with open(os.path.join(config_home, "modelbandit", "zones.json"),
                   "w", encoding="utf-8") as f:
             json.dump({"zones": [{"path": self._tmp.name, "free": "opened"}]}, f)
         out, err, code = io.StringIO(), io.StringIO(), None
-        argv = ["bind.py", "--policy", self.policy_path, "--assert-allowed",
+        argv = ["modelbandit", "--policy", self.policy_path, "--assert-allowed",
                 "--model", "deepseek/deepseek-v4-pro", "--working-dir",
                 self._tmp.name]
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
-                mock.patch("bind.fetch_json",
+                mock.patch("modelbandit.fetch_json",
                            side_effect=AssertionError("no network in a guard")), \
                 mock.patch.object(sys, "argv", argv), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
-                bind.main()
+                modelbandit.main()
             except SystemExit as exc:
                 code = exc.code
         self.assertEqual(code, 4)
@@ -1888,7 +1900,7 @@ class PolicyFileTests(CliTests):
         """A guard run with stdin and machine facts pinned: no console, no
         real machine, no network."""
         with mock.patch.object(sys, "stdin", io.StringIO("")), \
-                mock.patch("bind.machine_facts",
+                mock.patch("modelbandit.machine_facts",
                            return_value={"identifiers": []}):
             return self.run_cli(*argv)
 
@@ -1910,7 +1922,7 @@ class PolicyFileTests(CliTests):
 
     def test_loader_decodes_non_ascii_utf8_exactly(self):
         self.non_ascii_policy("żółw őrizetlenül")
-        policy = bind.load_policy_file(self.policy_path)
+        policy = modelbandit.load_policy_file(self.policy_path)
         self.assertEqual(policy["summaries"]["deepseek/deepseek-v4-pro-0813"],
                          "żółw őrizetlenül")
 

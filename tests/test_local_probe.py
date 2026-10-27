@@ -7,8 +7,8 @@ import unittest
 from contextlib import redirect_stderr
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
-                                "openrouter-model-router", "scripts"))
-import bind  # noqa: E402
+                                "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
 
 
 class LocalProbeTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class LocalProbeTests(unittest.TestCase):
             {"id": "google/gemma-4-31b-it", "context_length": 262_144},
         ]}
 
-        served = bind.probe_local_models(
+        served = modelbandit.probe_local_models(
             lambda url: calls.append(url) or payload)
 
         self.assertEqual(calls, ["http://127.0.0.1:1234/v1/models"])
@@ -34,7 +34,7 @@ class LocalProbeTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with redirect_stderr(stderr):
-            served = bind.probe_local_models(
+            served = modelbandit.probe_local_models(
                 lambda _url: (_ for _ in ()).throw(OSError("connection refused")))
 
         self.assertEqual(served, {})
@@ -44,7 +44,7 @@ class LocalProbeTests(unittest.TestCase):
         stderr = io.StringIO()
 
         with redirect_stderr(stderr):
-            served = bind.probe_local_models(lambda _url: {"unexpected": []})
+            served = modelbandit.probe_local_models(lambda _url: {"unexpected": []})
 
         self.assertEqual(served, {})
         self.assertEqual(stderr.getvalue(), "")
@@ -66,7 +66,7 @@ class LocalProbeTests(unittest.TestCase):
             "google/gemma-4-31b-it": {"id": "google/gemma-4-31b-it"},
             "uncataloged/model": {"id": "uncataloged/model"},
         }
-        share, models = bind.merge_local_candidates(
+        share, models = modelbandit.merge_local_candidates(
             {"vendor/ranked": 0.5}, {}, served, catalog)
 
         self.assertEqual(share, {"vendor/ranked": 0.5,
@@ -82,15 +82,15 @@ class LocalProbeTests(unittest.TestCase):
             "local/qwen": {"context_length": 65_536, "exposure": "local"}},
             "summaries": {}}
         served = {"local/qwen-30b": {"id": "local/qwen-30b"}}
-        share, models = bind.merge_local_candidates(
+        share, models = modelbandit.merge_local_candidates(
             {}, {}, served, policy["free_models"])
-        facts = bind.candidate_for("local/qwen-30b", policy,
+        facts = modelbandit.candidate_for("local/qwen-30b", policy,
                                    local=True, model=models["local/qwen-30b"])
 
         self.assertIn("local/qwen-30b", share)
         self.assertEqual(facts.exposure, "local")
-        self.assertFalse(bind.admit(bind.Shape(), facts).admitted)
-        self.assertIn("catalog", bind.admit(bind.Shape(), facts).reason)
+        self.assertFalse(modelbandit.admit(modelbandit.Shape(), facts).admitted)
+        self.assertIn("catalog", modelbandit.admit(modelbandit.Shape(), facts).reason)
 
 
 if __name__ == "__main__":

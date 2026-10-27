@@ -33,7 +33,7 @@ LOCAL_MODELS_URL = "http://127.0.0.1:1234/v1/models"
 CLASS_URL = "https://openrouter.ai/api/v1/classifications/task?window=7d"
 RANK_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 KEY_URL = "https://openrouter.ai/api/v1/key"
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "modelbind")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "modelbandit")
 CACHE_TTL = 24 * 3600
 # The free-request counter is spent as a run proceeds, so it is cached for a
 # minute rather than the day the catalogues get.
@@ -205,7 +205,7 @@ def _string_values(value) -> list[str]:
     return []
 
 
-RULES_FILE = "modelrouter.secrets.json"
+RULES_FILE = "modelbandit.secrets.json"
 RULES_KEYS = ("phrases", "patterns")
 
 
@@ -523,7 +523,7 @@ def secrets_check(material: str, *, root: str | None = None,
                   outside_files=()) -> tuple[bool, str]:
     """The collect-demand verdict, assembled at the edge.
 
-    Rules come from `modelrouter.secrets.json` at the working-folder root,
+    Rules come from `modelbandit.secrets.json` at the working-folder root,
     machine facts are gathered here, and gitignored content is read from the
     tree — so the gate holds without the agent assembling anything. Each part
     is injectable, keeping the decision itself pure. Returns
@@ -737,7 +737,7 @@ def run_secrets_writer(*, working_dir: str | None = None,
 # folder and the repository that folder came from, and a shape may tighten
 # that but never loosen it.
 ZONES_FILE = "zones.json"
-ZONES_CONFIG_DIR = "modelrouter"
+ZONES_CONFIG_DIR = "modelbandit"
 REGIMES = ("open", "sensitive", "closed")
 DEFAULT_REGIME = "closed"
 # A zone entry carries its path and its regime, nothing else: a field the tool
@@ -2607,7 +2607,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(prog="modelbandit",
+                                 description=__doc__.splitlines()[0])
     ap.add_argument("--domain", help="domain from policy.json (see --list-domains)")
     ap.add_argument("--list-domains", action="store_true",
                     help="show domains and their leaderboard tags")
@@ -2645,7 +2646,7 @@ def main() -> None:
                          "JSON on stdin; apply the commit/gitignore decision")
     ap.add_argument("--working-dir", default=None, metavar="PATH",
                     help="working folder (default: cwd). Secrets gate "
-                         "commands read modelrouter.secrets.json and "
+                         "commands read modelbandit.secrets.json and "
                          ".gitignore from its git root; every run reads its "
                          "free-use zone from the machine's zones file")
     ap.add_argument("--check-policy", action="store_true",
