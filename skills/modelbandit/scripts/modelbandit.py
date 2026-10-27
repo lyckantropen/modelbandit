@@ -544,7 +544,7 @@ def secrets_check(material: str, *, root: str | None = None,
 
 SECRETS_SAFE, SECRETS_SENSITIVE, SECRETS_NOT_CERTIFIED = 0, 1, 3
 # Exit status 2 belongs to argparse's usage errors; rules/config errors use 4.
-SECRETS_RULES_ERROR = 4
+RULES_CONFIG_ERROR = 4
 # The free-use zone's own refusal: a distinct status, so a zone block is never
 # mistaken for merely sensitive (1) or safe (0). Shared by --check-secrets and
 # the --assert-allowed pre-flight.
@@ -606,7 +606,7 @@ def run_secrets_check(*, working_dir: str | None = None,
         zones = load_zones()
     except SystemExit as exc:
         print(f"secrets gate: rules/config error ({exc.code})", file=sys.stderr)
-        return SECRETS_RULES_ERROR
+        return RULES_CONFIG_ERROR
     zone = effective_zone(path_base, zones=zones)
     print(f"zone: {zone_label(zone, sensitive=sensitive)}")
     blocked, reason = None, None
@@ -620,7 +620,7 @@ def run_secrets_check(*, working_dir: str | None = None,
         except SystemExit as exc:
             print(f"secrets gate: rules/config error ({exc.code})",
                   file=sys.stderr)
-            return SECRETS_RULES_ERROR
+            return RULES_CONFIG_ERROR
         reason = zone_block(model, zone, policy=facts, sensitive=sensitive)
         blocked = zone
     if reason is not None:
@@ -749,18 +749,18 @@ def run_zones_writer(*, payload: str | None = None) -> int:
         except Exception as exc:
             print(f"zones writer: rules/config error (cannot read "
                   f"--write-zones input: {exc})", file=sys.stderr)
-            return SECRETS_RULES_ERROR
+            return RULES_CONFIG_ERROR
     try:
         submitted = json.loads(payload)
     except (TypeError, ValueError):
         print("zones writer: rules/config error "
               "(invalid JSON for --write-zones)", file=sys.stderr)
-        return SECRETS_RULES_ERROR
+        return RULES_CONFIG_ERROR
     try:
         validated = validate_zones(submitted, source="--write-zones input")
     except SystemExit as exc:
         print(f"zones writer: rules/config error ({exc.code})", file=sys.stderr)
-        return SECRETS_RULES_ERROR
+        return RULES_CONFIG_ERROR
 
     path = zones_path()
     directory = os.path.dirname(path) or "."
@@ -854,6 +854,14 @@ def zones_file_label(*, environ=None) -> str:
     if os.path.normcase(path).startswith(os.path.normcase(home) + os.sep):
         path = "~" + path[len(home):]
     return path.replace(os.sep, "/")
+
+
+def zones_absent_line(*, environ=None) -> str:
+    """The one sentence every mode prints when no zones file exists —
+    built once so the ranking header, the status report and the README
+    example can never drift apart."""
+    return (f"zones file: absent ({zones_file_label(environ=environ)}) "
+            "— undeclared paths are closed")
 
 
 def expand_path(text: str, *, environ=None) -> str:
@@ -1194,7 +1202,7 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         facts = policy_facts(policy_path)
     except SystemExit as exc:
         print(f"pre-flight: policy/config error ({exc.code})", file=sys.stderr)
-        return SECRETS_RULES_ERROR
+        return RULES_CONFIG_ERROR
     print(f"zone: {zone_label(zone, sensitive=restated)}")
     if plain:
         print("shape: plain (via --plain)")
@@ -1211,6 +1219,19 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         return ZONE_BLOCKED
     print(f"allowed: {model_id}")
     return 0
+
+
+def load_policy_bundle(policy_path: str | None) -> dict:
+    """The one policy load every entry point shares: the file read as
+    UTF-8, the free catalog, and the exposure overrides. Validation and
+    unpacking stay with each caller — it knows what it can tolerate (a
+    missing file is absent setup for the status report, an existing one
+    must be one the ranking trusts) and maps every failure to status 4,
+    never a traceback or a Secrets verdict."""
+    policy = load_policy_file(policy_path)
+    policy["free_models"] = load_free_models(policy)
+    load_exposure_overrides(policy)
+    return policy
 
 
 def run_status(*, working_dir: str | None = None,
@@ -1233,18 +1254,15 @@ def run_status(*, working_dir: str | None = None,
     try:
         zone = effective_zone(working_dir)
         zones_present = os.path.exists(zones_path())
-        # One policy loader for every entry point: an existing policy must
-        # be one the ranking would trust, and a missing file is absent
-        # setup (age `unknown`), not a failure.
+        # A missing file is absent setup (age `unknown`), not a failure;
+        # only an existing policy must be one the ranking would trust.
         policy_exists = os.path.exists(policy_path)
-        policy = load_policy_file(policy_path)
-        policy["free_models"] = load_free_models(policy)
-        load_exposure_overrides(policy)
+        policy = load_policy_bundle(policy_path)
         if policy_exists:
             load_policy_config(policy)
     except SystemExit as exc:
         print(f"status: config error ({exc.code})", file=sys.stderr)
-        return SECRETS_RULES_ERROR
+        return RULES_CONFIG_ERROR
     print(f"zone: {zone_label(zone, sensitive=sensitive)}")
     label = zones_file_label()
     if zones_present:
@@ -1254,7 +1272,7 @@ def run_status(*, working_dir: str | None = None,
         # same line the ranking header prints (issue #38), plus the one
         # action that changes it — create the file, via the skill's setup
         # interview.
-        print(f"zones file: absent ({label}) — undeclared paths are closed")
+        print(zones_absent_line())
         print(f"next: create {label} — see the skill's setup interview")
     root = resolve_working_root(working_dir)
     secrets_path = os.path.join(root, RULES_FILE)
@@ -2892,13 +2910,11 @@ def main() -> None:
     # policy/config error (status 4) instead of letting an unreadable or
     # untrustworthy policy escape as a traceback or a Secrets verdict.
     try:
-        policy = load_policy_file(args.policy)
-        policy["free_models"] = load_free_models(policy)
-        load_exposure_overrides(policy)
+        policy = load_policy_bundle(args.policy)
+        config = load_policy_config(policy)
     except SystemExit as exc:
         print(f"policy/config error: {exc}", file=sys.stderr)
-        raise SystemExit(SECRETS_RULES_ERROR) from None
-    config = load_policy_config(policy)
+        raise SystemExit(RULES_CONFIG_ERROR) from None
     domains = policy.get("domains", {})
 
     if args.list_domains:
@@ -3015,8 +3031,7 @@ def main() -> None:
         # absent - a present file stays byte-identical, and a corrupt one
         # already stopped loudly when the zone was resolved above
         # (issue #38).
-        print(f"zones file: absent ({zones_file_label()}) — "
-              f"undeclared paths are closed")
+        print(zones_absent_line())
     age = policy_age_days(args.policy)
     age_txt = f"{age}d old" if age is not None else "unknown"
     print(f"profile={profile_name} (in={in_tok:,} out={out_tok:,} cached={cached:.0%}) "

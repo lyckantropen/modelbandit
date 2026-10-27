@@ -2,7 +2,7 @@
 
 Free routes touch user content — prompts, files, the working tree — so where
 they may run must be opt-in, path by path, declared by somebody. The posture
-is enforced in code (`DEFAULT_REGIME = "closed"`, modelbandit.py:742) and
+is enforced in code (`DEFAULT_REGIME = "closed"`) and
 recorded in prose (SKILL.md's closed-zone protocol, the Zone entry in
 GLOSSARY.md): any path undeclared in `zones.json` is `closed`, and a missing
 `zones.json` closes everything. What is missing is the decision itself. A new

@@ -693,8 +693,11 @@ class CliTests(unittest.TestCase):
         del pol["scoring"]
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
-        _, _, code, calls = self.run_cli("--domain", "writing")
-        self.assertIn("scoring", code)
+        _, err, code, calls = self.run_cli("--domain", "writing")
+        # Rules/config error, status 4 — not the raw SystemExit payload,
+        # which a shell would report as 1 (the Secrets-gate status).
+        self.assertEqual(code, 4)
+        self.assertIn("scoring", err)
         self.assertEqual(calls, [])
 
     def test_score_orders_by_popularity_priced_at_cost(self):
@@ -745,8 +748,11 @@ class CliTests(unittest.TestCase):
             del node[key]
             with open(self.policy_path, "w") as f:
                 json.dump(pol, f)
-            _, _, code, _ = self.run_cli("--domain", "writing")
-            self.assertIn(f"{path}.{key}", code)
+            _, err, code, _ = self.run_cli("--domain", "writing")
+            # Loudly = named on stderr with status 4; the raw payload
+            # would exit 1 in a shell, the Secrets-gate status.
+            self.assertEqual(code, 4)
+            self.assertIn(f"{path}.{key}", err)
 
     def test_missing_domain_exits(self):
         _, _, code, _ = self.run_cli()
@@ -2229,6 +2235,21 @@ class PolicyFileTests(CliTests):
         with open(self.policy_path, "w", encoding="utf-8") as f:
             f.write("{oops")
         self.assert_status_4_everywhere()
+
+    def test_an_untrustworthy_policy_stops_the_ranking_with_status_4(self):
+        # A policy that parses and loads but cannot be trusted is a
+        # rules/config error on the ranking path too: an uncaught
+        # SystemExit from load_policy_config would fall through as status 1,
+        # the Secrets-gate verdict, which is exactly what this class pins
+        # against.
+        self.write_policy({"domains": {}})
+        for argv in (["--domain", "writing"], ["--check-policy"]):
+            with self.subTest(entry=argv[0]):
+                out, err, code, _ = self.run_gate(*argv)
+                self.assertEqual(code, 4)
+                self.assertIn("policy/config error", err)
+                self.assertIn("scoring", err)
+                self.assertNotIn("Traceback", err)
 
     def test_an_unknown_exposure_override_stops_the_guards_with_status_4(self):
         pol = json.loads(json.dumps(POLICY))
