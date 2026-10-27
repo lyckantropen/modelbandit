@@ -1966,6 +1966,182 @@ class CliTests(unittest.TestCase):
         self.assertIn("free share: 12/12 tickets (100%)", out)
         self.assertNotIn("deepseek/deepseek-v4-pro |", deal)
 
+    # --- setup posture report: --status (issue #37) ----------------------
+    #
+    # The machine-readable companion to the README Setup section: read-only
+    # and fully offline. Exit 0 whenever setup files are absent (the
+    # documented default), 4 only when a file that exists fails validation —
+    # never 1, 2, 3 or 5.
+
+    def status(self, *, working_dir=None, policy_path=None, zones=None,
+               zones_default="open", zones_absent=False):
+        argv = ["--status"]
+        if working_dir:
+            argv += ["--working-dir", working_dir]
+        return self.run_cli(*argv, zones=zones, zones_default=zones_default,
+                            zones_absent=zones_absent, policy_path=policy_path)
+
+    def write_secrets_file(self, payload):
+        path = os.path.join(self._tmp.name, "modelbandit.secrets.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        return path
+
+    def test_status_reports_the_four_lines_for_a_provisioned_setup(self):
+        # AC1: one line each — zone, zones file, secrets file, policy age —
+        # for a machine with zones.json and a project secrets file in place.
+        # The zones line names this fixture's file (the exact spelling of
+        # that path — zones_file_label()'s — is pinned by the absent-state
+        # test below, whose home the helper can resolve).
+        secrets = self.write_secrets_file({"phrases": ["client-codename"]})
+
+        out, err, code, calls = self.status(working_dir=self._tmp.name)
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "zone: undeclared (open)")
+        self.assertTrue(lines[1].startswith("zones file: present ("), lines[1])
+        self.assertTrue(lines[1].endswith("/config/modelbandit/zones.json)"),
+                        lines[1])
+        self.assertEqual(lines[2], f"secrets file: present ({secrets})")
+        policy = os.path.join(self._tmp.name, "policy.json")
+        self.assertEqual(lines[3], f"policy: {policy} — 0d old")
+        self.assertEqual(err, "")
+        self.assertEqual(calls, [])
+
+    def test_status_never_prints_the_secrets_file_contents(self):
+        # AC4: presence only — a real rules file whose contents carry a
+        # canary phrase must never surface in stdout or stderr.
+        canary = "CANARY-c0ffee-client-token-DO-NOT-PRINT"
+        secrets = self.write_secrets_file({"phrases": [canary]})
+
+        out, err, code, calls = self.status(working_dir=self._tmp.name)
+
+        self.assertEqual(code, 0)
+        self.assertIn(f"secrets file: present ({secrets})", out)
+        self.assertNotIn(canary, out)
+        self.assertNotIn(canary, err)
+        self.assertEqual(calls, [])
+
+    def test_status_empty_setup_reports_absent_states_and_exits_zero(self):
+        # AC2: no zones, no secrets — the documented default, so exit 0,
+        # the same four lines in absent states, and exactly one actionable
+        # line for the zones file (batch A's absent wording plus the action
+        # that changes it).
+        out, err, code, calls = self.status(working_dir=self._tmp.name,
+                                            zones_absent=True)
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "zone: undeclared (closed)")
+        self.assertEqual(
+            lines[1],
+            "zones file: absent (~/.config/modelbandit/zones.json) — "
+            "undeclared paths are closed")
+        self.assertEqual(
+            lines[2],
+            "next: create ~/.config/modelbandit/zones.json — see the "
+            "skill's setup interview")
+        secrets = os.path.join(self._tmp.name, "modelbandit.secrets.json")
+        self.assertEqual(
+            lines[3],
+            f"secrets file: absent ({secrets}) — built-in default rules apply")
+        policy = os.path.join(self._tmp.name, "policy.json")
+        self.assertEqual(lines[4], f"policy: {policy} — 0d old")
+        self.assertEqual(err, "")
+        self.assertEqual(calls, [])
+
+    def test_status_reports_an_absent_policy_as_unknown_and_exits_zero(self):
+        # 0 whenever files are absent: a policy file that is not there is
+        # `unknown` age, never an error.
+        absent = os.path.join(self._tmp.name, "absent-policy.json")
+
+        out, err, code, calls = self.status(working_dir=self._tmp.name,
+                                            policy_path=absent)
+
+        self.assertEqual(code, 0)
+        self.assertIn(f"policy: {absent} — unknown", out)
+        self.assertEqual(err, "")
+        self.assertEqual(calls, [])
+
+    def test_status_exits_four_naming_an_existing_invalid_zones_file(self):
+        # AC3: a zones file that exists but fails validation is a config
+        # error (exit 4) naming the file — nothing else is printed.
+        config_home = os.path.join(self._tmp.name, "broken-config")
+        os.makedirs(os.path.join(config_home, "modelbandit"))
+        with open(os.path.join(config_home, "modelbandit", "zones.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"zones": [{"path": self._tmp.name, "free": "opened"}]}, f)
+        out, err, code = io.StringIO(), io.StringIO(), None
+        argv = ["modelbandit", "--policy", self.policy_path, "--status",
+                "--working-dir", self._tmp.name]
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
+                mock.patch("modelbandit.fetch_json",
+                           side_effect=AssertionError("no network in --status")), \
+                mock.patch.object(sys, "argv", argv), \
+                redirect_stdout(out), redirect_stderr(err):
+            try:
+                modelbandit.main()
+            except SystemExit as exc:
+                code = exc.code
+        self.assertEqual(code, 4)
+        self.assertIn("zones.json", err.getvalue())
+        self.assertIn("opened", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+
+    def test_status_exits_four_naming_an_existing_invalid_policy_file(self):
+        # AC3: an existing policy that cannot be trusted stops the report
+        # with exit 4 naming the file; the stdout report never starts.
+        with open(self.policy_path, "w", encoding="utf-8") as f:
+            f.write("{oops")
+
+        out, err, code, calls = self.status(working_dir=self._tmp.name)
+
+        self.assertEqual(code, 4)
+        self.assertIn("cannot read policy file", err)
+        self.assertIn("policy.json", err)
+        self.assertEqual(out, "")
+        self.assertEqual(calls, [])
+
+    def test_status_is_offline_when_every_fetch_raises(self):
+        # AC2/AC4: no endpoint fetch, no classification, no quota — the
+        # mode must pass when every fetch raises, with zero fetch calls
+        # recorded.
+        calls = []
+
+        def exploding_fetch(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("network in --status")
+
+        config_home = self.zones_file([], default="open")
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        argv = ["modelbandit", "--policy", self.policy_path, "--status",
+                "--working-dir", self._tmp.name]
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
+                mock.patch("modelbandit.fetch_json", side_effect=exploding_fetch), \
+                mock.patch("modelbandit.probe_local_models",
+                           side_effect=AssertionError("local probe in --status")), \
+                mock.patch("modelbandit.free_quota",
+                           side_effect=AssertionError("quota in --status")), \
+                mock.patch.object(sys, "argv", argv), \
+                redirect_stdout(out), redirect_stderr(err):
+            try:
+                modelbandit.main()
+            except SystemExit as exc:
+                code = exc.code
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("zone: undeclared (open)", out.getvalue())
+        self.assertEqual(err.getvalue(), "")
+
+    def test_status_help_documents_the_flag(self):
+        out, _, code, _ = self.run_cli("--status", "--help")
+        self.assertEqual(code, 0)
+        joined = " ".join(out.split())
+        self.assertIn("--status", joined)
+        self.assertIn("offline", joined)
+
 
 class PolicyFileTests(CliTests):
     """One policy loader: every entry point reads the policy file the same

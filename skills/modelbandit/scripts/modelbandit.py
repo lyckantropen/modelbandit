@@ -1159,6 +1159,63 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     return 0
 
 
+def run_status(*, working_dir: str | None = None,
+               policy_path: str | None = None,
+               sensitive: bool = False) -> int:
+    """The offline setup report: zone, zones file, secrets file, policy age.
+
+    The machine-readable companion to the README Setup section — read-only
+    and fully offline: no endpoint fetch, no classification, no quota, and
+    the secrets file's presence only, never its contents. `--working-dir`
+    judges the folder the way the pre-flight does, and the zones path is
+    spelled the way the run header spells it.
+
+    Exit status: 0 whenever the setup files are absent — a missing zones or
+    secrets file is the documented default, not an error; 4 only when a file
+    that exists fails validation (zones or policy), named on stderr. This
+    mode never produces 1, 2, 3 or 5.
+    """
+    policy_path = policy_path or DEFAULT_POLICY
+    try:
+        zone = effective_zone(working_dir)
+        zones_present = os.path.exists(zones_path())
+        # One policy loader for every entry point: an existing policy must
+        # be one the ranking would trust, and a missing file is absent
+        # setup (age `unknown`), not a failure.
+        policy_exists = os.path.exists(policy_path)
+        policy = load_policy_file(policy_path)
+        policy["free_models"] = load_free_models(policy)
+        load_exposure_overrides(policy)
+        if policy_exists:
+            load_policy_config(policy)
+    except SystemExit as exc:
+        print(f"status: config error ({exc.code})", file=sys.stderr)
+        return SECRETS_RULES_ERROR
+    print(f"zone: {zone_label(zone, sensitive=sensitive)}")
+    label = zones_file_label()
+    if zones_present:
+        print(f"zones file: present ({label})")
+    else:
+        # Absent is the documented default (exit 0), never silence: the
+        # same line the ranking header prints (issue #38), plus the one
+        # action that changes it — create the file, via the skill's setup
+        # interview.
+        print(f"zones file: absent ({label}) — undeclared paths are closed")
+        print(f"next: create {label} — see the skill's setup interview")
+    root = resolve_working_root(working_dir)
+    secrets_path = os.path.join(root, RULES_FILE)
+    if os.path.exists(secrets_path):
+        # Presence only: the report never reads, parses or prints contents.
+        print(f"secrets file: present ({secrets_path})")
+    else:
+        print(f"secrets file: absent ({secrets_path}) — "
+              f"built-in default rules apply")
+    age = policy_age_days(policy_path)
+    age_txt = f"{age}d old" if age is not None else "unknown"
+    print(f"policy: {policy_path} — {age_txt}")
+    return 0
+
+
 def resolve_model(models: dict, by_canon: dict, permaslug: str):
     """Leaderboard rows are permaslugs. Resolve via canonical_slug; heuristic
     date-stripping misprices dated releases (v4-pro-0813 vs v4-pro) and is a
@@ -2665,6 +2722,15 @@ def main() -> None:
     ap.add_argument("--check-policy", action="store_true",
                     help="report summary drift (ranked models without summaries, "
                          "stale summaries) and policy age; no --domain needed")
+    ap.add_argument("--status", action="store_true",
+                    help="offline setup report for this folder "
+                         "(--working-dir): the effective zone, the zones "
+                         "file, the secrets file (presence only, never "
+                         "contents) and the policy age. No fetch, no "
+                         "classification, no quota. Exit 0 even when setup "
+                         "files are absent (the documented default); 4 only "
+                         "when an existing zones or policy file fails "
+                         "validation.")
     ap.add_argument("--effort", default="measured", choices=INTENTS,
                     help="effort intent (default: measured); a rung the "
                          "model's ladder collapses discounts the output "
@@ -2746,6 +2812,14 @@ def main() -> None:
         raise SystemExit(run_secrets_writer(working_dir=args.working_dir))
     if args.model:
         ap.error("--model is read only by --assert-allowed and --check-secrets")
+    if args.status:
+        # The setup report reads the folder and the machine's files, never
+        # the network: absent setup files are the documented default (exit
+        # 0), and only a file that exists and fails validation stops the
+        # report (exit 4).
+        raise SystemExit(run_status(working_dir=args.working_dir,
+                                    policy_path=args.policy,
+                                    sensitive=args.sensitive))
 
     # One policy loader for every entry point: the ranking path reports a
     # policy/config error (status 4) instead of letting an unreadable or
