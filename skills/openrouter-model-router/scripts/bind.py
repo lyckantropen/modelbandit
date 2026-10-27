@@ -990,14 +990,16 @@ def shape_regime(zone: Zone, *, sensitive: bool) -> str:
     return stricter(zone.regime, "sensitive" if sensitive else "open")
 
 
-def policy_facts(path: str | None) -> dict:
-    """The policy's Exposure facts when the file exists, else none.
+def load_policy_file(path: str | None) -> dict:
+    """The policy read once, as UTF-8 JSON, by every entry point.
 
-    The pre-flight and the secrets check read the local policy for its
-    `exposure` overrides and `free_models` catalog when it is there, and work
-    without it: a missing file is not an error, so the defaults answer (a
-    ':free' or 'opencode/*' route exposed, a paid route no-retention). No
-    board, no classification fetch, no network.
+    The ranking run, the policy check, the pre-flight and the secrets check
+    all decode this file the same way: explicitly UTF-8, never the console's
+    locale codec — prose carrying non-ASCII must read the same everywhere.
+    A missing file is an empty policy (the ranking path then reports the
+    required keys it misses); a file that cannot be decoded or parsed is a
+    policy/config error naming the file, never a mangled read and never an
+    uncaught traceback.
     """
     if not path or not os.path.exists(path):
         return {}
@@ -1008,7 +1010,21 @@ def policy_facts(path: str | None) -> dict:
         raise SystemExit(f"cannot read policy file {path}: {exc}") from None
     if not isinstance(policy, dict):
         raise SystemExit(f"policy file {path} must be a JSON object")
+    return policy
+
+
+def policy_facts(path: str | None) -> dict:
+    """The policy's Exposure facts when the file exists, else none.
+
+    The pre-flight and the secrets check read the local policy for its
+    `exposure` overrides and `free_models` catalog when it is there, and work
+    without it: a missing file is not an error, so the defaults answer (a
+    ':free' or 'opencode/*' route exposed, a paid route no-retention). No
+    board, no classification fetch, no network.
+    """
+    policy = load_policy_file(path)
     policy["free_models"] = load_free_models(policy)
+    load_exposure_overrides(policy)
     return policy
 
 
@@ -1401,6 +1417,29 @@ def load_free_models(policy: dict) -> dict:
     return catalog
 
 
+def load_exposure_overrides(policy: dict) -> dict:
+    """Validate the policy's `exposure` override map at the policy boundary.
+
+    A misspelled class here would widen the gate exactly as a misspelled
+    catalog entry would, so it stops the run the same way — loudly, naming
+    the prefix, before any candidate is judged by it.
+    """
+    overrides = policy.get("exposure", {})
+    if not isinstance(overrides, dict):
+        raise SystemExit("policy exposure must be an object")
+    for prefix, value in overrides.items():
+        path = f"exposure.{prefix}"
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise SystemExit(f"policy {path}: id-prefix must be a non-empty string")
+        if not isinstance(value, str):
+            raise SystemExit(f"policy {path}: exposure must be a string")
+        try:
+            known_exposure(prefix, value)
+        except SystemExit as exc:
+            raise SystemExit(f"policy {path}: {exc}") from None
+    return overrides
+
+
 def _free_summary(entry: dict, summaries: dict, mid: str | None = None) -> bool:
     """Whether a Free route has a resolvable explicit or prefix summary."""
     ref = entry.get("summary_ref")
@@ -1596,12 +1635,24 @@ def standing(share: float, cost: float, fit: float | None,
 
 
 def parse_fit(spec: str) -> dict:
-    """'mid=score,mid=score' -> {prefix: clamped 0-5 float}."""
+    """'mid=score,mid=score' -> {prefix: clamped 0-5 float}.
+
+    A malformed entry stops the run with a message naming it, instead of an
+    uncaught conversion error after the board is fetched."""
     out = {}
     for part in spec.split(","):
         mid, eq, val = part.strip().partition("=")
         if mid and eq:
-            out[mid] = max(0.0, min(5.0, float(val)))
+            try:
+                score = float(val)
+            except ValueError:
+                raise SystemExit(
+                    f"--fit entry '{mid}={val}' is not a number on 0-5"
+                ) from None
+            if not math.isfinite(score):
+                raise SystemExit(
+                    f"--fit entry '{mid}={val}' is not a number on 0-5")
+            out[mid] = max(0.0, min(5.0, score))
     return out
 
 
@@ -2527,6 +2578,18 @@ def main() -> None:
     ap.add_argument("--refresh", action="store_true", help="bypass the 24h cache")
     args = ap.parse_args()
 
+    # Malformed ranking inputs stop before any plan is produced, naming the
+    # flag: a percentage-style cached share would price tickets negative and
+    # flip the budget verdict to "under".
+    if args.cached_share is not None and not 0.0 <= args.cached_share <= 1.0:
+        raise SystemExit(
+            f"--cached-share {args.cached_share} must be between 0 and 1")
+    for flag, tokens in (("--in-tokens", args.in_tokens),
+                         ("--out-tokens", args.out_tokens)):
+        if tokens is not None and tokens < 0:
+            raise SystemExit(f"{flag} {tokens} must not be negative")
+    fit_map = parse_fit(args.fit) if args.fit else {}
+
     if args.assert_allowed:
         # The pre-flight reads the zone and the local policy, never the board:
         # an orchestrator refuses a model the plan should not have produced
@@ -2549,11 +2612,16 @@ def main() -> None:
     if args.model:
         ap.error("--model is read only by --assert-allowed and --check-secrets")
 
-    policy: dict = {}
-    if os.path.exists(args.policy):
-        with open(args.policy) as f:
-            policy = json.load(f)
-    policy["free_models"] = load_free_models(policy)
+    # One policy loader for every entry point: the ranking path reports a
+    # policy/config error (status 4) instead of letting an unreadable or
+    # untrustworthy policy escape as a traceback or a Secrets verdict.
+    try:
+        policy = load_policy_file(args.policy)
+        policy["free_models"] = load_free_models(policy)
+        load_exposure_overrides(policy)
+    except SystemExit as exc:
+        print(f"policy/config error: {exc}", file=sys.stderr)
+        raise SystemExit(SECRETS_RULES_ERROR) from None
     config = load_policy_config(policy)
     domains = policy.get("domains", {})
 
@@ -2692,7 +2760,6 @@ def main() -> None:
     if not verdict.eligible:
         print(f":free routes excluded from the pick and the deal — "
               f"{verdict.reason}")
-    fit_map = parse_fit(args.fit) if args.fit else {}
     alpha, beta = config.alpha, config.beta
     aff = domain_weights(policy.get("hints", {}), args.domain, config.factors)
     ranked = sorted(share.items(), key=lambda kv: -kv[1])[:args.top]
