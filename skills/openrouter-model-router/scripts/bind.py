@@ -1038,25 +1038,35 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
     means a prohibition the regime states outright — a remote free route in a
     closed zone, an exposed route at a sensitive regime or stricter — never a
     Footprint, catalog or quota exclusion.
+
+    The candidate is judged by its serving identity alone: localness is a
+    serving fact, never a catalogue claim, and this guard observes no serving
+    — so a policy label cannot make a remote id (`opencode/*`, `:free`) local
+    here, and a remote Free route is refused in a closed zone whatever the
+    catalog says.
     """
     shape = Shape(sensitive=sensitive,
                   regime=shape_regime(zone, sensitive=sensitive))
     model_id = norm_id(model_id)
     policy = policy or {}
-    match = longest_prefix_match(model_id, policy.get("free_models", {}))
-    local = (match is not None and isinstance(match[1], dict)
-             and match[1].get("exposure") == "local")
-    return regime_prohibition(
-        shape, candidate_for(model_id, policy, local=local))
+    return regime_prohibition(shape, candidate_for(model_id, policy))
 
 
 def run_assert_allowed(*, model: str, working_dir: str | None = None,
                        policy_path: str | None = None,
-                       sensitive: bool = False) -> int:
+                       plain: bool = False, restated: bool = False) -> int:
     """Pre-flight: may this model serve in this folder's zone?
 
-    Prints the effective posture (`zone: <path> (<regime>)`) and either the model
-    as allowed (exit 0) or a free-use zone block (exit 5). The
+    The dispatch contract fails closed: an unstated shape is **Sensitive**,
+    and the output states the assumption (`shape: sensitive (assumed)`) — a
+    route that retains training data is refused by default, never allowed
+    because nobody said otherwise. A caller that knows the material is not
+    Sensitive must say so explicitly (`--plain`, printed as
+    `shape: plain (via --plain)`); `--sensitive` restates the default and is
+    accepted with the same verdict.
+
+    Prints the effective posture (`zone: <path> (<regime>)`) and either the
+    model as allowed (exit 0) or a free-use zone block (exit 5). The
     zone is named; the shape's content never is. No policy file, classification
     fetch or network is needed, so an orchestrator can refuse to launch a model
     the plan should not have produced before anything is fetched.
@@ -1067,9 +1077,15 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     except SystemExit as exc:
         print(f"pre-flight: policy/config error ({exc.code})", file=sys.stderr)
         return SECRETS_RULES_ERROR
-    print(f"zone: {zone_label(zone, sensitive=sensitive)}")
+    print(f"zone: {zone_label(zone, sensitive=restated)}")
+    if plain:
+        print("shape: plain (via --plain)")
+    elif restated:
+        print("shape: sensitive (via --sensitive)")
+    else:
+        print("shape: sensitive (assumed)")
     model_id = norm_id(model)
-    reason = zone_block(model_id, zone, policy=facts, sensitive=sensitive)
+    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain)
     if reason is not None:
         print("blocked by the free-use zone")
         print(f"model: {model_id}")
@@ -1380,6 +1396,20 @@ def load_policy_config(policy: dict) -> PolicyConfig:
     )
 
 
+def exposure_contradiction(mid: str, value: str) -> str | None:
+    """Why a policy Exposure label contradicts the serving identity, or None.
+
+    Localness is a serving fact, never a catalogue claim: `opencode/*` and
+    `:free` ids are remote serving identities — the route predicate says so
+    whatever a policy entry says — so a `local` label on one is a
+    contradiction the policy stops loudly, naming the entry.
+    """
+    if value == "local" and is_free_route(mid):
+        return (f"exposure 'local' contradicts the remote serving identity "
+                f"'{mid}' (opencode/* and :free routes are remote)")
+    return None
+
+
 def load_free_models(policy: dict) -> dict:
     """Validate the curated Free route catalog at the policy boundary.
 
@@ -1410,6 +1440,9 @@ def load_free_models(policy: dict) -> dict:
             known_exposure(prefix, entry["exposure"])
         except SystemExit as exc:
             raise SystemExit(f"policy {path}.exposure: {exc}") from None
+        if (contradiction := exposure_contradiction(prefix,
+                                                    entry["exposure"])):
+            raise SystemExit(f"policy {path}.exposure: {contradiction}")
         summary_ref = entry.get("summary_ref")
         if summary_ref is not None and (not isinstance(summary_ref, str)
                                         or not summary_ref.strip()):
@@ -1437,6 +1470,8 @@ def load_exposure_overrides(policy: dict) -> dict:
             known_exposure(prefix, value)
         except SystemExit as exc:
             raise SystemExit(f"policy {path}: {exc}") from None
+        if contradiction := exposure_contradiction(prefix, value):
+            raise SystemExit(f"policy {path}: {contradiction}")
     return overrides
 
 
@@ -1720,16 +1755,27 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     The default is the paid route's assumption — the account's data policy
     already holds it. A free route the catalog does not carry is exposed until
     the user says otherwise.
+
+    Localness is a serving fact, never a catalogue claim: a `local` label on a
+    remote serving identity (`opencode/*`, `:free`) is void — the route
+    predicate decides, and it says remote — so the serving facts answer even
+    when a stale policy reached this far without validation.
     """
+    def stated(value) -> str | None:
+        if value == "local" and is_free_route(mid):
+            return None
+        return known_exposure(mid, value)
+
     match = longest_prefix_match(mid, overrides or {})
-    if match is not None:
-        return known_exposure(mid, match[1])
+    if match is not None and (value := stated(match[1])) is not None:
+        return value
     if local:
         return "local"
     match = longest_prefix_match(mid, free_models or {})
     entry = match[1] if match is not None else {}
-    if isinstance(entry, dict) and entry.get("exposure"):
-        return known_exposure(mid, entry["exposure"])
+    if isinstance(entry, dict) and entry.get("exposure") \
+            and (value := stated(entry["exposure"])) is not None:
+        return value
     if is_free_route(mid):
         return "trains"
     return "no-retention"
@@ -2524,10 +2570,20 @@ def main() -> None:
                          "(repeatable; relative paths use --working-dir)")
     ap.add_argument("--assert-allowed", action="store_true",
                     help="pre-flight for an orchestrator: may --model serve in "
-                         "the folder's effective zone? Exit 0 allowed, 5 blocked "
-                         "by the free-use zone, 4 policy/config error. The zone "
-                         "is named, the shape's content never is. No board or "
-                         "classification is fetched; no network is needed.")
+                         "the folder's effective zone? An unstated shape is "
+                         "assumed Sensitive (printed as `shape: sensitive "
+                         "(assumed)`); --plain states the material is not "
+                         "Sensitive, --sensitive restates the default. Exit 0 "
+                         "allowed, 5 blocked by the free-use zone, 4 "
+                         "policy/config error. The zone is named, the shape's "
+                         "content never is. No board or classification is "
+                         "fetched; no network is needed.")
+    ap.add_argument("--plain", action="store_true",
+                    help="with --assert-allowed: state that the shape's "
+                         "material is not Sensitive — the pre-flight assumes "
+                         "Sensitive when no shape is stated, so a route that "
+                         "retains training data is refused by default. "
+                         "Contradicts --sensitive.")
     ap.add_argument("--model", default=None, metavar="ID",
                     help="the model a --assert-allowed or --check-secrets run "
                          "will use (checked against the effective zone)")
@@ -2590,15 +2646,25 @@ def main() -> None:
             raise SystemExit(f"{flag} {tokens} must not be negative")
     fit_map = parse_fit(args.fit) if args.fit else {}
 
+    # --plain states a shape, and only the pre-flight takes one stated: a
+    # flag silently ignored elsewhere would be a rule the user believes in.
+    if args.plain and not args.assert_allowed:
+        ap.error("--plain is read only by --assert-allowed")
+    if args.plain and args.sensitive:
+        ap.error("--plain and --sensitive contradict; state one shape")
+
     if args.assert_allowed:
         # The pre-flight reads the zone and the local policy, never the board:
         # an orchestrator refuses a model the plan should not have produced
-        # before anything is fetched.
+        # before anything is fetched. The dispatch contract fails closed: an
+        # unstated shape is Sensitive, --plain states it is not, and
+        # --sensitive restates the default.
         if not args.model:
             ap.error("--assert-allowed needs --model <id>")
         raise SystemExit(run_assert_allowed(
             model=args.model, working_dir=args.working_dir,
-            policy_path=args.policy, sensitive=args.sensitive))
+            policy_path=args.policy, plain=args.plain,
+            restated=args.sensitive))
     if args.check_secrets:
         # The gate reads the working folder, never the network: no policy and
         # no board are needed to decide whether a shape is Sensitive.

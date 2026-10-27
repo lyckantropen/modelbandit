@@ -206,7 +206,12 @@ area:
 
    Exit **0** means the model may serve there; exit **5** means it is blocked by
    the free-use zone, with effective posture and regime named (never content).
-   The pre-flight reads
+   The dispatch fails closed: with no shape stated the pre-flight assumes the
+   material is Sensitive and says so (`shape: sensitive (assumed)`), so a
+   route that retains training data is refused by default; when you know the
+   material is not Sensitive, say so explicitly with `--plain`
+   (`shape: plain (via --plain)`), and `--sensitive` merely restates the
+   default. The pre-flight reads
    the zones file and, when present, the local policy's Exposure facts: no
    policy file, no classification fetch, no network. Status **4** is a
    policy/config error and **2** a usage error.
@@ -292,6 +297,8 @@ conduct this interview before relying on project-specific rules:
   `max_completion_tokens` (a Free entry's completion cap when no endpoint
   reports one).
   `opencode/*` and local entries need their own window and a resolving summary.
+  A `local` exposure on an `opencode/*` or `:free` entry is a contradiction —
+  those are remote serving identities — and stops the run naming the entry.
   Ranked OpenRouter `:free` routes use their own slug and may resolve a summary
   by longest prefix without a `free_models` entry; their context window comes
   from the OpenRouter model catalog when available. A Free route without a
@@ -367,14 +374,22 @@ conduct this interview before relying on project-specific rules:
   orchestrator: may this model serve in that folder's effective zone? Exit
   **0** yes, **5** blocked by the free-use zone, or **4** policy/config error.
   The output names the effective zone (`zone: <path> (<regime>)`, with
-  `sensitive via --sensitive` when the flag tightens `open`) and then
+  `sensitive via --sensitive` when the flag tightens `open`), states the shape
+  it judged — `shape: sensitive (assumed)` with none stated, because the
+  dispatch fails closed; `shape: plain (via --plain)` when `--plain` states
+  the material is not Sensitive; `shape: sensitive (via --sensitive)` when the
+  default is restated — and then
   `allowed: <id>` or `blocked by the free-use zone` with model and reason; it
   never carries the shape's content. It needs no policy file, no classification
   fetch and no network —
   a missing policy is an empty policy, so a route the file does not describe
   resolves by the defaults (a `:free` or `opencode/*` route exposed, a paid
-  route no-retention, a cataloged `local` entry local). `--sensitive` may
-  tighten the answer, never loosen it. Refuse to launch a model the pre-flight
+  route no-retention, a cataloged `local` entry local). Localness is a serving
+  fact, never a catalogue claim: a `local` label counts only for an id the
+  route predicate does not classify as remote, so a catalogue label cannot
+  make a remote (`opencode/*`, `:free`) route local or skip the Sensitive gate.
+  `--plain` states a shape, never a zone — it cannot open a closed area.
+  Refuse to launch a model the pre-flight
   blocks instead of substituting one.
 
 - **Exit statuses** — **0** safe / allowed; **1** Secrets gate sensitive;
@@ -444,7 +459,9 @@ conduct this interview before relying on project-specific rules:
   stored, collected, or trained on), local (runs on this machine) — a
   property of the serving route, never inferred from price: free does not
   imply trains, paid does not imply no-retention, an unknown free route
-  defaults to trains. On a Sensitive shape the exposed — `trains` — are
+  defaults to trains. Localness is a serving fact, never a catalogue claim: a
+  `local` label counts only for an id the route predicate does not classify as
+  remote. On a Sensitive shape the exposed — `trains` — are
   excluded from the pick and the deal, marked in the table with the reason
   (`exposed (trains)`), never hidden; no-retention free routes and local
   models stay admitted. Exposure, not price, decides — and one admission

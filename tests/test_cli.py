@@ -1054,11 +1054,13 @@ class CliTests(unittest.TestCase):
     # --- pre-flight: --assert-allowed -----------------------------------
 
     def guard(self, model, *, zones=None, zones_default="open", sensitive=False,
-              policy_path=None):
+              plain=False, policy_path=None):
         argv = ["--assert-allowed", "--model", model,
                 "--working-dir", self._tmp.name]
         if sensitive:
             argv.append("--sensitive")
+        if plain:
+            argv.append("--plain")
         return self.run_cli(*argv, zones=zones, zones_default=zones_default,
                             policy_path=policy_path)
 
@@ -1096,17 +1098,52 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 5)
         self.assertIn("exposed (trains)", out)
 
-    def test_assert_allowed_lets_the_flag_tighten_an_open_zone(self):
+    def test_an_unstated_shape_is_sensitive_and_the_output_says_so(self):
+        # The dispatch contract fails closed: an unstated shape means
+        # Sensitive, so a route that retains training data is refused by
+        # default and the output states the shape it assumed.
         self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      zones=self.zone_of("open"))
-        self.assertEqual(code, 0)
-        self.assertIn("allowed", out)
+        self.assertEqual(code, 5)
+        self.assertIn("exposed (trains)", out)
+        self.assertIn("shape: sensitive (assumed)", out)
 
-        out, _, code, _ = self.guard("deepseek/deepseek-v4-pro", sensitive=True,
+    def test_plain_states_the_shape_and_admits_the_trains_route(self):
+        self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
+        out, _, code, _ = self.guard("deepseek/deepseek-v4-pro", plain=True,
+                                     zones=self.zone_of("open"))
+        self.assertEqual(code, 0)
+        self.assertIn("shape: plain (via --plain)", out)
+        self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
+
+    def test_plain_states_a_shape_never_opens_a_zone(self):
+        out, _, code, _ = self.guard("vendor/model:free", plain=True,
+                                     zones=self.zone_of("closed"))
+        self.assertEqual(code, 5)
+        self.assertIn("remote free route is prohibited", out)
+        self.assertIn("shape: plain (via --plain)", out)
+
+    def test_sensitive_restatement_is_accepted_with_the_same_verdict(self):
+        self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
+        out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
+                                     sensitive=True,
                                      zones=self.zone_of("open"))
         self.assertEqual(code, 5)
         self.assertIn("exposed (trains)", out)
+        self.assertIn("shape: sensitive (via --sensitive)", out)
+
+    def test_plain_and_sensitive_contradict_as_a_usage_error(self):
+        _, _, code, calls = self.run_cli("--assert-allowed",
+                                         "--model", "vendor/model",
+                                         "--plain", "--sensitive")
+        self.assertEqual(code, 2)
+        self.assertEqual(calls, [])
+
+    def test_plain_is_read_only_by_the_pre_flight(self):
+        _, _, code, calls = self.run_cli("--plain")
+        self.assertEqual(code, 2)
+        self.assertEqual(calls, [])
 
     def test_assert_allowed_needs_no_policy_file(self):
         absent = os.path.join(self._tmp.name, "absent.json")
@@ -1153,8 +1190,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("zone: undeclared (closed)", out)
 
     def test_assert_allowed_admits_a_local_catalog_entry_in_a_closed_zone(self):
+        # A genuinely served local route is catalogued under a non-remote
+        # prefix; the closed zone does not refuse what never leaves the machine.
         pol = json.loads(json.dumps(POLICY))
-        model = "qwen/qwen3-coder-30b:free"
+        model = "qwen/qwen3-coder-30b"
         pol["free_models"] = {"qwen/qwen3-coder-30b": {
             "context_length": 262_144, "exposure": "local"}}
         with open(self.policy_path, "w") as f:
@@ -1163,6 +1202,22 @@ class CliTests(unittest.TestCase):
                                      zones=self.zone_of("closed"))
         self.assertEqual(code, 0)
         self.assertIn(f"allowed: {model}", out)
+
+    def test_a_remote_free_route_labelled_local_is_refused_by_the_pre_flight(self):
+        # The catalog's label is not a serving fact: a `:free` id labelled
+        # `local` is a remote serving identity, and the pre-flight refuses it
+        # in a closed regime exactly as the plan's source filter does.
+        pol = json.loads(json.dumps(POLICY))
+        model = "qwen/qwen3-coder-30b:free"
+        pol["free_models"] = {"qwen/qwen3-coder-30b": {
+            "context_length": 262_144, "exposure": "local"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, code, _ = self.guard(model,
+                                     zones=self.zone_of("closed"))
+        self.assertEqual(code, 5)
+        self.assertIn("remote free route is prohibited", out)
+        self.assertIn(f"model: {model}", out)
 
     def test_assert_allowed_help_documents_policy_config_status(self):
         out, _, code, _ = self.run_cli("--assert-allowed", "--help")
@@ -1813,6 +1868,20 @@ class PolicyFileTests(CliTests):
         self.assertIn("secrets gate: rules/config error", err)
         self.assertIn("unknown exposure", err)
         self.assertIn("deepseek/", err)
+
+    def test_a_local_label_on_a_remote_prefix_stops_the_guards_with_status_4(self):
+        # Localness is a serving fact, never a catalogue claim: the policy
+        # stops the contradiction loudly, naming the entry, before any run.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"opencode/flash-free": {
+            "context_length": 262_144, "exposure": "local"}}
+        self.write_policy(pol)
+        out, err, code, _ = self.run_gate("--assert-allowed",
+                                          "--model", "opencode/flash-free")
+        self.assertEqual(code, 4)
+        self.assertEqual(out, "")
+        self.assertIn("contradicts the remote serving identity", err)
+        self.assertIn("opencode/flash-free", err)
 
     def test_an_unknown_exposure_in_the_catalog_stops_the_guards_with_status_4(self):
         pol = json.loads(json.dumps(POLICY))

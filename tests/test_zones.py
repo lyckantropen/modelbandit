@@ -495,6 +495,24 @@ class SubmoduleFixtureTests(TempDirMixin):
         self.assertIsNone(bind.zone_block("qwen3-coder-30b", resolved,
                                           policy=local_policy))
 
+    def test_a_local_label_never_overrides_the_remote_predicate(self):
+        # The pre-flight observes no serving, so localness is a serving fact
+        # it cannot grant: a remote Free route labelled `local` is judged
+        # remote whatever a stale policy says — refused in a closed zone, and
+        # refused for a Sensitive shape with the reason naming Exposure.
+        policy = {"free_models": {"qwen/qwen3-coder-30b": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "qwen"}},
+            "summaries": {"qwen": "fixture summary"}}
+        closed = bind.Zone(path="z", regime="closed")
+        self.assertIn("remote free route is prohibited",
+                      bind.zone_block("qwen/qwen3-coder-30b:free", closed,
+                                      policy=policy))
+        sensitive = bind.Zone(path="z", regime="sensitive")
+        self.assertIn("exposed (trains)",
+                      bind.zone_block("qwen/qwen3-coder-30b:free", sensitive,
+                                      policy=policy, sensitive=True))
+
 
 def candidate(mid, *, exposure="no-retention", is_free=False, local=False):
     return bind.Candidate(id=mid, exposure=exposure, is_free=is_free,

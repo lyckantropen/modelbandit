@@ -51,6 +51,28 @@ class FreeCatalogPolicyTests(unittest.TestCase):
                                   "max_completion_tokens": 0,
                                   "exposure": "trains"}}})
 
+    def test_local_exposure_on_a_remote_prefix_fails_loudly(self):
+        # Localness is a serving fact, never a catalogue claim: an
+        # `opencode/*` or `:free` prefix names a remote serving identity, so
+        # a `local` label there is a contradiction the policy stops — loudly,
+        # naming the entry.
+        for prefix in ("opencode/flash", "vendor/model:free"):
+            with self.subTest(prefix=prefix), self.assertRaisesRegex(
+                    SystemExit, f"free_models.{prefix}.exposure"):
+                bind.load_free_models({"free_models": {
+                    prefix: {"context_length": 65_536,
+                             "exposure": "local"}}})
+
+    def test_local_exposure_override_on_a_remote_prefix_fails_loudly(self):
+        with self.assertRaisesRegex(
+                SystemExit, r"exposure\.opencode/flash: exposure 'local'"):
+            bind.load_exposure_overrides(
+                {"exposure": {"opencode/flash": "local"}})
+        with self.assertRaisesRegex(
+                SystemExit, r"exposure\.vendor/model:free: exposure 'local'"):
+            bind.load_exposure_overrides(
+                {"exposure": {"vendor/model:free": "local"}})
+
 
 class FreeCandidateTests(unittest.TestCase):
     def test_cataloged_opencode_route_is_merged_with_catalog_window(self):

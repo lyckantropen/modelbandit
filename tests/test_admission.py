@@ -88,6 +88,41 @@ class ExposureResolutionTests(unittest.TestCase):
         self.assertEqual(bind.resolve_exposure("qwen3-coder-30b", local=True),
                          "local")
 
+    def test_a_local_label_cannot_make_a_remote_identity_local(self):
+        # Localness is a serving fact, never a catalogue claim: the route
+        # predicate says an `opencode/*` or `:free` id is remote, so a policy
+        # label is void there and the free-suffix default answers.
+        label = {"context_length": 65_536, "exposure": "local"}
+        self.assertEqual(
+            bind.resolve_exposure("vendor/model:free",
+                                  free_models={"vendor/model": dict(label)}),
+            "trains")
+        self.assertEqual(
+            bind.resolve_exposure("opencode/flash",
+                                  free_models={"opencode/flash": dict(label)}),
+            "trains")
+        self.assertEqual(
+            bind.resolve_exposure("vendor/model:free",
+                                  overrides={"vendor/model": "local"}),
+            "trains")
+
+    def test_a_remote_free_route_labelled_local_is_refused_for_sensitive(self):
+        # The same admission call the ranking uses: a stale policy's label
+        # must not slip a remote Free route past the Sensitive gate.
+        for mid, prefix in (("qwen/qwen3-coder-30b:free",
+                             "qwen/qwen3-coder-30b"),
+                            ("opencode/qwen3-coder-30b",
+                             "opencode/qwen3-coder-30b")):
+            policy = {"free_models": {prefix: {
+                "context_length": 262_144, "exposure": "local",
+                "summary_ref": "qwen"}},
+                "summaries": {"qwen": "fixture summary"}}
+            with self.subTest(mid=mid):
+                facts = bind.candidate_for(mid, policy)
+                decision = bind.admit(bind.Shape(sensitive=True), facts)
+                self.assertFalse(decision.admitted)
+                self.assertIn("exposed (trains)", decision.reason)
+
     def test_unknown_exposure_value_fails_loudly(self):
         with self.assertRaisesRegex(SystemExit, "z-ai/glm-5.3"):
             bind.resolve_exposure("z-ai/glm-5.3-x",
