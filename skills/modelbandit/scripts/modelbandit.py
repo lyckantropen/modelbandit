@@ -25,6 +25,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -727,6 +728,59 @@ def run_secrets_writer(*, working_dir: str | None = None,
         print(f"gitignore: already lists {RULES_FILE}; left unchanged")
     else:
         print(f"gitignore: unchanged; {RULES_FILE} is meant to be committed")
+    return 0
+
+
+def run_zones_writer(*, payload: str | None = None) -> int:
+    """Validate the interview's zones proposal and write the machine's file.
+
+    The contract mirrors `--write-secrets`'s invocation — JSON on stdin —
+    but not its merge: zones are a whole-file posture, so the submitted
+    config goes through `validate_zones` **before** anything is written.
+    Invalid config refuses with status 4 naming the offending entry and
+    writes nothing: a pre-existing `zones.json` is left byte-identical.
+    A valid config replaces the file atomically (temp file in the same
+    directory, then `os.replace`), so a reader never sees a half-written
+    zones file, and the path written is printed for the user's review.
+    """
+    if payload is None:
+        try:
+            payload = sys.stdin.read()
+        except Exception as exc:
+            print(f"zones writer: rules/config error (cannot read "
+                  f"--write-zones input: {exc})", file=sys.stderr)
+            return SECRETS_RULES_ERROR
+    try:
+        submitted = json.loads(payload)
+    except (TypeError, ValueError):
+        print("zones writer: rules/config error "
+              "(invalid JSON for --write-zones)", file=sys.stderr)
+        return SECRETS_RULES_ERROR
+    try:
+        validated = validate_zones(submitted, source="--write-zones input")
+    except SystemExit as exc:
+        print(f"zones writer: rules/config error ({exc.code})", file=sys.stderr)
+        return SECRETS_RULES_ERROR
+
+    path = zones_path()
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, temp_path = tempfile.mkstemp(dir=directory,
+                                         prefix=ZONES_FILE + ".",
+                                         suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(validated, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(temp_path, path)
+    except BaseException:
+        # Never leave a half-written temp beside (or instead of) the file.
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+    print(f"zones: {path}")
     return 0
 
 
@@ -2714,6 +2768,13 @@ def main() -> None:
     ap.add_argument("--write-secrets", action="store_true",
                     help="write or merge confirmed Secrets gate rules from "
                          "JSON on stdin; apply the commit/gitignore decision")
+    ap.add_argument("--write-zones", action="store_true",
+                    help="write the machine's zones file from JSON on stdin "
+                         "(the Set up the free-use zones interview's "
+                         "proposal): validated before anything is written — "
+                         "an invalid config refuses with status 4 naming the "
+                         "entry and writes nothing; a valid one is written "
+                         "atomically and the path written is printed")
     ap.add_argument("--working-dir", default=None, metavar="PATH",
                     help="working folder (default: cwd). Secrets gate "
                          "commands read modelbandit.secrets.json and "
@@ -2810,6 +2871,12 @@ def main() -> None:
                                            sensitive=args.sensitive))
     if args.write_secrets:
         raise SystemExit(run_secrets_writer(working_dir=args.working_dir))
+    if args.write_zones:
+        # The machine's zones file: the interview's proposal on stdin,
+        # validated before anything is written — status 4 with the offending
+        # entry named writes nothing, a valid config replaces the file
+        # atomically. Needs no policy and no network.
+        raise SystemExit(run_zones_writer())
     if args.model:
         ap.error("--model is read only by --assert-allowed and --check-secrets")
     if args.status:

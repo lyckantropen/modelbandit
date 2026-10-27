@@ -8,11 +8,15 @@ repositories built under a temporary directory, because the origin a
 submodule reports is exactly what the resolver must interpret.
 """
 
+import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
@@ -806,6 +810,118 @@ class RegimeOrderingTests(unittest.TestCase):
                       modelbandit.regime_prohibition(shape("closed"), remote_free))
         self.assertIsNone(modelbandit.regime_prohibition(shape("sensitive"),
                                                   remote_free))
+
+
+class ZonesWriterCliTests(TempDirMixin):
+    """`--write-zones` is the interview's writer: JSON on stdin, validated
+    through `validate_zones` before anything is written. A valid config lands
+    atomically at the machine's zones path with that path printed; an invalid
+    one refuses with status 4 naming the offending entry and writes nothing —
+    a pre-existing file is left byte-identical. Temp XDG, no network."""
+
+    def run_writer(self, payload):
+        out, err, code = io.StringIO(), io.StringIO(), None
+        config_home = os.path.join(self.root, "config")
+        with mock.patch.object(sys, "argv", ["modelbandit", "--write-zones"]), \
+                mock.patch.object(sys, "stdin", io.StringIO(payload)), \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
+                mock.patch("modelbandit.fetch_json",
+                           side_effect=AssertionError("no network in writer")), \
+                redirect_stdout(out), redirect_stderr(err):
+            try:
+                modelbandit.main()
+            except SystemExit as exc:
+                code = exc.code
+        return out.getvalue(), err.getvalue(), code
+
+    @property
+    def zones_path(self):
+        return os.path.join(self.root, "config", "modelbandit", "zones.json")
+
+    def seed_zones(self, payload_text):
+        os.makedirs(os.path.dirname(self.zones_path), exist_ok=True)
+        with open(self.zones_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(payload_text)
+        with open(self.zones_path, "rb") as f:
+            return f.read()
+
+    def test_a_valid_config_is_written_atomically_and_the_path_is_printed(self):
+        payload = json.dumps({"zones": [{"path": "~/work", "free": "open"}],
+                              "default": "closed"})
+
+        out, err, code = self.run_writer(payload)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn(self.zones_path, out)      # the path written is printed
+        # load_zones accepts exactly what was written
+        self.assertEqual(modelbandit.load_zones(self.zones_path),
+                         {"zones": [{"path": "~/work", "free": "open"}],
+                          "default": "closed"})
+        # atomic: the file appears complete and no temp residue is left
+        self.assertEqual(os.listdir(os.path.dirname(self.zones_path)),
+                         ["zones.json"])
+
+    def test_an_invalid_regime_refuses_with_status_4_naming_the_entry(self):
+        payload = json.dumps({"zones": [{"path": "~/work", "free": "opened"}],
+                              "default": "closed"})
+
+        out, err, code = self.run_writer(payload)
+
+        self.assertEqual(code, 4)
+        self.assertIn("zone #1", err)            # the offending entry, named
+        self.assertIn("opened", err)
+        self.assertEqual(out, "")                # nothing reported as written
+        self.assertFalse(os.path.exists(self.zones_path))
+
+    def test_invalid_json_is_a_config_error_and_writes_nothing(self):
+        out, err, code = self.run_writer("{")
+
+        self.assertEqual(code, 4)
+        self.assertIn("invalid JSON", err)
+        self.assertEqual(out, "")
+        self.assertFalse(os.path.exists(self.zones_path))
+
+    def test_a_refusal_leaves_a_pre_existing_file_byte_identical(self):
+        before = self.seed_zones(
+            json.dumps({"zones": [{"path": "~/old", "free": "closed"}],
+                        "default": "closed"}))
+        payload = json.dumps({"zones": [{"path": "~/work", "free": "opened"}]})
+
+        out, err, code = self.run_writer(payload)
+
+        self.assertEqual(code, 4)
+        self.assertIn("zone #1", err)
+        with open(self.zones_path, "rb") as f:
+            self.assertEqual(f.read(), before)   # pinned: not one byte moves
+
+    def test_a_valid_proposal_replaces_an_existing_file(self):
+        self.seed_zones(json.dumps({"zones": [{"path": "~/old",
+                                               "free": "closed"}],
+                                    "default": "closed"}))
+        payload = json.dumps({"zones": [], "default": "open"})
+
+        out, err, code = self.run_writer(payload)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(modelbandit.load_zones(self.zones_path),
+                         {"zones": [], "default": "open"})
+        self.assertIn(self.zones_path, out)
+
+    def test_duplicate_paths_are_refused_on_overwrite_too(self):
+        # Writing over an existing file goes through the same validation:
+        # the duplicate the loader would reject never reaches disk.
+        before = self.seed_zones(json.dumps({"zones": [], "default": "closed"}))
+        payload = json.dumps({"zones": [{"path": "~/same", "free": "closed"},
+                                        {"path": "~/same", "free": "open"}],
+                              "default": "closed"})
+
+        _, err, code = self.run_writer(payload)
+
+        self.assertEqual(code, 4)
+        self.assertIn("duplicate", err)
+        with open(self.zones_path, "rb") as f:
+            self.assertEqual(f.read(), before)
 
 
 if __name__ == "__main__":
