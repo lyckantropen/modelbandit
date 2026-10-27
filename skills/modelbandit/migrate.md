@@ -78,5 +78,9 @@ an old invocation. This file lists the old names on purpose.
        `modelbandit` — the old module does not exist. Skipped → those callers
        fail with file-not-found / ImportError the next time they run.
 
-The rename changed identifiers only: same ranking, same prices, same deal,
-same zones and secrets semantics.
+The rename changed identifiers only: same ranking, same prices, same zones
+and secrets semantics. One behavior exception — **the default deal seed**:
+`--seed` used to default to `bind` and now defaults to `modelbandit`, so an
+unseeded `--deal` draws a different (equally valid) distribution than before
+the rename. To reproduce a pre-rename plan exactly, pass the old seed
+explicitly: `--seed bind`.

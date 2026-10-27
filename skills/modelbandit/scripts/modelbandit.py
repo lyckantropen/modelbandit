@@ -3162,7 +3162,7 @@ def main() -> None:
     ap.add_argument("--deal", action="store_true",
                     help="deal tickets across the eligible pool by seeded draw "
                          "from the preference-blended distribution")
-    ap.add_argument("--seed", default="bind",
+    ap.add_argument("--seed", default="modelbandit",
                     help="deal seed for reproducibility; use the project name")
     ap.add_argument("--fit", default=None, metavar="SPEC",
                     help="agent's task-fit judgments, 'mid=score,...' on 0-5; "
@@ -3256,10 +3256,10 @@ def main() -> None:
         return
     if not args.domain and not args.check_policy and not args.scope \
             and args.anchors is None:
-        raise SystemExit("need --domain (or --list-domains / --check-policy "
-                         "/ --scope / --anchors)")
+        ap.error("need --domain (or --list-domains / --check-policy "
+                 "/ --scope / --anchors)")
     if args.domain and args.domain not in domains:
-        raise SystemExit(
+        ap.error(
             f"no domain '{args.domain}'; known: {', '.join(domains) or 'none'}")
 
     # Where free may run: the machine's zones file, judged for this working

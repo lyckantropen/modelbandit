@@ -1136,12 +1136,16 @@ class CliTests(unittest.TestCase):
             self.assertIn(f"{path}.{key}", err)
 
     def test_missing_domain_exits(self):
-        _, _, code, _ = self.run_cli()
-        self.assertIn("need --domain", code)
+        # Usage error, status 2 - argparse's own channel; a bare string
+        # SystemExit would exit 1 in a shell (the generic-failure code).
+        _, err, code, _ = self.run_cli()
+        self.assertEqual(code, 2)
+        self.assertIn("need --domain", err)
 
     def test_unknown_domain_exits(self):
-        _, _, code, _ = self.run_cli("--domain", "nope")
-        self.assertIn("no domain", code)
+        _, err, code, _ = self.run_cli("--domain", "nope")
+        self.assertEqual(code, 2)
+        self.assertIn("no domain", err)
 
     def test_missing_policy_file_exits(self):
         out, err, code, _ = None, None, None, None
