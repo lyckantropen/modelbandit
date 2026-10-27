@@ -138,10 +138,10 @@ class CliTests(unittest.TestCase):
         return config_home
 
     def run_cli(self, *argv, world=None, local_models=None, key_payload=None,
-                zones=None):
+                zones=None, zones_default="open", policy_path=None):
         world = world if world is not None else build_world()
         local_models = local_models if local_models is not None else {}
-        config_home = self.zones_file(zones)
+        config_home = self.zones_file(zones, default=zones_default)
         calls = []
 
         def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
@@ -165,7 +165,7 @@ class CliTests(unittest.TestCase):
 
         out, err = io.StringIO(), io.StringIO()
         code = None
-        argv = ["bind.py", "--policy", self.policy_path, *argv]
+        argv = ["bind.py", "--policy", policy_path or self.policy_path, *argv]
         with mock.patch("bind.fetch_json", side_effect=fake_fetch), \
                 mock.patch("bind.probe_local_models", return_value=local_models), \
                 mock.patch.object(bind, "CACHE_DIR",
@@ -870,7 +870,7 @@ class CliTests(unittest.TestCase):
     def zone_of(self, free):
         return [{"path": self._tmp.name, "free": free}]
 
-    def test_a_closed_zone_excludes_remote_free_routes_end_to_end(self):
+    def test_a_closed_zone_filters_remote_free_routes_at_source(self):
         self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
         world = self.free_world(("vendor/model:free", 0.5))
 
@@ -884,10 +884,11 @@ class CliTests(unittest.TestCase):
             "--domain", "writing", "--working-dir", self._tmp.name,
             world=world, zones=self.zone_of("closed"))
         self.assertIsNone(code)
-        row = next(ln for ln in closed.splitlines()
-                   if ln.startswith("|") and "vendor/model:free |" in ln)
-        self.assertIn("closed zone", row)                      # visible, reasoned
-        self.assertNotIn("vendor/model:free\n", closed.split("default pick")[1])
+        # Never ranked, never listed: the zone's prohibition removes the
+        # candidate before the table is built, so there is no row to mark.
+        self.assertNotIn("vendor/model:free", closed)
+        self.assertNotIn("| admit |", closed)
+        self.assertIn(f"zone: {self._tmp.name} (closed)", closed)
 
     def test_a_closed_zone_keeps_remote_free_out_of_the_deal(self):
         self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
@@ -945,9 +946,8 @@ class CliTests(unittest.TestCase):
             self._tmp.name, world=world, zones=self.zone_of("closed"))
 
         self.assertIsNone(code)
-        row = next(ln for ln in out.splitlines()
-                   if ln.startswith("|") and "vendor/model:free |" in ln)
-        self.assertIn("closed zone", row)   # still closed, not merely sensitive
+        # Still closed, not merely sensitive: the remote free route is absent.
+        self.assertNotIn("vendor/model:free", out)
         self.assertNotIn("default pick (top of task order): vendor/model:free",
                          out)
 
@@ -971,6 +971,160 @@ class CliTests(unittest.TestCase):
     def pick_of(self, out):
         tail = out.split("default pick", 1)[1]
         return tail.splitlines()[0]
+
+    def test_the_run_header_names_the_zone_and_its_regime(self):
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            zones=self.zone_of("sensitive"))
+        self.assertIsNone(code)
+        self.assertIn(f"zone: {self._tmp.name} (sensitive)", out)
+
+    def test_an_undeclared_folder_reports_undeclared_and_closed(self):
+        out, _, code, _ = self.run_cli("--domain", "writing",
+                                       zones_default="closed")
+        self.assertIsNone(code)
+        self.assertIn("zone: undeclared (closed)", out)
+
+    def test_check_policy_header_names_the_zone(self):
+        out, _, code, _ = self.run_cli(
+            "--check-policy", "--working-dir", self._tmp.name,
+            zones=self.zone_of("closed"))
+        self.assertIsNone(code)
+        self.assertIn(f"zone: {self._tmp.name} (closed)", out)
+
+    def test_a_closed_zone_excludes_an_exposed_paid_route(self):
+        # closed implies sensitive: Exposure is the shape's exclusion and
+        # stays marked in the table, never hidden.
+        self.sensitive_policy({"deepseek/deepseek-v4-pro-0813": "trains"})
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            zones=self.zone_of("closed"))
+        self.assertIsNone(code)
+        self.assertIn("| admit |", out)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and "deepseek/deepseek-v4-pro-0813 |" in ln)
+        self.assertIn("exposed (trains)", row)
+        self.assertNotIn("default pick (top of task order): "
+                         "deepseek/deepseek-v4-pro-0813", out)
+
+    # --- pre-flight: --assert-allowed -----------------------------------
+
+    def guard(self, model, *, zones=None, zones_default="open", sensitive=False,
+              policy_path=None):
+        argv = ["--assert-allowed", "--model", model,
+                "--working-dir", self._tmp.name]
+        if sensitive:
+            argv.append("--sensitive")
+        return self.run_cli(*argv, zones=zones, zones_default=zones_default,
+                            policy_path=policy_path)
+
+    def test_assert_allowed_admits_a_paid_route_in_a_closed_zone(self):
+        out, _, code, calls = self.guard("deepseek/deepseek-v4-pro",
+                                         zones=self.zone_of("closed"))
+        self.assertEqual(code, 0)
+        self.assertIn(f"zone: {self._tmp.name} (closed)", out)
+        self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
+        self.assertEqual(calls, [])          # no board, no classification fetch
+
+    def test_assert_allowed_blocks_a_remote_free_route_in_a_closed_zone(self):
+        for model in ("vendor/model:free", "opencode/glm-5.3-flash"):
+            with self.subTest(model=model):
+                out, _, code, calls = self.guard(model,
+                                                 zones=self.zone_of("closed"))
+                self.assertEqual(code, 5)
+                self.assertIn("blocked", out)
+                self.assertIn("closed zone", out)
+                self.assertIn(self._tmp.name, out)   # the zone is named
+                self.assertEqual(calls, [])
+
+    def test_assert_allowed_blocks_an_exposed_paid_route_in_a_sensitive_zone(self):
+        self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
+        out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
+                                     zones=self.zone_of("sensitive"))
+        self.assertEqual(code, 5)
+        self.assertIn("exposed (trains)", out)
+
+    def test_assert_allowed_blocks_an_exposed_paid_route_in_a_closed_zone(self):
+        self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
+        out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
+                                     zones=self.zone_of("closed"))
+        self.assertEqual(code, 5)
+        self.assertIn("exposed (trains)", out)
+
+    def test_assert_allowed_lets_the_flag_tighten_an_open_zone(self):
+        self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
+        out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
+                                     zones=self.zone_of("open"))
+        self.assertEqual(code, 0)
+        self.assertIn("allowed", out)
+
+        out, _, code, _ = self.guard("deepseek/deepseek-v4-pro", sensitive=True,
+                                     zones=self.zone_of("open"))
+        self.assertEqual(code, 5)
+        self.assertIn("exposed (trains)", out)
+
+    def test_assert_allowed_needs_no_policy_file(self):
+        absent = os.path.join(self._tmp.name, "absent.json")
+        _, _, code, calls = self.guard("vendor/model:free",
+                                       zones=self.zone_of("closed"),
+                                       policy_path=absent)
+        self.assertEqual(code, 5)
+        self.assertEqual(calls, [])
+
+        out, err, code, calls = self.guard("deepseek/deepseek-v4-pro",
+                                           zones=self.zone_of("closed"),
+                                           policy_path=absent)
+        self.assertEqual(code, 0)
+        self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
+        self.assertEqual(err, "")
+        self.assertEqual(calls, [])
+
+    def test_assert_allowed_reports_a_broken_zones_file_as_a_config_error(self):
+        config_home = os.path.join(self._tmp.name, "broken-config")
+        os.makedirs(os.path.join(config_home, "modelrouter"))
+        with open(os.path.join(config_home, "modelrouter", "zones.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"zones": [{"path": self._tmp.name, "free": "opened"}]}, f)
+        out, err, code = io.StringIO(), io.StringIO(), None
+        argv = ["bind.py", "--policy", self.policy_path, "--assert-allowed",
+                "--model", "deepseek/deepseek-v4-pro", "--working-dir",
+                self._tmp.name]
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
+                mock.patch("bind.fetch_json",
+                           side_effect=AssertionError("no network in a guard")), \
+                mock.patch.object(sys, "argv", argv), \
+                redirect_stdout(out), redirect_stderr(err):
+            try:
+                bind.main()
+            except SystemExit as exc:
+                code = exc.code
+        self.assertEqual(code, 4)
+        self.assertIn("opened", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+
+    def test_assert_allowed_treats_an_undeclared_folder_as_closed(self):
+        out, _, code, _ = self.guard("vendor/model:free", zones_default="closed")
+        self.assertEqual(code, 5)
+        self.assertIn("zone: undeclared (closed)", out)
+
+    def test_assert_allowed_admits_a_local_catalog_entry_in_a_closed_zone(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"qwen/qwen3-coder": {
+            "context_length": 262_144, "exposure": "local"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        out, _, code, _ = self.guard("qwen/qwen3-coder-30b",
+                                     zones=self.zone_of("closed"))
+        self.assertEqual(code, 0)
+        self.assertIn("allowed: qwen/qwen3-coder-30b", out)
+
+    def test_assert_allowed_requires_a_model_and_a_mode_to_read_it(self):
+        _, _, code, calls = self.run_cli("--assert-allowed")
+        self.assertEqual(code, 2)
+        self.assertEqual(calls, [])
+        _, _, code, calls = self.run_cli("--model", "vendor/model:free")
+        self.assertEqual(code, 2)
+        self.assertEqual(calls, [])
 
     def test_free_risk_price_is_uniform_across_exposure(self):
         # Same share, different Exposure, same risk-derived price and score.

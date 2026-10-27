@@ -68,6 +68,27 @@ excluded from it. A join of the shape — the fifth shape element, bound per
 invocation (`--sensitive`) — never a mood declared mid-run.
 _Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
 
+**Zone**
+The machine-wide declaration of where free models may run: a path with a
+regime for everything under it, resolved by longest prefix, with anything
+undeclared `closed`. A run's effective zone is the stricter of its working
+folder's and its origin repository's, so a worktree carries the posture of the
+content it holds. Additive-only: a file can open less, never more.
+_Avoid_: allowlist, permission (it is a place, not a grant)
+
+**Regime**
+One of the three zone levels — `open`, `sensitive`, `closed` — ordered, with a
+stricter regime dominating every milder one: `closed` excludes everything
+`sensitive` excludes, plus every remote free route.
+_Avoid_: level, tier (both suggest optional strength rather than order)
+
+**Closed area**
+A path whose effective regime is `closed`: no remote free route may serve it,
+and it is never read, listed, grepped, summarised or copied for any reason.
+Blocked work stops and reports the zone; it never substitutes a paid model or
+reclassifies the shape.
+_Avoid_: private folder (a folder name, not a posture), sensitive area
+
 **Secrets gate**
 The check run at collect-demand: the project's optional secrets file
 (`modelrouter.secrets.json`), falling back to the built-in default — content

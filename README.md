@@ -127,6 +127,15 @@ Summary drift and policy age:
 python3 skills/openrouter-model-router/scripts/bind.py --check-policy
 ```
 
+Pre-flight a model against the machine's free-use zones
+(`$XDG_CONFIG_HOME/modelrouter/zones.json`) before launching it — exit 0 when
+it may serve, 5 when the zone blocks it; no policy file, classification or
+network needed:
+
+```bash
+python3 skills/openrouter-model-router/scripts/bind.py --assert-allowed --model z-ai/glm-5.4:free --working-dir .
+```
+
 Policy: `skills/openrouter-model-router/SKILL.md`.
 
 ## Data

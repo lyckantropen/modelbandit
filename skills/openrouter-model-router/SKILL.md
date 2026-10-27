@@ -33,7 +33,10 @@ to a rung on each candidate's ladder.
    (.env)`, outside-file content, a credential pattern, `phrase #N`,
    `pattern #N`). Exit status is 0 for safe, 1 for sensitive, 2 for usage
    errors, 3 for **not certified** — no material given, never read as safe —
-   or 4 for a rules/config error.
+   4 for a rules/config error, or **5 for blocked by a closed zone**: a named
+   outside source inside a path the zones file declares closed, or a `--model`
+   the effective zone cannot admit. A block is a stop, never a Sensitive
+   verdict — see **Closed-zone protocol** below.
    Content-inclusion, any-of: the shape is **Sensitive** when its material
    carries content drawn from a file outside the working folder, or from a
    gitignored file inside it, or passwords/tokens/keys, or identifiers
@@ -50,9 +53,17 @@ to a rung on each candidate's ladder.
 
 2. **Pull popularity.** Run `scripts/bind.py` (mechanics: `--help`). It reads
    the task-classification leaderboards and the daily token rankings, cached
-   24h, and prices every candidate at live rates.
+   24h, and prices every candidate at live rates. Every run's header states
+   the free-use zone that governed it — `zone: <path> (<regime>)`, or
+   `zone: undeclared (closed)` when no declared path matched — and a closed
+   zone removes every remote Free route before anything else happens: those
+   candidates are never ranked, scored, dealt or listed, and the `zone:` line
+   is the explanation for their absence. Locally served models stay; Exposure,
+   Footprint, quota and catalog exclusions keep their marked, never hidden
+   behaviour.
    Done when: candidates are ranked by their share of the domain's traffic,
-    prices and data timestamp shown. Cataloged OpenCode `opencode/*` models
+    prices and data timestamp shown. Cataloged
+    OpenCode `opencode/*` models
     also appear; OpenRouter `:free` routes retain their own slug. The script
     silently probes LM Studio at `127.0.0.1:1234` each run; currently served
     local ids matched by `free_models` join that run's candidate set with the
@@ -150,6 +161,68 @@ to a rung on each candidate's ladder.
    user edits fit and evidence.
    Done when: a due policy has been surfaced to the user with an offer to
    update — never silently ignored.
+
+## Closed-zone protocol
+
+The machine-wide `zones.json` decides where free models may run: a path
+declares `open`, `sensitive` or `closed` for everything under it, the three
+order `open` < `sensitive` < `closed`, and anything undeclared is `closed`. The
+regime a run works under is the **stricter** of its working folder's zone and
+the zone of the repository the folder came from (the parent of
+`git rev-parse --git-common-dir`), so `closed` implies `sensitive` and every
+stricter regime dominates the milder ones in every dimension.
+
+A **closed area** is a path whose effective regime is `closed`. In a closed
+area:
+
+1. **Never read, list, grep, summarise or copy anything for any reason.**
+   Not to answer a question, not to check whether something is there, not
+   "just the headings". A closed zone is closed to free *and* to your own
+   reading — the free-route exclusion in the ranking is one consequence, not
+   the rule.
+2. **When a task cannot be completed without it, stop.** Say which zone blocks
+   it (`zone: <path> (closed)`) and why the content is unavoidable, and wait
+   for the user to open the zone or move the task.
+3. **Never route around the block.** Do not substitute a paid model for a
+   closed zone — a closed zone is closed because of where the content is, not
+   because of what the route costs. Do not reclassify the shape (`--sensitive`
+   cannot loosen a zone, and asking is not a substitute for opening it), do not
+   copy the material elsewhere to get it out, and do not treat a Sensitive
+   verdict as permission.
+4. **Check before launching.** The ranking's header names the zone; when an
+   orchestrator holds a model id — from a plan, a previous run, another
+   agent — run the pre-flight below before launching it:
+
+   ```bash
+   scripts/bind.py --assert-allowed --model <id> --working-dir <folder>
+   ```
+
+   Exit **0** means the model may serve there; exit **5** means the zone blocks
+   it, and the output names the zone (never any content). The pre-flight reads
+   the zones file and, when present, the local policy's Exposure facts: no
+   policy file, no classification fetch, no network. Status **4** is a
+   policy/config error and **2** a usage error.
+
+Exposure exclusions stay visible: in a `sensitive` or `closed` zone the table
+marks an exposed (`trains`) route with its reason and never picks or deals it,
+because that is the shape's decision, not the zone's prohibition.
+
+### Worktrees
+
+Worktrees are created by the harness, outside their repository. An **undeclared
+worktree root stays closed**: undeclared is closed and the stricter of the two
+zones wins, so a worktree living under an undeclared path is closed no matter
+how open its repository is. To let the origin repository's zone decide —
+package work should be judged by the content it holds — declare the directory
+the worktrees live in `open`:
+
+```json
+{"zones": [{"path": "~/.opencode/worktrees", "free": "open"}], "default": "closed"}
+```
+
+The effective regime is then the origin repository's (`closed` for a private
+repository, `open` or `sensitive` for one declared so), never the bare
+worktree path.
 
 ## Set up the secrets file
 
@@ -261,6 +334,46 @@ conduct this interview before relying on project-specific rules:
   pool unchanged; so does a payload that carries no counter, silently. No
   network failure blocks a run.
 
+- **Free-use zones** — `zones.json` at the machine's config root
+  (`$XDG_CONFIG_HOME/modelrouter/zones.json`, else
+  `~/.config/modelrouter/zones.json`): `{"zones": [{"path": ..., "free":
+  "open" | "sensitive" | "closed"}], "default": "closed"}`. `~` and
+  environment variables expand, paths compare the way the platform does, and
+  the longest covering prefix wins; anything undeclared takes `default`. A
+  missing file means the default everywhere. Validation is loud — an unknown
+  key, a non-list `zones`, a non-string path or an unknown regime stops the
+  run naming the entry index — and the built-in default is additive-only, so
+  no file can open what the machine closed. The regime a run works under is
+  the stricter of the working folder's zone and the origin repository's
+  (`git rev-parse --git-common-dir`, its parent); git missing or failing
+  leaves the working folder's zone alone. `open` and `sensitive` are today's
+  behaviour. A `closed` zone removes every remote Free route (`:free`,
+  `opencode/*`) at source — never ranked, scored, dealt or listed — and admits
+  locally served models, which never leave the machine; a paid no-retention
+  route still serves. Exposure exclusions are the shape's, not the zone's, so
+  they mark and never hide, and because `closed` implies `sensitive` an
+  exposed *paid* route is excluded there exactly as under `sensitive`.
+
+- **Pre-flight (`--assert-allowed`)** — `scripts/bind.py --assert-allowed
+  --model <id> --working-dir <folder>` answers one question for an
+  orchestrator: may this model serve in that folder's effective zone? Exit
+  **0** yes, **5** no — the model is prohibited by the regime (a remote free
+  route in a closed zone; an exposed route in a `sensitive` or `closed` one).
+  The output names the zone (`zone: <path> (<regime>)`, then
+  `allowed: <id>` or `blocked: <id> — <reason>`); it never carries the shape's
+  content. It needs no policy file, no classification fetch and no network —
+  a missing policy is an empty policy, so a route the file does not describe
+  resolves by the defaults (a `:free` or `opencode/*` route exposed, a paid
+  route no-retention, a cataloged `local` entry local). `--sensitive` may
+  tighten the answer, never loosen it. Refuse to launch a model the pre-flight
+  blocks instead of substituting one.
+
+- **Exit statuses** — **0** safe / allowed; **1** Secrets gate sensitive;
+  **2** usage error (argparse), and an over-budget run; **3** Secrets gate not
+  certified; **4** rules/config error (secrets rules, zones file or policy);
+  **5** blocked by the free-use zone (`--check-secrets`, `--assert-allowed`).
+  A block is never reported as sensitive, safe or over budget.
+
 - **Hints** — user observations in `policy.json`, structured: a `note` (shown
   beside the ranking), `fit` (favor/avoid/neutral, per domain), and `evidence`
   (validated/suspected). Weighed, not obeyed — a hint may contradict the crowd
@@ -289,10 +402,17 @@ conduct this interview before relying on project-specific rules:
   run as `scripts/bind.py --check-secrets [--working-dir PATH]` with the
   material on stdin and repeatable `--outside-file PATH` arguments for named
   outside content. It needs no policy and no network; the material is the
-  agent's to supply (the tool never reads it for you). The verdict names the
-  rule that tripped it and sets the exit status: **0** safe, **1** sensitive,
-  **2** usage error, **3** not certified — no material given, never "safe" —
-  **4** rules/config error. The tool assembles
+  agent's to supply (the tool never reads it for you). It prints the zone it
+  judged by (`zone: <path> (<regime>)`) and names the rule that tripped it.
+  Exit status (**0** safe, **1** sensitive, **2** usage error, **3** not
+  certified — no material given, never "safe" — **4** rules/config error,
+  **5** blocked by a closed zone; see **Exit statuses**). Status 5 answers
+  before the content does and names the zone, never the material: a named
+  `--outside-file` whose folder the zones file declares closed (resolved the
+  way a run resolves its working folder, origin included), or a `--model` the
+  effective zone cannot admit. An undeclared source is not a declared closed
+  path, so it keeps the content verdict — a block is about a path the user
+  closed, and only a declared one can be named. The tool assembles
   everything mechanical: the project's `modelrouter.secrets.json` at the
   working-folder root (the git root when in a repository, else the folder),
   this machine's identifiers (hostname, login, home path, non-loopback local
@@ -322,7 +442,11 @@ conduct this interview before relying on project-specific rules:
   (`exposed (trains)`), never hidden; no-retention free routes and local
   models stay admitted. Exposure, not price, decides — and one admission
   verdict serves both the table and the deal, so the two never disagree
-  about what may serve a shape.
+  about what may serve a shape. A `sensitive` zone is the `--sensitive` flag
+  by another name, and a `closed` zone is at least that strict: it refuses
+  every exposed route a sensitive zone refuses — including an exposed *paid*
+  route — on top of every remote free one. The flag can only tighten a zone;
+  it can never loosen one.
 
 - **Footprint & Difficulty** — two words for two different questions, never
   one word for both. Footprint is a Ticket shape's measured demand on a

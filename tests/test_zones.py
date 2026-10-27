@@ -303,8 +303,8 @@ def shape(regime, *, sensitive=False):
 
 
 class ClosedZoneGateTests(unittest.TestCase):
-    """closed: no remote free route at all; locally served models stay; paid
-    routes are untouched. open and sensitive behave exactly as today."""
+    """closed: no remote free route at all, and everything sensitive refuses —
+    locally served models stay. open and sensitive behave exactly as today."""
 
     def test_closed_excludes_an_openrouter_free_route(self):
         decision = bind.admit(shape("closed"),
@@ -324,12 +324,17 @@ class ClosedZoneGateTests(unittest.TestCase):
                                         is_free=True, local=True))
         self.assertTrue(decision.admitted)
 
-    def test_closed_never_touches_a_paid_route(self):
-        for exposure in ("no-retention", "trains"):
-            with self.subTest(exposure=exposure):
-                paid = candidate("deepseek/deepseek-v4-pro", exposure=exposure)
-                self.assertEqual(bind.admit(shape("closed"), paid),
-                                 bind.admit(shape("open"), paid))
+    def test_closed_admits_a_paid_no_retention_route(self):
+        self.assertTrue(bind.admit(
+            shape("closed"),
+            candidate("deepseek/deepseek-v4-pro", exposure="no-retention")).admitted)
+
+    def test_closed_excludes_an_exposed_paid_route(self):
+        # closed implies sensitive: the exposed route a sensitive zone refuses
+        # is refused here too, whatever it costs.
+        paid_trains = candidate("deepseek/deepseek-v4-pro", exposure="trains")
+        self.assertFalse(bind.admit(shape("sensitive"), paid_trains).admitted)
+        self.assertFalse(bind.admit(shape("closed"), paid_trains).admitted)
 
     def test_open_is_todays_behaviour(self):
         self.assertTrue(bind.admit(
@@ -388,12 +393,66 @@ class ClosedZoneGateTests(unittest.TestCase):
     def test_the_gate_is_on_the_admission_path(self):
         self.assertIn(bind.zone_gate, bind.GATES)
 
-    def test_a_closed_shape_still_admits_free_above_its_only_gate(self):
-        # A gate list without the zone gate is today's behaviour: the seam is
-        # a list, so a caller can see exactly what excludes what.
+
+class RegimeOrderingTests(unittest.TestCase):
+    """open < sensitive < closed, honestly: a stricter regime forbids
+    everything every milder one forbids, in every dimension."""
+
+    MATRIX = (
+        candidate("z-ai/glm-5.4:free", exposure="trains", is_free=True),
+        candidate("opencode/x-free", exposure="no-retention", is_free=True),
+        candidate("qwen3-coder-30b", exposure="local", is_free=True, local=True),
+        candidate("deepseek/x", exposure="no-retention"),
+        candidate("deepseek/x", exposure="trains"),
+    )
+
+    def test_regime_at_least_orders_the_three_levels(self):
+        self.assertTrue(bind.regime_at_least("sensitive", "open"))
+        self.assertTrue(bind.regime_at_least("closed", "sensitive"))
+        self.assertTrue(bind.regime_at_least("closed", "open"))
+        self.assertFalse(bind.regime_at_least("open", "sensitive"))
+        self.assertFalse(bind.regime_at_least("sensitive", "closed"))
+
+    def test_regime_at_least_rejects_an_unknown_regime(self):
+        with self.assertRaisesRegex(SystemExit, "shut"):
+            bind.regime_at_least("shut", "open")
+
+    def test_a_stricter_regime_dominates_every_milder_one(self):
+        for candidate_ in self.MATRIX:
+            with self.subTest(candidate=candidate_):
+                admitted = [bind.admit(shape(regime), candidate_).admitted
+                            for regime in bind.REGIMES]
+                self.assertLessEqual(int(admitted[2]), int(admitted[1]))
+                self.assertLessEqual(int(admitted[1]), int(admitted[0]))
+
+    def test_the_zone_prohibition_is_the_zone_clause_alone(self):
+        # The source filter drops what the zone forbids; Exposure exclusions
+        # stay in the table, marked with their reason.
         self.assertIn("closed zone",
-                      bind.zone_gate(shape("closed"),
-                                     candidate("a/b:free", is_free=True)).reason)
+                      bind.zone_prohibition(
+                          shape("closed"),
+                          candidate("a/b:free", is_free=True)))
+        self.assertIsNone(bind.zone_prohibition(
+            shape("closed"), candidate("a/b", exposure="trains")))
+        for regime in ("open", "sensitive"):
+            with self.subTest(regime=regime):
+                self.assertIsNone(bind.zone_prohibition(
+                    shape(regime), candidate("a/b:free", is_free=True)))
+
+    def test_the_regime_prohibition_is_the_pre_flight_yardstick(self):
+        # What the guard refuses: the zone's free clause and the Exposure
+        # clause a regime at least as strict as sensitive states.
+        exposed_paid = candidate("deepseek/x", exposure="trains")
+        remote_free = candidate("a/b:free", is_free=True)
+        self.assertIsNone(bind.regime_prohibition(shape("open"), exposed_paid))
+        self.assertIn("exposed",
+                      bind.regime_prohibition(shape("sensitive"), exposed_paid))
+        self.assertIn("exposed",
+                      bind.regime_prohibition(shape("closed"), exposed_paid))
+        self.assertIn("closed zone",
+                      bind.regime_prohibition(shape("closed"), remote_free))
+        self.assertIsNone(bind.regime_prohibition(shape("sensitive"),
+                                                  remote_free))
 
 
 if __name__ == "__main__":

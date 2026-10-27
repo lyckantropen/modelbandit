@@ -438,6 +438,138 @@ class SecretsCliTests(TempDirMixin):
         self.assertIn("secrets gate: safe", out)
 
 
+class ZoneBlockedCheckTests(TempDirMixin):
+    """The check's free-use zone status: 5 when material provenance lies in a
+    path the zones file declares closed, or when the model the shape will use
+    is one the effective zone cannot admit. Statuses 0/1/3/4 keep their
+    meanings, and the material is never echoed."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = os.path.join(self.root, "config")
+        self.work = os.path.join(self.root, "work")
+        self.closed = os.path.join(self.root, "closed-vault")
+        os.makedirs(self.work)
+        os.makedirs(self.closed)
+        self.write_zones({"zones": [{"path": self.work, "free": "open"},
+                                    {"path": self.closed, "free": "closed"}],
+                          "default": "closed"})
+
+    def write_zones(self, payload):
+        os.makedirs(os.path.join(self.config, "modelrouter"), exist_ok=True)
+        with open(os.path.join(self.config, "modelrouter", "zones.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(payload, f)
+
+    def run_check(self, *argv, stdin=""):
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        with mock.patch.object(sys, "argv", ["bind.py", "--check-secrets",
+                                             *argv]), \
+                mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
+                mock.patch("bind.machine_facts",
+                           return_value={"identifiers": []}), \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.config}), \
+                mock.patch("bind.fetch_json",
+                           side_effect=AssertionError("no network in a gate")), \
+                redirect_stdout(out), redirect_stderr(err):
+            try:
+                bind.main()
+            except SystemExit as exc:
+                code = exc.code
+        return out.getvalue(), err.getvalue(), code
+
+    def source(self, folder, line):
+        path = os.path.join(folder, "notes.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(line + "\n")
+        return path
+
+    def test_provenance_inside_a_declared_closed_zone_blocks(self):
+        line = "ORDINARY_PRIVATE_LINE_7f2a"
+        path = self.source(self.closed, line)
+
+        out, err, code = self.run_check("--working-dir", self.work,
+                                        "--outside-file", path,
+                                        stdin="Summarize it.")
+
+        self.assertEqual(code, 5)
+        self.assertIn("secrets gate: blocked by a closed zone", out)
+        self.assertIn(self.closed, out)          # the zone is named
+        self.assertNotIn(line, out + err)        # the content never is
+        self.assertNotIn("outside-file content", out)
+
+    def test_a_broken_zones_file_is_a_config_error(self):
+        self.write_zones({"zones": [{"path": self.work, "free": "opened"}]})
+
+        out, err, code = self.run_check("--working-dir", self.work,
+                                        stdin="Summarize it.")
+
+        self.assertEqual(code, 4)
+        self.assertIn("rules/config error", err)
+        self.assertIn("opened", err)
+
+    def test_the_check_states_the_zone_it_judged_by(self):
+        out, _, code = self.run_check("--working-dir", self.work,
+                                      stdin="Summarize the public API.")
+        self.assertEqual(code, 0)
+        self.assertIn(f"zone: {self.work} (open)", out)
+
+    def test_a_source_in_an_open_zone_keeps_the_content_verdict(self):
+        line = "OPEN_ZONE_TENANT_7291"
+        path = self.source(self.work, line)
+
+        out, _, code = self.run_check("--working-dir", self.work,
+                                      "--outside-file", path,
+                                      stdin=f"Use {line} in deployment.")
+
+        self.assertEqual(code, 1)
+        self.assertIn("rule: outside-file content", out)
+
+    def test_an_undeclared_source_is_still_judged_by_content(self):
+        # Only a declared closed path blocks; nothing declared means the
+        # content verdict stands, so 0 and 1 keep their meanings.
+        other = os.path.join(self.root, "undeclared")
+        os.makedirs(other)
+        path = self.source(other, "UNDECLARED_ZONE_LINE_5c0d")
+
+        out, _, code = self.run_check("--working-dir", self.work,
+                                      "--outside-file", path,
+                                      stdin="Summarize it.")
+        self.assertEqual(code, 0)
+        self.assertIn("secrets gate: safe", out)
+
+    def test_sensitive_material_in_a_closed_folder_still_exits_one(self):
+        out, _, code = self.run_check("--working-dir", self.closed,
+                                      stdin="api_key: sk-1234567890abcdef")
+        self.assertEqual(code, 1)
+        self.assertIn("secrets gate: sensitive", out)
+
+    def test_the_model_the_shape_will_use_is_checked_against_the_zone(self):
+        out, _, code = self.run_check("--working-dir", self.closed,
+                                      "--model", "z-ai/glm-5.4:free",
+                                      stdin="Summarize the public API.")
+        self.assertEqual(code, 5)
+        self.assertIn(f"secrets gate: blocked by a closed zone "
+                      f"({self.closed} (closed))", out)
+        self.assertIn("closed zone (no remote free route)", out)
+
+    def test_a_paid_model_in_a_closed_zone_is_not_blocked(self):
+        out, _, code = self.run_check("--working-dir", self.closed,
+                                      "--model", "deepseek/deepseek-v4-pro",
+                                      stdin="Summarize the public API.")
+        self.assertEqual(code, 0)
+        self.assertIn("secrets gate: safe", out)
+
+    def test_a_blocked_shape_is_not_certified_either(self):
+        # The zone answers before the content does: an empty shape in a
+        # closed folder with a free route is blocked (5), not uncertified (3).
+        _, _, code = self.run_check("--working-dir", self.closed,
+                                    "--model", "opencode/glm-5.3-flash",
+                                    stdin="")
+        self.assertEqual(code, 5)
+
+
 class SecretsWriterCliTests(TempDirMixin):
     """`--write-secrets` merges confirmed rules without removing prior rules."""
 

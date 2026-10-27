@@ -544,17 +544,50 @@ def secrets_check(material: str, *, root: str | None = None,
 SECRETS_SAFE, SECRETS_SENSITIVE, SECRETS_NOT_CERTIFIED = 0, 1, 3
 # Exit status 2 belongs to argparse's usage errors; rules/config errors use 4.
 SECRETS_RULES_ERROR = 4
+# The free-use zone's own refusal: a distinct status, so work blocked by a
+# closed zone is never mistaken for merely sensitive (1) or safe (0). Shared
+# by --check-secrets and the --assert-allowed pre-flight.
+ZONE_BLOCKED = 5
+SECRETS_ZONE_BLOCKED = ZONE_BLOCKED
+
+
+def closed_provenance(sources, zones: dict, *, environ=None,
+                      run=None) -> Zone | None:
+    """The first named source whose folder the zones file declares closed.
+
+    Provenance is the caller's own list of where the material came from
+    (`--outside-file`), and it resolves the way a run resolves its working
+    folder: the stricter of the source's folder and the repository it came
+    from, so a source in a worktree carries the posture of the content it
+    holds. Only a path the zones file *declares* closed blocks; an undeclared
+    area keeps the content verdict, so statuses 0 and 1 keep their meanings.
+    """
+    for source in sources:
+        folder = source if os.path.isdir(source) else os.path.dirname(source)
+        zone = effective_zone(folder or os.curdir, zones=zones, run=run,
+                              environ=environ)
+        if zone.path is not None and zone.regime == "closed":
+            return zone
+    return None
 
 
 def run_secrets_check(*, working_dir: str | None = None,
                       material: str | None = None,
-                      outside_files=()) -> int:
+                      outside_files=(), model: str | None = None,
+                      policy_path: str | None = None,
+                      sensitive: bool = False) -> int:
     """Print the Secrets gate's verdict for one shape's material.
 
-    Material is read from stdin; the verdict, the rule that tripped and the
-    rules file in force are printed. Exit status distinguishes them: 0 safe,
-    1 sensitive, 2 usage error, 3 not certified, 4 rules/config error. A shape
-    with no material given cannot be certified — silence is never read as safe.
+    Material is read from stdin; the zone the check judged by, the verdict,
+    the rule that tripped and the rules file in force are printed. Exit status
+    distinguishes them: 0 safe, 1 sensitive, 2 usage error, 3 not certified,
+    4 rules/config error, 5 blocked by a closed zone. A shape with no material
+    given cannot be certified — silence is never read as safe.
+
+    Status 5 is the zone's own answer, ahead of the content verdict: material
+    whose provenance lies in a path the zones file declares closed, or a
+    `--model` the effective zone's regime cannot admit. The zone is named;
+    the material never is.
     """
     if material is None:
         try:
@@ -569,9 +602,30 @@ def run_secrets_check(*, working_dir: str | None = None,
     rules_path = os.path.join(root, RULES_FILE)
     try:
         rules = load_secrets_rules(rules_path)
+        zones = load_zones()
     except SystemExit as exc:
         print(f"secrets gate: rules/config error ({exc.code})", file=sys.stderr)
         return SECRETS_RULES_ERROR
+    zone = effective_zone(path_base, zones=zones)
+    print(f"zone: {zone_label(zone)}")
+    blocked, reason = None, None
+    if outside_paths:
+        blocked = closed_provenance(outside_paths, zones)
+        if blocked is not None:
+            reason = "material provenance inside a closed zone"
+    if reason is None and model:
+        try:
+            facts = policy_facts(policy_path)
+        except SystemExit as exc:
+            print(f"secrets gate: rules/config error ({exc.code})",
+                  file=sys.stderr)
+            return SECRETS_RULES_ERROR
+        reason = zone_block(model, zone, policy=facts, sensitive=sensitive)
+        blocked = zone
+    if reason is not None:
+        print(f"secrets gate: blocked by a closed zone ({zone_label(blocked)})")
+        print(f"reason: {reason}")
+        return SECRETS_ZONE_BLOCKED
     if not isinstance(material, str) or not material.strip():
         print("secrets gate: not certified (no material given)")
         return SECRETS_NOT_CERTIFIED
@@ -702,6 +756,12 @@ class Zone:
         return "undeclared" if self.path is None else self.path
 
 
+def zone_label(zone: Zone) -> str:
+    """The run header's statement: `<path> (<regime>)`, or
+    `undeclared (closed)` when no declared path matched."""
+    return f"{zone.label()} ({zone.regime})"
+
+
 def zones_path(*, environ=None) -> str:
     """`zones.json` under the machine's config root ($XDG_CONFIG_HOME or
     ~/.config), honouring the environment it is given."""
@@ -789,6 +849,17 @@ def stricter(left: str, right: str) -> str:
     return max(both, key=REGIMES.index)
 
 
+def regime_at_least(regime: str, floor: str) -> bool:
+    """Whether `regime` is at least as strict as `floor`.
+
+    The dimension a gate asks about: a gate that excludes under `sensitive`
+    excludes under `closed` too, because a stricter regime dominates every
+    milder one — `closed` implies `sensitive`, never the other way round.
+    """
+    return (REGIMES.index(known_regime(regime, where="regime"))
+            >= REGIMES.index(known_regime(floor, where="floor")))
+
+
 def _covers(zone_path: str, folder: str) -> bool:
     """Whether a normalised zone path covers a normalised folder path."""
     return (folder == zone_path
@@ -860,6 +931,72 @@ def shape_regime(zone: Zone, *, sensitive: bool) -> str:
     A flag may only tighten: `--sensitive` in a closed zone leaves it closed.
     """
     return stricter(zone.regime, "sensitive" if sensitive else "open")
+
+
+def policy_facts(path: str | None) -> dict:
+    """The policy's Exposure facts when the file exists, else none.
+
+    The pre-flight and the secrets check read the local policy for its
+    `exposure` overrides and `free_models` catalog when it is there, and work
+    without it: a missing file is not an error, so the defaults answer (a
+    ':free' or 'opencode/*' route exposed, a paid route no-retention). No
+    board, no classification fetch, no network.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            policy = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"cannot read policy file {path}: {exc}") from None
+    if not isinstance(policy, dict):
+        raise SystemExit(f"policy file {path} must be a JSON object")
+    policy["free_models"] = load_free_models(policy)
+    return policy
+
+
+def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
+               sensitive: bool = False) -> str | None:
+    """The effective zone's reason this model may not serve here, or None.
+
+    The whole pre-flight rule: the shape's regime is the zone's, tightened by
+    `--sensitive` and never loosened, and the candidate facts are the policy's
+    Exposure facts alone (an empty policy keeps the safe defaults). Blocked
+    means a prohibition the regime states outright — a remote free route in a
+    closed zone, an exposed route at a sensitive regime or stricter — never a
+    Footprint, catalog or quota exclusion.
+    """
+    shape = Shape(sensitive=sensitive,
+                  regime=shape_regime(zone, sensitive=sensitive))
+    return regime_prohibition(shape, candidate_for(norm_id(model_id),
+                                                    policy or {}))
+
+
+def run_assert_allowed(*, model: str, working_dir: str | None = None,
+                       policy_path: str | None = None,
+                       sensitive: bool = False) -> int:
+    """Pre-flight: may this model serve in this folder's zone?
+
+    Prints the zone it asked (`zone: <path> (<regime>)`) and either the model
+    as allowed (exit 0) or the regime's reason for blocking it (exit 5). The
+    zone is named; the shape's content never is. No policy file, classification
+    fetch or network is needed, so an orchestrator can refuse to launch a model
+    the plan should not have produced before anything is fetched.
+    """
+    try:
+        zone = effective_zone(working_dir)
+        facts = policy_facts(policy_path)
+    except SystemExit as exc:
+        print(f"pre-flight: policy/config error ({exc.code})", file=sys.stderr)
+        return SECRETS_RULES_ERROR
+    print(f"zone: {zone_label(zone)}")
+    model_id = norm_id(model)
+    reason = zone_block(model_id, zone, policy=facts, sensitive=sensitive)
+    if reason is not None:
+        print(f"blocked: {model_id} — {reason}")
+        return ZONE_BLOCKED
+    print(f"allowed: {model_id}")
+    return 0
 
 
 def resolve_model(models: dict, by_canon: dict, permaslug: str):
@@ -1562,19 +1699,26 @@ class Decision:
 ADMITTED = Decision(True)
 
 
-def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """The Exposure<->Sensitive gate: exposed candidates never serve a
-    Sensitive shape, whether free or paid. No-retention and local candidates
-    are admitted — Exposure, not price, decides Eligibility.
+def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
+    """The Exposure clause: why an exposed candidate may not serve, or None.
 
-    A `sensitive` zone is the flag by another name: the posture is the same
-    wherever it comes from. A `closed` zone states a rule about free routes
-    only (see zone_gate) and adds nothing here.
+    Exposed — `trains` — candidates never serve a Sensitive shape, whether
+    free or paid; no-retention and local candidates stay — Exposure, not
+    price, decides. A `sensitive` zone is the flag by another name, and a
+    `closed` zone is at least that strict (see regime_at_least), so it refuses
+    the same exposed routes on top of every remote free one.
     """
-    if (shape.sensitive or shape.regime == "sensitive") \
-            and candidate.exposure == "trains":
-        return Decision(False, f"exposed ({candidate.exposure})")
-    return ADMITTED
+    if candidate.exposure != "trains":
+        return None
+    if not (shape.sensitive or regime_at_least(shape.regime, "sensitive")):
+        return None
+    return f"exposed ({candidate.exposure})"
+
+
+def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """The Exposure<->Sensitive gate; see `exposed_prohibition`."""
+    reason = exposed_prohibition(shape, candidate)
+    return Decision(reason is None, reason or "")
 
 
 def context_gate(shape: Shape, candidate: Candidate) -> Decision:
@@ -1612,18 +1756,46 @@ def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
     return ADMITTED
 
 
-def zone_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """The free-use zone: a closed zone admits no remote free route.
+def zone_prohibition(shape: Shape, candidate: Candidate) -> str | None:
+    """Why the free-use zone forbids this candidate outright, or None.
 
-    Free is a serving fact, so a `:free` or `opencode/*` route is remote and
-    out, while a model this machine serves never leaves it and stays in. Paid
-    routes are untouched: the zone says where free may run, not what may run.
-    `open` and `sensitive` exclude nothing here — exposure and the quota
-    already answer for them.
+    Free is a serving fact, so a `:free` or `opencode/*` route is remote and a
+    closed zone refuses it, while a model this machine serves never leaves it
+    and stays in. `open` and `sensitive` forbid nothing here — Exposure and the
+    quota answer for them.
+
+    This is the source filter: a candidate it names never enters the candidate
+    set, so it is not ranked, scored, dealt or listed. The header states the
+    zone that made it absent (`zone: <path> (<regime>)`), which is how the
+    absence is explained without a row and without a reason column.
     """
-    if shape.regime == "closed" and candidate.is_free and not candidate.local:
-        return Decision(False, "closed zone (no remote free route)")
-    return ADMITTED
+    if (candidate.is_free and not candidate.local
+            and regime_at_least(shape.regime, "closed")):
+        return "closed zone (no remote free route)"
+    return None
+
+
+def zone_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """The zone clause behind the one decision; see `zone_prohibition`.
+
+    Admission refuses too, though the source filter should never let such a
+    candidate reach it: one verdict, whichever path asks.
+    """
+    reason = zone_prohibition(shape, candidate)
+    return Decision(reason is None, reason or "")
+
+
+def regime_prohibition(shape: Shape, candidate: Candidate) -> str | None:
+    """What the shape's regime forbids outright, or None.
+
+    The pre-flight's yardstick, and the only two clauses a zone states: no
+    remote free route in a closed zone, no exposed route at a regime at least
+    as strict as `sensitive`. Everything else — Footprint, quota, an
+    uncataloged Free route — is a shape-level exclusion the table marks, so it
+    is not a zone block.
+    """
+    return zone_prohibition(shape, candidate) \
+        or exposed_prohibition(shape, candidate)
 
 
 # The gates, in order, behind the one decision. The zone comes first: a route a
@@ -1977,7 +2149,13 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
                      intent: str, basis: str, config: PolicyConfig,
-                     local_ids=(), regime: str = "open") -> None:
+                     local_ids=(), regime: str = "open",
+                     zone: Zone | None = None) -> None:
+    zone = zone if zone is not None else Zone(path=None, regime=regime)
+    # The same source filter as a ranking run: a route the zone forbids is not
+    # a candidate here either, so the diagnostic deal plays only what may
+    # serve and no Free-share signal is claimed for routes that cannot draw.
+    zone_shape = Shape(regime=regime)
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -1994,6 +2172,10 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         for mid in local_ids:
             if mid in models:
                 share.setdefault(mid, 0.0)
+        share = {mid: s for mid, s in share.items()
+                 if zone_prohibition(zone_shape, candidate_for(
+                     mid, policy, local=mid in local_ids,
+                     model=models.get(mid), intent=intent)) is None}
         share_by_domain[name] = share
         ranked_by_domain[name] = [mid for mid, _ in
                                   sorted(share.items(), key=lambda kv: -kv[1])[:top]]
@@ -2095,6 +2277,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     age = policy_age_days(policy_path)
 
     print("# Policy check\n")
+    print(f"zone: {zone_label(zone)}")
     age_txt = f"{age} day{'' if age == 1 else 's'} old" if age is not None \
         else "unknown (file missing)"
     print(f"policy.json last modified: {age_txt}\n")
@@ -2210,10 +2393,20 @@ def main() -> None:
                          "stdin and prints the verdict and rule; repeat "
                          "--outside-file PATH for named outside content. "
                          "Exit 0 safe, 1 sensitive, 3 not certified, 4 "
-                         "rules/config error; 2 is reserved for usage errors.")
+                         "rules/config error, 5 blocked by a closed zone; 2 is "
+                         "reserved for usage errors.")
     ap.add_argument("--outside-file", action="append", default=[], metavar="PATH",
                     help="include this outside file's capped content in --check-secrets "
                          "(repeatable; relative paths use --working-dir)")
+    ap.add_argument("--assert-allowed", action="store_true",
+                    help="pre-flight for an orchestrator: exit 0 when --model may "
+                         "serve in --working-dir's free-use zone, 5 when the zone "
+                         "blocks it; the zone is named, the shape's content never "
+                         "is. Reads no board and fetches nothing — no policy file, "
+                         "classification or network is required.")
+    ap.add_argument("--model", default=None, metavar="ID",
+                    help="the model a --assert-allowed or --check-secrets run "
+                         "will use (checked against the effective zone)")
     ap.add_argument("--write-secrets", action="store_true",
                     help="write or merge confirmed Secrets gate rules from "
                          "JSON on stdin; apply the commit/gitignore decision")
@@ -2261,13 +2454,27 @@ def main() -> None:
     ap.add_argument("--refresh", action="store_true", help="bypass the 24h cache")
     args = ap.parse_args()
 
+    if args.assert_allowed:
+        # The pre-flight reads the zone and the local policy, never the board:
+        # an orchestrator refuses a model the plan should not have produced
+        # before anything is fetched.
+        if not args.model:
+            ap.error("--assert-allowed needs --model <id>")
+        raise SystemExit(run_assert_allowed(
+            model=args.model, working_dir=args.working_dir,
+            policy_path=args.policy, sensitive=args.sensitive))
     if args.check_secrets:
         # The gate reads the working folder, never the network: no policy and
         # no board are needed to decide whether a shape is Sensitive.
         raise SystemExit(run_secrets_check(working_dir=args.working_dir,
-                                           outside_files=args.outside_file))
+                                           outside_files=args.outside_file,
+                                           model=args.model,
+                                           policy_path=args.policy,
+                                           sensitive=args.sensitive))
     if args.write_secrets:
         raise SystemExit(run_secrets_writer(working_dir=args.working_dir))
+    if args.model:
+        ap.error("--model is read only by --assert-allowed and --check-secrets")
 
     policy: dict = {}
     if os.path.exists(args.policy):
@@ -2316,7 +2523,7 @@ def main() -> None:
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
-                         config, local_ids=local_ids, regime=regime)
+                         config, local_ids=local_ids, regime=regime, zone=zone)
         return
 
     tags = domains[args.domain]
@@ -2345,6 +2552,20 @@ def main() -> None:
     for mid in share:
         if is_free_route(mid) and mid in models:
             matches[mid] = "catalog"
+    shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
+                  output_tokens=out_tok,
+                  context_headroom=config.context.headroom,
+                  context_margin=config.context.margin,
+                  regime=regime)
+    # Zone prohibitions filter at source: a candidate the zone forbids outright
+    # never enters the candidate set — not ranked, not scored, not dealt, not
+    # listed, and its endpoints never priced. The header states the zone that
+    # made it absent. Shape-level exclusions (Exposure, Footprint, quota,
+    # catalog) still mark, never hide.
+    share = {mid: share_score for mid, share_score in share.items()
+             if zone_prohibition(shape, candidate_for(
+                 mid, policy, local=mid in local_ids, model=models.get(mid),
+                 intent=args.effort)) is None}
     missing = set(tags) - known_tags
     if missing:
         print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
@@ -2369,6 +2590,7 @@ def main() -> None:
         base_per = bp[args.pricing_basis]
 
     print(f"# Popularity ranking: {args.domain}\n")
+    print(f"zone: {zone_label(zone)}")
     age = policy_age_days(args.policy)
     age_txt = f"{age}d old" if age is not None else "unknown"
     print(f"profile={profile_name} (in={in_tok:,} out={out_tok:,} cached={cached:.0%}) "
@@ -2423,12 +2645,7 @@ def main() -> None:
 
     # The one admission decision: the table marks with it, the deal draws
     # from it. Excluded rows stay visible; only the pick and the pool shun
-    # them.
-    shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
-                  output_tokens=out_tok,
-                  context_headroom=config.context.headroom,
-                  context_margin=config.context.margin,
-                  regime=regime)
+    # them. A candidate the zone forbids never got this far.
     decisions = {mid: admit(shape, candidate_for(
         mid, policy, local=mid in local_ids, model=models.get(mid),
         endpoints=endpoint_cache.get(mid, ()), intent=args.effort),
