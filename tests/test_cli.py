@@ -117,6 +117,43 @@ POLICY = {
 }
 
 
+# Golden stdout for `run_cli("--domain", "writing")` on the fixture machine
+# with its zones.json present (declares the default open), captured before
+# issue #38. A present zones file may not move a single byte: no advisory
+# line, and no reworded pool claim where free routes genuinely remain.
+PRESENT_ZONES_GOLDEN = """\
+# Popularity ranking: writing
+
+zone: undeclared (open)
+profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=worst | policy: 0d old | source: OpenRouter (openrouter.ai/rankings), as of 2026-10-17
+
+free quota: unavailable | :free routes stay in the pool
+| # | model | share | score | 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | ctx | Exposure | rung |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | deepseek/deepseek-v4-pro-0813 | 6.00% | 0.06 | 2B | 0.40–8.00 (2 eps, wide) | $0.0984 | 6.27x | ? | — | medium |
+| 2 | deepseek/deepseek-v4-pro | 2.50% | 0.03 | 3B | 0.42–0.42 (no endpoint data) | $0.0077 | 0.49x | ? | — | medium |
+| 3 | deepseek/deepseek-v4-flash | 0.50% | 0.01 | 0B | 1.00–1.00 (no endpoint data) | $0.0146 | 0.93x | ? | — | medium |
+| 4 | ghost/unknown-20260101 | 1.00% | — | 0B | — unresolved to a priced model | | | ? | — | |
+
+note: leaderboard rows resolved without canonical match (price unverified or unpriced): deepseek/deepseek-v4-flash, ghost/unknown-20260101
+
+hints (advisory; eligibility stays popularity — the deal tilts by preference):
+  deepseek/deepseek-v4-pro-0813: skipped on output cost
+  deepseek/deepseek-v4-pro: skipped on output cost
+  ghost/unknown-20260101: try it for code
+  deepseek/deepseek-v4-flash: felt good for bulk writing
+
+summaries (task-fit context; never taste):
+  deepseek/deepseek-v4-pro-0813: eol sibling summary
+  deepseek/deepseek-v4-pro: eol summary
+
+default pick (top of task order): deepseek/deepseek-v4-pro-0813
+route to floor: pin provider 'Baidu' via body.provider.order (allow_fallbacks: false) — unpinned worst endpoint is 'Relace' at $0.0984/ticket
+cheapest shown: deepseek/deepseek-v4-pro at $0.0077/ticket (budget pressure moves within the ranking, by price)
+projection at 1 ticket(s): $0.10 (floor $0.01) | baseline anchor: $0.02
+"""
+
+
 class CliTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -139,10 +176,19 @@ class CliTests(unittest.TestCase):
         return config_home
 
     def run_cli(self, *argv, world=None, local_models=None, key_payload=None,
-                zones=None, zones_default="open", policy_path=None):
+                zones=None, zones_default="open", policy_path=None,
+                zones_absent=False):
         world = world if world is not None else build_world()
         local_models = local_models if local_models is not None else {}
-        config_home = self.zones_file(zones, default=zones_default)
+        if zones_absent:
+            # A fresh install: no zones.json exists anywhere the loader
+            # looks, so the config root falls back to ~/.config against a
+            # throwaway home and nothing ever creates it.
+            home = os.path.join(self._tmp.name, "home")
+            env = {"XDG_CONFIG_HOME": "", "HOME": home, "USERPROFILE": home}
+        else:
+            config_home = self.zones_file(zones, default=zones_default)
+            env = {"XDG_CONFIG_HOME": config_home}
         calls = []
 
         def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
@@ -171,7 +217,7 @@ class CliTests(unittest.TestCase):
                 mock.patch("modelbandit.probe_local_models", return_value=local_models), \
                 mock.patch.object(modelbandit, "CACHE_DIR",
                                   os.path.join(self._tmp.name, "cache")), \
-                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
+                mock.patch.dict(os.environ, env), \
                 mock.patch("modelbandit.git_origin", return_value=None), \
                 mock.patch.object(sys, "argv", argv), \
                 redirect_stdout(out), redirect_stderr(err):
@@ -1006,6 +1052,58 @@ class CliTests(unittest.TestCase):
                                        zones_default="closed")
         self.assertIsNone(code)
         self.assertIn("zone: undeclared (closed)", out)
+
+    # --- Header truth: the quota line answers to the zone (issue #38) ----
+
+    def test_a_fresh_world_header_never_claims_free_routes_stayed(self):
+        # AC1: no key and no zones file - the closed default has already
+        # removed every remote Free route at source, so the quota line must
+        # not say they stayed in the pool. Both header lines are pinned
+        # together: the zone states the judgement, the pool clause answers
+        # for it instead of contradicting it.
+        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+
+        out, _, code, _ = self.run_cli("--domain", "writing", world=world,
+                                       zones_absent=True)
+
+        self.assertIsNone(code)
+        lines = out.splitlines()
+        zone_line = next(ln for ln in lines if ln.startswith("zone: "))
+        quota_line = next(ln for ln in lines if ln.startswith("free quota: "))
+        self.assertEqual(zone_line, "zone: undeclared (closed)")
+        self.assertEqual(
+            quota_line,
+            "free quota: unavailable | :free routes excluded by the closed zone")
+        self.assertNotIn("stay in the pool", out)
+        # The claim is true: the zone removed the route before the table.
+        self.assertNotIn("vendor/model:free", out)
+
+    def test_an_absent_zones_file_gets_one_advisory_after_the_zone_header(self):
+        # AC2: a missing zones file has never had a line of its own - the
+        # loader returns the closed default in silence. One line now, right
+        # under the zone header, naming the path to create as the default
+        # machine spells it (~/.config against the config-dir constants).
+        out, _, code, _ = self.run_cli("--domain", "writing", zones_absent=True)
+
+        self.assertIsNone(code)
+        lines = out.splitlines()
+        zone_at = next(i for i, ln in enumerate(lines)
+                       if ln.startswith("zone: "))
+        self.assertEqual(
+            lines[zone_at + 1],
+            "zones file: absent (~/.config/modelbandit/zones.json) — "
+            "undeclared paths are closed")
+        self.assertEqual(out.count("zones file:"), 1)
+
+    def test_a_present_zones_file_keeps_the_whole_output_byte_identical(self):
+        # AC2 golden: zones.json present -> not one byte moves: no
+        # advisory line, no reworded pool claim. The fixture machine
+        # declares open, where free routes genuinely remain in the pool.
+        out, _, code, _ = self.run_cli("--domain", "writing")
+
+        self.assertIsNone(code)
+        self.assertEqual(out, PRESENT_ZONES_GOLDEN)
 
     def test_check_policy_header_names_the_zone(self):
         out, _, code, _ = self.run_cli(

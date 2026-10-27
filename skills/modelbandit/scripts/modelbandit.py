@@ -791,6 +791,17 @@ def zones_path(*, environ=None) -> str:
     return os.path.join(base, ZONES_CONFIG_DIR, ZONES_FILE)
 
 
+def zones_file_label(*, environ=None) -> str:
+    """The zones file's path as the header spells it: `~` for the home it
+    sits under, forward slashes after - the path to create reads the same
+    on every machine, and names wherever the loader actually looks."""
+    path = zones_path(environ=environ)
+    home = expand_path("~", environ=environ)
+    if os.path.normcase(path).startswith(os.path.normcase(home) + os.sep):
+        path = "~" + path[len(home):]
+    return path.replace(os.sep, "/")
+
+
 def expand_path(text: str, *, environ=None) -> str:
     """`~` and environment variables, against the environment it is given."""
     env = os.environ if environ is None else environ
@@ -2854,6 +2865,15 @@ def main() -> None:
 
     print(f"# Popularity ranking: {args.domain}\n")
     print(f"zone: {zone_label(zone, sensitive=args.sensitive)}")
+    if not os.path.exists(zones_path()):
+        # Absent has always been silent in every mode: the loader returns
+        # the closed default without a word, so a fresh install never
+        # learns setup is missing. One line, only when the file is truly
+        # absent - a present file stays byte-identical, and a corrupt one
+        # already stopped loudly when the zone was resolved above
+        # (issue #38).
+        print(f"zones file: absent ({zones_file_label()}) — "
+              f"undeclared paths are closed")
     age = policy_age_days(args.policy)
     age_txt = f"{age}d old" if age is not None else "unknown"
     print(f"profile={profile_name} (in={in_tok:,} out={out_tok:,} cached={cached:.0%}) "
@@ -2878,7 +2898,15 @@ def main() -> None:
               + f" | reserve {config.free_quota_reserve} protected; "
                 "plan size does not gate")
     else:
-        print("free quota: unavailable | :free routes stay in the pool")
+        # Same yardstick as filter_zone_candidates: a closed effective
+        # regime has already dropped every remote Free route at source, so
+        # the pool clause says so instead of claiming they stayed (issue
+        # #38). Where free routes genuinely remain - open or sensitive -
+        # the line is unchanged, as are the quota figures above.
+        pool = (":free routes excluded by the closed zone"
+                if regime_at_least(regime, "closed")
+                else ":free routes stay in the pool")
+        print(f"free quota: unavailable | {pool}")
     if not verdict.eligible:
         print(f":free routes excluded from the pick and the deal — "
               f"{verdict.reason}")
