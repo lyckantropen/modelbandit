@@ -1503,6 +1503,65 @@ class CliTests(unittest.TestCase):
                                     "--in-tokens", "0", "--out-tokens", "0")
         self.assertIn("projection at 1 ticket(s): $0.00", out)
 
+    # --- malformed ranking inputs stop with a message, never a traceback --
+
+    def test_fit_non_numeric_score_exits_naming_the_entry(self):
+        out, _, code, _ = self.run_cli("--domain", "writing", "--fit", "mid=high")
+        self.assertIn("is not a number on 0-5", code)
+        self.assertIn("'mid=high'", code)
+        self.assertEqual(out, "")
+
+    def test_fit_empty_value_exits_naming_the_entry(self):
+        out, _, code, _ = self.run_cli("--domain", "writing", "--fit", "a=1,b=")
+        self.assertIn("is not a number on 0-5", code)
+        self.assertIn("'b='", code)
+        self.assertEqual(out, "")
+
+    def test_cached_share_outside_0_1_exits_naming_the_flag(self):
+        # A percentage-style 12 must not price a ticket below zero.
+        for share in ("12", "1.5", "-0.5"):
+            with self.subTest(share=share):
+                _, _, code, _ = self.run_cli("--domain", "writing",
+                                             "--cached-share", share)
+                self.assertIn("--cached-share", code)
+                self.assertIn("between 0 and 1", code)
+
+    def test_negative_token_overrides_exit_naming_the_flag(self):
+        for flag in ("--in-tokens", "--out-tokens"):
+            with self.subTest(flag=flag):
+                _, _, code, _ = self.run_cli("--domain", "writing", flag, "-5")
+                self.assertIn(flag, code)
+                self.assertIn("must not be negative", code)
+
+    def test_cached_share_boundaries_are_accepted(self):
+        # 0 and 1 are fractions, not percentage slips: both stay accepted.
+        for share in ("0", "1"):
+            out, _, code, _ = self.run_cli("--domain", "writing",
+                                           "--cached-share", share)
+            self.assertIsNone(code)
+            self.assertNotIn("-$", out)
+
+    def test_cached_share_zero_boundary_prices_uncached_input(self):
+        # Hand-computed at the models-list figure, all input uncached:
+        # 20000*6.6e-7 + 12000*1.98e-6 = 0.03696 -> $0.0370
+        out, _, code, _ = self.run_cli("--domain", "writing", "--cached-share",
+                                       "0", "--pricing-basis", "primary")
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and "deepseek/deepseek-v4-pro-0813" in ln)
+        self.assertIn("$0.0370", row)
+
+    def test_profile_equivalent_overrides_keep_output_byte_identical(self):
+        baseline = self.run_cli("--domain", "writing")
+        overridden = self.run_cli("--domain", "writing", "--cached-share", "0.4",
+                                  "--in-tokens", "20000", "--out-tokens", "12000")
+        self.assertEqual(overridden, baseline)
+
+    def test_over_budget_still_exits_2_at_an_accepted_boundary(self):
+        _, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "2",
+                                     "--budget", "0.1", "--cached-share", "0")
+        self.assertEqual(code, 2)
+
     # --- Free-request quota: a cliff before the plan is drawn --------------
 
     QUOTA_CATALOG = {

@@ -125,6 +125,26 @@ class FitTests(unittest.TestCase):
         self.assertEqual(bind.parse_fit("a/model=7,b/model=-1,c/model=2.5"),
                          {"a/model": 5.0, "b/model": 0.0, "c/model": 2.5})
 
+    def test_parse_fit_refuses_a_non_numeric_score(self):
+        with self.assertRaises(SystemExit) as caught:
+            bind.parse_fit("mid=high")
+        self.assertIn("is not a number on 0-5", str(caught.exception.code))
+        self.assertIn("'mid=high'", str(caught.exception.code))
+
+    def test_parse_fit_refuses_an_empty_value(self):
+        # A trailing 'mid=' passes no guard today: float('') raises.
+        with self.assertRaises(SystemExit) as caught:
+            bind.parse_fit("a=1,b=")
+        self.assertIn("is not a number on 0-5", str(caught.exception.code))
+        self.assertIn("'b='", str(caught.exception.code))
+
+    def test_parse_fit_refuses_a_non_finite_score(self):
+        # float() accepts nan/inf, but neither is a number on 0-5.
+        for val in ("nan", "inf", "-inf"):
+            with self.subTest(val=val):
+                with self.assertRaises(SystemExit):
+                    bind.parse_fit(f"a={val}")
+
 
 class BalanceTests(unittest.TestCase):
     def test_mass_balance(self):
