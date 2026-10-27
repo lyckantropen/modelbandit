@@ -126,9 +126,22 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_cli(self, *argv, world=None, local_models=None, key_payload=None):
+    def zones_file(self, zones, default="open"):
+        """This fixture machine's free-use zones. A test about pricing, quota
+        or the deal declares the machine open, so the zone gate stays out of
+        its way; the machine default (closed) is covered in test_zones.py."""
+        config_home = os.path.join(self._tmp.name, "config")
+        os.makedirs(os.path.join(config_home, "modelrouter"), exist_ok=True)
+        with open(os.path.join(config_home, "modelrouter", "zones.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"zones": list(zones or []), "default": default}, f)
+        return config_home
+
+    def run_cli(self, *argv, world=None, local_models=None, key_payload=None,
+                zones=None):
         world = world if world is not None else build_world()
         local_models = local_models if local_models is not None else {}
+        config_home = self.zones_file(zones)
         calls = []
 
         def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
@@ -157,6 +170,8 @@ class CliTests(unittest.TestCase):
                 mock.patch("bind.probe_local_models", return_value=local_models), \
                 mock.patch.object(bind, "CACHE_DIR",
                                   os.path.join(self._tmp.name, "cache")), \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
+                mock.patch("bind.git_origin", return_value=None), \
                 mock.patch.object(sys, "argv", argv), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
@@ -849,6 +864,113 @@ class CliTests(unittest.TestCase):
         self.assertIn("| 18.50 |", row)
         self.assertIn("$0.0000", row)
         self.assertIn("default pick (top of task order): vendor/model:free", out)
+
+    # --- free-use zones: main wires the regime into admission --------
+
+    def zone_of(self, free):
+        return [{"path": self._tmp.name, "free": free}]
+
+    def test_a_closed_zone_excludes_remote_free_routes_end_to_end(self):
+        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+
+        open_run, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name, world=world)
+        self.assertIsNone(code)
+        self.assertIn("default pick (top of task order): vendor/model:free",
+                      open_run)
+
+        closed, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            world=world, zones=self.zone_of("closed"))
+        self.assertIsNone(code)
+        row = next(ln for ln in closed.splitlines()
+                   if ln.startswith("|") and "vendor/model:free |" in ln)
+        self.assertIn("closed zone", row)                      # visible, reasoned
+        self.assertNotIn("vendor/model:free\n", closed.split("default pick")[1])
+
+    def test_a_closed_zone_keeps_remote_free_out_of_the_deal(self):
+        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        world = self.free_world(("vendor/model:free", 1.0))
+        world["classifications"]["classifications"] = [{
+            "tag": "content_writing", "usage_share": 1.0,
+            "models": [{"id": "vendor/model:free", "tag_usage_share": 1.0},
+                       {"id": "deepseek/deepseek-v4-pro-20260813",
+                        "tag_usage_share": 0.5}],
+        }]
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal", "--seed", "proj",
+            "--working-dir", self._tmp.name, world=world,
+            zones=self.zone_of("closed"))
+
+        self.assertIsNone(code)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn("vendor/model:free", deal)
+        self.assertEqual(sum(int(ln.split("|")[7].strip())
+                             for ln in deal.splitlines()
+                             if ln.startswith("| ")
+                             and ln.split("|")[1].strip().isdigit()), 12)
+
+    def test_a_closed_zone_still_admits_a_locally_served_model(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0, free_risk=0.35)
+        pol["free_models"] = {"qwen/qwen3-coder": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        world = build_world()
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": "qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            world=world, zones=self.zone_of("closed"),
+            local_models={"qwen/qwen3-coder-30b": {"id": "qwen/qwen3-coder-30b"}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and "qwen/qwen3-coder-30b |" in ln)
+        self.assertNotIn("closed zone", row)
+        self.assertIn("default pick (top of task order): qwen/qwen3-coder-30b",
+                      out)
+
+    def test_the_sensitive_flag_cannot_loosen_a_closed_zone(self):
+        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/other"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", "--working-dir",
+            self._tmp.name, world=world, zones=self.zone_of("closed"))
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and "vendor/model:free |" in ln)
+        self.assertIn("closed zone", row)   # still closed, not merely sensitive
+        self.assertNotIn("default pick (top of task order): vendor/model:free",
+                         out)
+
+    def test_a_sensitive_zone_keeps_todays_sensitive_behaviour(self):
+        # No --sensitive flag: the zone alone excludes the exposed free route.
+        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/other"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+
+        zone_only, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            world=world, zones=self.zone_of("sensitive"))
+        flagged, _, _, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", world=world)
+
+        self.assertIsNone(code)
+        self.assertIn("exposed (trains)",
+                      next(ln for ln in zone_only.splitlines()
+                           if ln.startswith("|") and "vendor/model:free |" in ln))
+        self.assertEqual(self.pick_of(zone_only), self.pick_of(flagged))
+
+    def pick_of(self, out):
+        tail = out.split("default pick", 1)[1]
+        return tail.splitlines()[0]
 
     def test_free_risk_price_is_uniform_across_exposure(self):
         # Same share, different Exposure, same risk-derived price and score.

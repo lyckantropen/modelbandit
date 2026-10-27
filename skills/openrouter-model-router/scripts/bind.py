@@ -675,6 +675,193 @@ def run_secrets_writer(*, working_dir: str | None = None,
     return 0
 
 
+# --- Free-use zones --------------------------------------------------------
+# Where free models may run, machine-wide: a path declares the regime for
+# everything under it, and anything undeclared is closed. The three regimes
+# order open < sensitive < closed; a run takes the stricter of its working
+# folder and the repository that folder came from, and a shape may tighten
+# that but never loosen it.
+ZONES_FILE = "zones.json"
+ZONES_CONFIG_DIR = "modelrouter"
+REGIMES = ("open", "sensitive", "closed")
+DEFAULT_REGIME = "closed"
+# A zone entry carries its path and its regime, nothing else: a field the tool
+# silently ignored would be a rule the user believes in.
+ZONE_KEYS = ("path", "free")
+ZONES_KEYS = ("zones", "default")
+_ENV_VAR = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+
+
+@dataclasses.dataclass(frozen=True)
+class Zone:
+    """The zone that decided a run: the declared path, or None undeclared."""
+    path: str | None
+    regime: str
+
+    def label(self) -> str:
+        return "undeclared" if self.path is None else self.path
+
+
+def zones_path(*, environ=None) -> str:
+    """`zones.json` under the machine's config root ($XDG_CONFIG_HOME or
+    ~/.config), honouring the environment it is given."""
+    env = os.environ if environ is None else environ
+    base = (env.get("XDG_CONFIG_HOME")
+            or os.path.join(expand_path("~", environ=env), ".config"))
+    return os.path.join(base, ZONES_CONFIG_DIR, ZONES_FILE)
+
+
+def expand_path(text: str, *, environ=None) -> str:
+    """`~` and environment variables, against the environment it is given."""
+    env = os.environ if environ is None else environ
+    if text == "~" or text.startswith(("~/", "~\\")):
+        home = env.get("HOME") or env.get("USERPROFILE") or os.path.expanduser("~")
+        text = home + text[1:]
+    return _ENV_VAR.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)),
+                        text)
+
+
+def compare_path(text: str, *, environ=None) -> str:
+    """A path normalised for comparison on this platform: `~` and variables
+    expanded, absolute, and case-folded where the platform folds it."""
+    return os.path.normcase(
+        os.path.abspath(os.path.normpath(expand_path(text, environ=environ))))
+
+
+def known_regime(value, *, where: str) -> str:
+    """A regime the tool knows, or a loud stop naming where it came from."""
+    if value not in REGIMES:
+        raise SystemExit(f"{where}: unknown free-use regime {value!r}; "
+                         f"known: {', '.join(REGIMES)}")
+    return value
+
+
+def validate_zones(payload, *, source: str = ZONES_FILE) -> dict:
+    """The zones file's contents, validated — additive against the default."""
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{source} must be a JSON object with "
+                         f"{' / '.join(ZONES_KEYS)}")
+    unknown = sorted(set(payload) - set(ZONES_KEYS))
+    if unknown:
+        raise SystemExit(f"unknown key(s) in {source}: {', '.join(unknown)}; "
+                         f"known: {', '.join(ZONES_KEYS)}")
+    entries = payload.get("zones", [])
+    if not isinstance(entries, list):
+        raise SystemExit(f"zones in {source} must be a list of "
+                         f"{{{' / '.join(ZONE_KEYS)}}} objects")
+    zones = []
+    for index, entry in enumerate(entries, 1):
+        where = f"zone #{index} in {source}"
+        if not isinstance(entry, dict):
+            raise SystemExit(f"{where} must be an object with "
+                             f"{' / '.join(ZONE_KEYS)}")
+        extra = sorted(set(entry) - set(ZONE_KEYS))
+        if extra:
+            raise SystemExit(f"unknown key(s) in {where}: {', '.join(extra)}; "
+                             f"known: {', '.join(ZONE_KEYS)}")
+        path = entry.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise SystemExit(f"{where} needs a non-empty string path")
+        zones.append({"path": path,
+                      "free": known_regime(entry.get("free"), where=where)})
+    default = known_regime(payload.get("default", DEFAULT_REGIME),
+                           where=f"default in {source}")
+    return {"zones": zones, "default": default}
+
+
+def load_zones(path: str | None = None, *, environ=None) -> dict:
+    """The machine's zones, validated. A missing file means the default
+    everywhere — nothing declared, nothing open."""
+    path = zones_path(environ=environ) if path is None else path
+    if not os.path.exists(path):
+        return {"zones": [], "default": DEFAULT_REGIME}
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"cannot read zones file {path}: {exc}") from None
+    return validate_zones(payload, source=path)
+
+
+def stricter(left: str, right: str) -> str:
+    """The stricter of two regimes: open < sensitive < closed."""
+    both = (known_regime(left, where="regime"), known_regime(right, where="regime"))
+    return max(both, key=REGIMES.index)
+
+
+def _covers(zone_path: str, folder: str) -> bool:
+    """Whether a normalised zone path covers a normalised folder path."""
+    return (folder == zone_path
+            or folder.startswith(zone_path.rstrip(os.sep) + os.sep))
+
+
+def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
+    """The zone governing `folder`: the longest declared path that covers it,
+    else the file's default. A declared path may name the folder exactly."""
+    target = compare_path(folder, environ=environ)
+    best = None
+    for entry in zones.get("zones", []):
+        declared = compare_path(entry["path"], environ=environ)
+        if _covers(declared, target) and (best is None
+                                          or len(declared) >= len(best[0])):
+            best = (declared, entry)
+    if best is None:
+        return Zone(path=None, regime=zones.get("default", DEFAULT_REGIME))
+    return Zone(path=best[1]["path"], regime=best[1]["free"])
+
+
+def git_origin(root: str, *, run=None) -> str | None:
+    """The repository a folder belongs to, from its shared `.git` directory.
+
+    `git rev-parse --git-common-dir` reports the main worktree's `.git` for a
+    linked worktree, so a ticket worktree resolves to the repository it came
+    from rather than to where it happens to live. Git missing, failing or
+    reporting nothing usable answers None — a run then carries only its
+    working folder's zone.
+    """
+    run = _run_git(root) if run is None else run
+    if run is None:
+        return None
+    try:
+        common = run(["rev-parse", "--git-common-dir"])
+    except Exception:
+        return None
+    common = str(common or "").strip()
+    if not common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.join(root, common)
+    origin = os.path.dirname(os.path.normpath(common))
+    if not origin or not os.path.dirname(origin):
+        return None
+    return origin
+
+
+def effective_zone(folder: str | None = None, *, zones: dict | None = None,
+                   run=None, environ=None) -> Zone:
+    """The regime a run works under: the stricter of the working folder's zone
+    and its origin repository's, so a worktree carries the posture of the
+    content it holds. The zone that decided it answers for it."""
+    folder = folder or os.getcwd()
+    zones = load_zones(environ=environ) if zones is None else zones
+    here = resolve_zone(folder, zones, environ=environ)
+    origin = git_origin(folder, run=run)
+    if origin is None or compare_path(origin, environ=environ) \
+            == compare_path(folder, environ=environ):
+        return here
+    there = resolve_zone(origin, zones, environ=environ)
+    return there if REGIMES.index(there.regime) > REGIMES.index(here.regime) \
+        else here
+
+
+def shape_regime(zone: Zone, *, sensitive: bool) -> str:
+    """The regime a shape works under: the zone's, tightened by --sensitive.
+
+    A flag may only tighten: `--sensitive` in a closed zone leaves it closed.
+    """
+    return stricter(zone.regime, "sensitive" if sensitive else "open")
+
+
 def resolve_model(models: dict, by_canon: dict, permaslug: str):
     """Leaderboard rows are permaslugs. Resolve via canonical_slug; heuristic
     date-stripping misprices dated releases (v4-pro-0813 vs v4-pro) and is a
@@ -1246,13 +1433,16 @@ class Shape:
     """A Ticket shape's admission-relevant elements.
 
     Sensitive is the shape's fifth element: the Secrets gate's verdict on the
-    material, bound per invocation, never a mood declared mid-run.
+    material, bound per invocation, never a mood declared mid-run. `regime` is
+    the free-use zone the run works under (see shape_regime), `open` unless a
+    zone or the flag says otherwise.
     """
     sensitive: bool = False
     input_tokens: int | None = None
     context_headroom: float = 2.0
     context_margin: float = 0.5
     output_tokens: int | None = None
+    regime: str = "open"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1265,6 +1455,7 @@ class Candidate:
     cataloged: bool = True
     completion_cap: int | None = None
     output_multiplier: float = 1.0
+    local: bool = False
 
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
@@ -1324,6 +1515,7 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                           mid, free_models=policy.get("free_models", {}),
                           overrides=policy.get("exposure", {}), local=local),
                       is_free=is_free,
+                      local=local,
                       context_length=context_length,
                       completion_cap=completion_cap,
                       output_multiplier=(mult_for(model, intent) if model
@@ -1373,8 +1565,14 @@ ADMITTED = Decision(True)
 def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
     """The Exposure<->Sensitive gate: exposed candidates never serve a
     Sensitive shape, whether free or paid. No-retention and local candidates
-    are admitted — Exposure, not price, decides Eligibility."""
-    if shape.sensitive and candidate.exposure == "trains":
+    are admitted — Exposure, not price, decides Eligibility.
+
+    A `sensitive` zone is the flag by another name: the posture is the same
+    wherever it comes from. A `closed` zone states a rule about free routes
+    only (see zone_gate) and adds nothing here.
+    """
+    if (shape.sensitive or shape.regime == "sensitive") \
+            and candidate.exposure == "trains":
         return Decision(False, f"exposed ({candidate.exposure})")
     return ADMITTED
 
@@ -1414,9 +1612,24 @@ def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
     return ADMITTED
 
 
-# The gates, in order, behind the one decision. The Context and catalog gates
-# join the existing Exposure gate.
-GATES = (exposure_gate, context_gate, catalog_gate)
+def zone_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """The free-use zone: a closed zone admits no remote free route.
+
+    Free is a serving fact, so a `:free` or `opencode/*` route is remote and
+    out, while a model this machine serves never leaves it and stays in. Paid
+    routes are untouched: the zone says where free may run, not what may run.
+    `open` and `sensitive` exclude nothing here — exposure and the quota
+    already answer for them.
+    """
+    if shape.regime == "closed" and candidate.is_free and not candidate.local:
+        return Decision(False, "closed zone (no remote free route)")
+    return ADMITTED
+
+
+# The gates, in order, behind the one decision. The zone comes first: a route a
+# closed zone forbids outright does not need its Exposure or Footprint judged,
+# and the first failing gate is the reason the table shows.
+GATES = (zone_gate, exposure_gate, context_gate, catalog_gate)
 
 
 def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
@@ -1764,7 +1977,7 @@ def domain_candidates(classif: dict, tags: list, models: dict, by_canon: dict):
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
                      intent: str, basis: str, config: PolicyConfig,
-                     local_ids=()) -> None:
+                     local_ids=(), regime: str = "open") -> None:
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -1821,7 +2034,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         in_tok, out_tok, cached = PROFILES[profile_name]
         shape = Shape(sensitive=False, input_tokens=in_tok,
                       context_headroom=config.context.headroom,
-                      context_margin=config.context.margin)
+                      context_margin=config.context.margin,
+                      regime=regime)
         aff = domain_weights(signals, name, config.factors)
         admitted = frozenset(
             mid for mid in share_by_domain[name]
@@ -2004,9 +2218,10 @@ def main() -> None:
                     help="write or merge confirmed Secrets gate rules from "
                          "JSON on stdin; apply the commit/gitignore decision")
     ap.add_argument("--working-dir", default=None, metavar="PATH",
-                    help="working folder for Secrets gate commands (default: "
-                         "cwd); its git root, when in a repository, supplies "
-                         "modelrouter.secrets.json and .gitignore")
+                    help="working folder (default: cwd). Secrets gate "
+                         "commands read modelrouter.secrets.json and "
+                         ".gitignore from its git root; every run reads its "
+                         "free-use zone from the machine's zones file")
     ap.add_argument("--check-policy", action="store_true",
                     help="report summary drift (ranked models without summaries, "
                          "stale summaries) and policy age; no --domain needed")
@@ -2072,6 +2287,11 @@ def main() -> None:
         raise SystemExit(
             f"no domain '{args.domain}'; known: {', '.join(domains) or 'none'}")
 
+    # Where free may run: the machine's zones file, judged for this working
+    # folder and the repository it came from, then tightened by --sensitive.
+    zone = effective_zone(args.working_dir)
+    regime = shape_regime(zone, sensitive=args.sensitive)
+
     models_raw = fetch_json(MODELS_URL, "models.json", auth=False, refresh=args.refresh)
     model_rows = models_raw["data"] if isinstance(models_raw, dict) else models_raw
     models = {norm_id(m["id"]): m for m in model_rows}
@@ -2096,7 +2316,7 @@ def main() -> None:
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
-                         config, local_ids=local_ids)
+                         config, local_ids=local_ids, regime=regime)
         return
 
     tags = domains[args.domain]
@@ -2207,7 +2427,8 @@ def main() -> None:
     shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
                   output_tokens=out_tok,
                   context_headroom=config.context.headroom,
-                  context_margin=config.context.margin)
+                  context_margin=config.context.margin,
+                  regime=regime)
     decisions = {mid: admit(shape, candidate_for(
         mid, policy, local=mid in local_ids, model=models.get(mid),
         endpoints=endpoint_cache.get(mid, ()), intent=args.effort),
