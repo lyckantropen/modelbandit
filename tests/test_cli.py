@@ -1931,8 +1931,11 @@ class CliTests(unittest.TestCase):
 
         self.assertIsNone(code)
         self.assertEqual(err.count("free quota"), 1)
-        self.assertIn(":free routes stay in the pool", err)
-        self.assertIn("free quota: unavailable", out)
+        # The warning states the quota fact only: the pool verdict is the
+        # header's job, and here the open zone does keep free routes in it.
+        self.assertNotIn("stay in the pool", err)
+        self.assertIn("free quota: unavailable | :free routes stay in the pool",
+                      out)
         self.assertIn("default pick (top of task order): vendor/model:free", out)
 
     def test_check_policy_plans_no_tickets_and_reads_no_counter(self):

@@ -240,7 +240,7 @@ class FreeQuotaReadTests(unittest.TestCase):
             self.assertIsNone(modelbandit.free_quota())
         self.assertEqual(err.getvalue().count("free quota"), 1)
         self.assertIn("502", err.getvalue())
-        self.assertIn(":free routes stay in the pool", err.getvalue())
+        self.assertNotIn("stay in the pool", err.getvalue())
 
     def test_a_payload_without_the_counter_is_not_a_failure(self):
         err = io.StringIO()

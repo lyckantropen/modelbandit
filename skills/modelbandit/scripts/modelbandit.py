@@ -2140,10 +2140,12 @@ def free_quota_from_payload(payload) -> FreeQuota | None:
 
 
 def _quota_unavailable(detail: str) -> None:
-    """Say it once, and never decide anything from it."""
+    """Say it once, and never decide anything from it.
+
+    The pool verdict belongs to the run's header, which knows the zone; this
+    warning states the quota fact and nothing about where routes stand."""
     suffix = f" ({detail})" if detail else ""
-    print(f"warning: free quota unavailable{suffix}; :free routes stay in the pool",
-          file=sys.stderr)
+    print(f"warning: free quota unavailable{suffix}", file=sys.stderr)
 
 
 def free_quota(refresh: bool = False, fetcher=None) -> FreeQuota | None:
