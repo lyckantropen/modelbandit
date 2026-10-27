@@ -938,14 +938,16 @@ def shape_regime(zone: Zone, *, sensitive: bool) -> str:
     return stricter(zone.regime, "sensitive" if sensitive else "open")
 
 
-def policy_facts(path: str | None) -> dict:
-    """The policy's Exposure facts when the file exists, else none.
+def load_policy_file(path: str | None) -> dict:
+    """The policy read once, as UTF-8 JSON, by every entry point.
 
-    The pre-flight and the secrets check read the local policy for its
-    `exposure` overrides and `free_models` catalog when it is there, and work
-    without it: a missing file is not an error, so the defaults answer (a
-    ':free' or 'opencode/*' route exposed, a paid route no-retention). No
-    board, no classification fetch, no network.
+    The ranking run, the policy check, the pre-flight and the secrets check
+    all decode this file the same way: explicitly UTF-8, never the console's
+    locale codec — prose carrying non-ASCII must read the same everywhere.
+    A missing file is an empty policy (the ranking path then reports the
+    required keys it misses); a file that cannot be decoded or parsed is a
+    policy/config error naming the file, never a mangled read and never an
+    uncaught traceback.
     """
     if not path or not os.path.exists(path):
         return {}
@@ -956,7 +958,21 @@ def policy_facts(path: str | None) -> dict:
         raise SystemExit(f"cannot read policy file {path}: {exc}") from None
     if not isinstance(policy, dict):
         raise SystemExit(f"policy file {path} must be a JSON object")
+    return policy
+
+
+def policy_facts(path: str | None) -> dict:
+    """The policy's Exposure facts when the file exists, else none.
+
+    The pre-flight and the secrets check read the local policy for its
+    `exposure` overrides and `free_models` catalog when it is there, and work
+    without it: a missing file is not an error, so the defaults answer (a
+    ':free' or 'opencode/*' route exposed, a paid route no-retention). No
+    board, no classification fetch, no network.
+    """
+    policy = load_policy_file(path)
     policy["free_models"] = load_free_models(policy)
+    load_exposure_overrides(policy)
     return policy
 
 
@@ -1347,6 +1363,29 @@ def load_free_models(policy: dict) -> dict:
                                         or not summary_ref.strip()):
             raise SystemExit(f"policy {path}.summary_ref must be a non-empty string")
     return catalog
+
+
+def load_exposure_overrides(policy: dict) -> dict:
+    """Validate the policy's `exposure` override map at the policy boundary.
+
+    A misspelled class here would widen the gate exactly as a misspelled
+    catalog entry would, so it stops the run the same way — loudly, naming
+    the prefix, before any candidate is judged by it.
+    """
+    overrides = policy.get("exposure", {})
+    if not isinstance(overrides, dict):
+        raise SystemExit("policy exposure must be an object")
+    for prefix, value in overrides.items():
+        path = f"exposure.{prefix}"
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise SystemExit(f"policy {path}: id-prefix must be a non-empty string")
+        if not isinstance(value, str):
+            raise SystemExit(f"policy {path}: exposure must be a string")
+        try:
+            known_exposure(prefix, value)
+        except SystemExit as exc:
+            raise SystemExit(f"policy {path}: {exc}") from None
+    return overrides
 
 
 def _free_summary(entry: dict, summaries: dict, mid: str | None = None) -> bool:
@@ -2521,11 +2560,16 @@ def main() -> None:
     if args.model:
         ap.error("--model is read only by --assert-allowed and --check-secrets")
 
-    policy: dict = {}
-    if os.path.exists(args.policy):
-        with open(args.policy) as f:
-            policy = json.load(f)
-    policy["free_models"] = load_free_models(policy)
+    # One policy loader for every entry point: the ranking path reports a
+    # policy/config error (status 4) instead of letting an unreadable or
+    # untrustworthy policy escape as a traceback or a Secrets verdict.
+    try:
+        policy = load_policy_file(args.policy)
+        policy["free_models"] = load_free_models(policy)
+        load_exposure_overrides(policy)
+    except SystemExit as exc:
+        print(f"policy/config error: {exc}", file=sys.stderr)
+        raise SystemExit(SECRETS_RULES_ERROR) from None
     config = load_policy_config(policy)
     domains = policy.get("domains", {})
 

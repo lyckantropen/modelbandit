@@ -1707,5 +1707,131 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("deepseek/deepseek-v4-pro |", deal)
 
 
+class PolicyFileTests(CliTests):
+    """One policy loader: every entry point reads the policy file the same
+    way, as UTF-8, and a policy that cannot be read or trusted is a
+    policy/config error (status 4) — never a locale-dependent mangle, never
+    an uncaught traceback, never a Secrets-gate verdict (1)."""
+
+    def write_policy(self, policy):
+        with open(self.policy_path, "w", encoding="utf-8") as f:
+            json.dump(policy, f)
+
+    def non_ascii_policy(self, summary):
+        pol = json.loads(json.dumps(POLICY))
+        pol["summaries"] = {"deepseek/deepseek-v4-pro-0813": summary}
+        self.write_policy(pol)
+
+    def locale_console(self, policy_path):
+        """A console whose preferred encoding is not UTF-8: an open() of the
+        policy file without an explicit encoding is decoded with the console's
+        codec (cp1252 here), exactly as an unpatched run would be on one."""
+        real_open = open
+
+        def open_with_console_codec(file, mode="r", *args, **kwargs):
+            if (os.path.abspath(os.fspath(file))
+                    == os.path.abspath(policy_path)
+                    and "b" not in mode and "encoding" not in kwargs):
+                return real_open(file, mode, *args, encoding="cp1252", **kwargs)
+            return real_open(file, mode, *args, **kwargs)
+
+        return mock.patch("builtins.open", open_with_console_codec)
+
+    def run_gate(self, *argv):
+        """A guard run with stdin and machine facts pinned: no console, no
+        real machine, no network."""
+        with mock.patch.object(sys, "stdin", io.StringIO("")), \
+                mock.patch("bind.machine_facts",
+                           return_value={"identifiers": []}):
+            return self.run_cli(*argv)
+
+    def assert_status_4_everywhere(self):
+        """A policy no entry point can trust stops them all with status 4 and
+        a message naming the file — no traceback, no exit 1."""
+        for argv in (["--domain", "writing"],           # the ranking run
+                     ["--check-policy"],                # the policy check
+                     ["--assert-allowed",
+                      "--model", "deepseek/deepseek-v4-pro"],
+                     ["--check-secrets",
+                      "--model", "deepseek/deepseek-v4-pro"]):
+            with self.subTest(entry=argv[0]):
+                out, err, code, _ = self.run_gate(*argv)
+                self.assertEqual(code, 4)
+                self.assertIn("cannot read policy file", err)
+                self.assertIn("policy.json", err)
+                self.assertNotIn("Traceback", err)
+
+    def test_loader_decodes_non_ascii_utf8_exactly(self):
+        self.non_ascii_policy("żółw őrizetlenül")
+        policy = bind.load_policy_file(self.policy_path)
+        self.assertEqual(policy["summaries"]["deepseek/deepseek-v4-pro-0813"],
+                         "żółw őrizetlenül")
+
+    def test_non_ascii_prose_prints_the_same_on_a_non_utf8_console(self):
+        summary = "żółw ścieżką"
+        self.non_ascii_policy(summary)
+        with self.locale_console(self.policy_path):
+            out, _, code, _ = self.run_cli("--domain", "writing")
+        self.assertIsNone(code)
+        self.assertIn(summary, out)
+
+    def test_a_console_undecodable_character_does_not_abort_the_ranking(self):
+        # "ő" is at home in UTF-8 but undefined in the simulated console's
+        # codec: a locale-decoded read would abort the run mid-table.
+        self.non_ascii_policy("widoczny őrizetlenül")
+        with self.locale_console(self.policy_path):
+            out, _, code, _ = self.run_cli("--domain", "writing")
+        self.assertIsNone(code)
+        self.assertIn("őrizetlenül", out)
+
+    def test_an_undecodable_policy_stops_every_entry_point_with_status_4(self):
+        with open(self.policy_path, "wb") as f:
+            f.write(b'{"scoring": "\xff\xfe"}')
+        self.assert_status_4_everywhere()
+
+    def test_a_policy_that_is_not_json_stops_every_entry_point_with_status_4(self):
+        with open(self.policy_path, "w", encoding="utf-8") as f:
+            f.write("{oops")
+        self.assert_status_4_everywhere()
+
+    def test_an_unknown_exposure_override_stops_the_guards_with_status_4(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["exposure"] = {"deepseek/": "exposd"}
+        self.write_policy(pol)
+        out, err, code, _ = self.run_gate("--assert-allowed",
+                                          "--model", "deepseek/deepseek-v4-pro")
+        self.assertEqual(code, 4)
+        self.assertEqual(out, "")
+        self.assertIn("pre-flight: policy/config error", err)
+        self.assertIn("unknown exposure", err)
+        self.assertIn("deepseek/", err)
+
+        out, err, code, _ = self.run_gate("--check-secrets",
+                                          "--model", "deepseek/deepseek-v4-pro")
+        self.assertEqual(code, 4)
+        self.assertNotIn("secrets gate: sensitive", out)
+        self.assertIn("secrets gate: rules/config error", err)
+        self.assertIn("unknown exposure", err)
+        self.assertIn("deepseek/", err)
+
+    def test_an_unknown_exposure_in_the_catalog_stops_the_guards_with_status_4(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"deepseek/": {"context_length": 262_144,
+                                            "exposure": "exposd"}}
+        self.write_policy(pol)
+        out, err, code, _ = self.run_gate("--assert-allowed",
+                                          "--model", "deepseek/deepseek-v4-pro")
+        self.assertEqual(code, 4)
+        self.assertEqual(out, "")
+        self.assertIn("unknown exposure", err)
+
+        out, err, code, _ = self.run_gate("--check-secrets",
+                                          "--model", "deepseek/deepseek-v4-pro")
+        self.assertEqual(code, 4)
+        self.assertNotIn("secrets gate: sensitive", out)
+        self.assertIn("secrets gate: rules/config error", err)
+        self.assertIn("unknown exposure", err)
+
+
 if __name__ == "__main__":
     unittest.main()
