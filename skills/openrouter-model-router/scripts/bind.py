@@ -801,6 +801,14 @@ def expand_path(text: str, *, environ=None) -> str:
                         text)
 
 
+def spelled_path(text: str, *, environ=None) -> str:
+    """The path as spelled: `~` and variables expanded, absolute, and
+    case-folded where the platform folds it — links left alone, so the
+    spelling can be told apart from the place the path reaches."""
+    return os.path.normcase(
+        os.path.abspath(os.path.normpath(expand_path(text, environ=environ))))
+
+
 def display_path(text: str, *, environ=None) -> str:
     """The place a path reaches: `~` and variables expanded, links resolved
     to the real filesystem place, the platform's own case kept. Strict
@@ -921,8 +929,7 @@ def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
     working folder does while the place it reaches is not the declared path.
     """
     target = compare_path(folder, environ=environ)
-    spelled = os.path.normcase(
-        os.path.abspath(os.path.normpath(expand_path(folder, environ=environ))))
+    spelled = spelled_path(folder, environ=environ)
     best = None
     for entry in zones.get("zones", []):
         declared = compare_path(entry["path"], environ=environ)
@@ -935,8 +942,7 @@ def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
         return Zone(path=None, regime=zones.get("default", DEFAULT_REGIME),
                     resolved=display_path(folder, environ=environ))
     entry = best[1]
-    declared_spelled = os.path.normcase(os.path.abspath(
-        os.path.normpath(expand_path(entry["path"], environ=environ))))
+    declared_spelled = spelled_path(entry["path"], environ=environ)
     declared_moved = declared_spelled != best[0]
     place = display_path(folder, environ=environ)
     if declared_moved or (spelled != target
@@ -1719,8 +1725,8 @@ def standing(share: float, cost: float, fit: float | None,
 def parse_fit(spec: str) -> dict:
     """'mid=score,mid=score' -> {prefix: clamped 0-5 float}.
 
-    A malformed entry stops the run with a message naming it, instead of an
-    uncaught conversion error after the board is fetched."""
+    A malformed entry raises ValueError naming it; the caller reports it as
+    the usage error it is (status 2), before anything is fetched."""
     out = {}
     for part in spec.split(","):
         mid, eq, val = part.strip().partition("=")
@@ -1728,11 +1734,11 @@ def parse_fit(spec: str) -> dict:
             try:
                 score = float(val)
             except ValueError:
-                raise SystemExit(
-                    f"--fit entry '{mid}={val}' is not a number on 0-5"
-                ) from None
+                raise ValueError(
+                    f"--fit entry '{mid}={val}' is not a number on 0-5") \
+                    from None
             if not math.isfinite(score):
-                raise SystemExit(
+                raise ValueError(
                     f"--fit entry '{mid}={val}' is not a number on 0-5")
             out[mid] = max(0.0, min(5.0, score))
     return out
@@ -2681,17 +2687,19 @@ def main() -> None:
     ap.add_argument("--refresh", action="store_true", help="bypass the 24h cache")
     args = ap.parse_args()
 
-    # Malformed ranking inputs stop before any plan is produced, naming the
-    # flag: a percentage-style cached share would price tickets negative and
-    # flip the budget verdict to "under".
+    # Malformed ranking inputs are usage errors (status 2), named and stopped
+    # before any plan is produced: a percentage-style cached share would price
+    # tickets negative and flip the budget verdict to "under".
     if args.cached_share is not None and not 0.0 <= args.cached_share <= 1.0:
-        raise SystemExit(
-            f"--cached-share {args.cached_share} must be between 0 and 1")
+        ap.error(f"--cached-share {args.cached_share} must be between 0 and 1")
     for flag, tokens in (("--in-tokens", args.in_tokens),
                          ("--out-tokens", args.out_tokens)):
         if tokens is not None and tokens < 0:
-            raise SystemExit(f"{flag} {tokens} must not be negative")
-    fit_map = parse_fit(args.fit) if args.fit else {}
+            ap.error(f"{flag} {tokens} must not be negative")
+    try:
+        fit_map = parse_fit(args.fit) if args.fit else {}
+    except ValueError as exc:
+        ap.error(str(exc))
 
     # --plain states a shape, and only the pre-flight takes one stated: a
     # flag silently ignored elsewhere would be a rule the user believes in.

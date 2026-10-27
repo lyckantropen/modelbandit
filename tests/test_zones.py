@@ -2,7 +2,10 @@
 origin-aware effective regime and the closed-zone admission gate.
 
 Fixtures only: every test injects its environment and its git runner, so no
-test reads this machine's `$HOME`, runs git, or touches the network.
+test reads this machine's `$HOME` or touches the network. The submodule
+fixtures are the deliberate exception: they run real `git` against
+repositories built under a temporary directory, because the origin a
+submodule reports is exactly what the resolver must interpret.
 """
 
 import os

@@ -1651,32 +1651,34 @@ class CliTests(unittest.TestCase):
     # --- malformed ranking inputs stop with a message, never a traceback --
 
     def test_fit_non_numeric_score_exits_naming_the_entry(self):
-        out, _, code, _ = self.run_cli("--domain", "writing", "--fit", "mid=high")
-        self.assertIn("is not a number on 0-5", code)
-        self.assertIn("'mid=high'", code)
-        self.assertEqual(out, "")
+        _, err, code, _ = self.run_cli("--domain", "writing", "--fit", "mid=high")
+        self.assertIn("is not a number on 0-5", err)
+        self.assertIn("'mid=high'", err)
+        self.assertEqual(code, 2)
 
     def test_fit_empty_value_exits_naming_the_entry(self):
-        out, _, code, _ = self.run_cli("--domain", "writing", "--fit", "a=1,b=")
-        self.assertIn("is not a number on 0-5", code)
-        self.assertIn("'b='", code)
-        self.assertEqual(out, "")
+        _, err, code, _ = self.run_cli("--domain", "writing", "--fit", "a=1,b=")
+        self.assertIn("is not a number on 0-5", err)
+        self.assertIn("'b='", err)
+        self.assertEqual(code, 2)
 
     def test_cached_share_outside_0_1_exits_naming_the_flag(self):
         # A percentage-style 12 must not price a ticket below zero.
         for share in ("12", "1.5", "-0.5"):
             with self.subTest(share=share):
-                _, _, code, _ = self.run_cli("--domain", "writing",
-                                             "--cached-share", share)
-                self.assertIn("--cached-share", code)
-                self.assertIn("between 0 and 1", code)
+                _, err, code, _ = self.run_cli("--domain", "writing",
+                                               "--cached-share", share)
+                self.assertIn("--cached-share", err)
+                self.assertIn("between 0 and 1", err)
+                self.assertEqual(code, 2)
 
     def test_negative_token_overrides_exit_naming_the_flag(self):
         for flag in ("--in-tokens", "--out-tokens"):
             with self.subTest(flag=flag):
-                _, _, code, _ = self.run_cli("--domain", "writing", flag, "-5")
-                self.assertIn(flag, code)
-                self.assertIn("must not be negative", code)
+                _, err, code, _ = self.run_cli("--domain", "writing", flag, "-5")
+                self.assertIn(flag, err)
+                self.assertIn("must not be negative", err)
+                self.assertEqual(code, 2)
 
     def test_cached_share_boundaries_are_accepted(self):
         # 0 and 1 are fractions, not percentage slips: both stay accepted.
