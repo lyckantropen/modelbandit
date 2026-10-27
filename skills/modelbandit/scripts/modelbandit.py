@@ -598,7 +598,7 @@ def run_secrets_check(*, working_dir: str | None = None,
     provenance has the effective closed regime, or a `--model` the
     effective zone's regime cannot admit. The zone is named; the material
     never is. With `as_json`, one JSON object replaces the lines (mode,
-    ok, verdict, status, zone, reason, rule).
+    ok, verdict, outcome, zone, reason, rule).
     """
     if material is None:
         try:
@@ -639,7 +639,7 @@ def run_secrets_check(*, working_dir: str | None = None,
         # blocked (v2). The zone is named; the material never is.
         if as_json:
             emit_json({"mode": "check-secrets", "ok": True,
-                       "status": "zone-blocked", "verdict": False,
+                       "outcome": "zone-blocked", "verdict": False,
                        "zone": zone_payload(blocked),
                        "reason": reason, "rule": None})
         else:
@@ -650,7 +650,7 @@ def run_secrets_check(*, working_dir: str | None = None,
     if not isinstance(material, str) or not material.strip():
         if as_json:
             emit_json({"mode": "check-secrets", "ok": True,
-                       "status": "not-certified", "verdict": False,
+                       "outcome": "not-certified", "verdict": False,
                        "zone": zone_payload(zone),
                        "reason": "no material given", "rule": None})
         else:
@@ -661,7 +661,7 @@ def run_secrets_check(*, working_dir: str | None = None,
     if sensitive:
         if as_json:
             emit_json({"mode": "check-secrets", "ok": True,
-                       "status": "sensitive", "verdict": False,
+                       "outcome": "sensitive", "verdict": False,
                        "zone": zone_payload(zone),
                        "reason": None, "rule": rule})
         else:
@@ -669,7 +669,7 @@ def run_secrets_check(*, working_dir: str | None = None,
             print(f"rule: {rule}")
     elif as_json:
         emit_json({"mode": "check-secrets", "ok": True,
-                   "status": "safe", "verdict": True,
+                   "outcome": "safe", "verdict": True,
                    "zone": zone_payload(zone),
                    "reason": None, "rule": None})
     else:
@@ -3281,14 +3281,18 @@ def main() -> None:
     # --json answers the verdict modes only; the ranking table is never
     # JSON-ized (issue #41), so anywhere else the flag would be silently
     # ignored — it stops as the usage error it is.
-    if args.json and not (
-            args.check_secrets or args.assert_allowed or args.status
-            or (args.domain and args.budget is not None
-                and not (args.write_secrets or args.write_zones
-                         or args.list_domains or args.check_policy
-                         or args.scope or args.anchors is not None))):
-        ap.error("--json is read only by --check-secrets, --assert-allowed, "
-                 "--status and a budgeted ranking run (--domain with --budget)")
+    if args.json:
+        domain_served = bool(args.domain) and args.budget is not None
+        served = (int(args.check_secrets) + int(args.assert_allowed)
+                  + int(args.status) + int(domain_served))
+        riders = (args.write_secrets or args.write_zones or args.list_domains
+                  or args.check_policy or args.scope
+                  or args.anchors is not None
+                  or (args.domain and not domain_served))
+        if served != 1 or riders:
+            ap.error("--json is read only by --check-secrets, --assert-allowed, "
+                     "--status and a budgeted ranking run (--domain with "
+                     "--budget), each on its own")
 
     if args.assert_allowed:
         # The pre-flight reads the zone and the local policy, never the board:
@@ -3671,14 +3675,22 @@ def main() -> None:
         # A completed run that found nothing to pick: the answer (why there
         # is no pick) goes to stderr on its own line — byte-identical to the
         # v1 message — and the status stays 0 (exit contract v2, ADR-0004).
+        # A --json run answers with the object instead: one object per
+        # invocation, every verdict included (issue #41, Build 2).
         if excluded:
-            print("shape: no candidate admitted — every ranked "
-                  f"candidate is excluded ({', '.join(excluded)}); drop "
-                  "the restrictive shape setting or pick another domain",
-                  file=sys.stderr)
+            stop_reason = ("shape: no candidate admitted — every ranked "
+                           f"candidate is excluded ({', '.join(excluded)}); drop "
+                           "the restrictive shape setting or pick another domain")
+            stop_verdict = "no-candidate-admitted"
         else:
-            print("domain has no ranked candidates in the model list",
-                  file=sys.stderr)
+            stop_reason = "domain has no ranked candidates in the model list"
+            stop_verdict = "no-ranked-candidates"
+        if args.json:
+            emit_json({"mode": "budget", "ok": True,
+                       "verdict": stop_verdict, "reason": stop_reason,
+                       "rule": None, "zone": zone_payload(zone)})
+        else:
+            print(stop_reason, file=sys.stderr)
         raise SystemExit(0)
     if excluded and rows_out \
             and not decisions[rows_out[0][0]].admitted:

@@ -325,13 +325,28 @@ class LineOutputParityTests(ModelbanditCli):
         self.assertEqual(out.splitlines()[-1], "budget: $0.10 -> OVER")
 
 
+    def test_the_budgeted_run_is_byte_identical_to_the_verdict_line(self):
+        # End-to-end byte parity (AC2): a budgeted run differs from the same
+        # run without --budget in exactly one appended line - the v1-captured
+        # verdict line - and in nothing else. (v1 printed this line to stdout
+        # too; only its exit code changed, 2 -> 0.)
+        base, _, base_code = self.run_cli("--domain", "writing",
+                                          "--tickets", "2")
+        self.assertIn(base_code, (None, 0))
+        out, _, code = self.run_cli("--domain", "writing", "--tickets", "2",
+                                    "--budget", "0.1")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, base + "budget: $0.10 -> OVER\n")
+
+
 class JsonModeTests(ModelbanditCli):
     """AC4, the JSON half: `--json` emits ONE object on stdout with the
     required keys per answer mode — `mode`, `ok` (always true — it ran),
-    plus `verdict`/`allowed` (bool), `zone`, `reason`, `rule`, and for the
-    budget verdict `over_budget` + the projection figures. The ranking table
-    is never JSON-ized; anywhere the flag does not serve, it is the usage
-    error it is."""
+    the `outcome` string (safe/sensitive/not-certified/zone-blocked) with
+    its polarity `verdict`, or `allowed` (bool), `zone`, `reason`, `rule`,
+    and for the budget verdict `over_budget` + the projection figures. The
+    ranking table is never JSON-ized; anywhere the flag does not serve, it
+    is the usage error it is."""
 
     def one_object(self, out):
         """stdout is exactly one JSON object — nothing else."""
@@ -349,6 +364,25 @@ class JsonModeTests(ModelbanditCli):
                          {"path", "regime", "declared", "resolved"})
         return payload["zone"]
 
+    def last_json_line_is_the_only_json_line(self, out):
+        """stdout carries lines (the table) plus exactly one JSON object,
+        on the last line."""
+        parsed = []
+        for line in out.splitlines():
+            try:
+                parsed.append(json.loads(line))
+            except ValueError:
+                pass
+        self.assertEqual(len(parsed), 1,
+                         f"exactly one JSON object among the lines:\n{out}")
+        payload = parsed[0]
+        self.assertEqual(json.loads(out.splitlines()[-1]), payload,
+                         "the object is the last line")
+        self.assertIsInstance(payload, dict)
+        self.assertIn("mode", payload)
+        self.assertIs(payload["ok"], True)
+        return payload
+
     # --- --check-secrets --------------------------------------------------
 
     def test_check_secrets_safe_is_one_object(self):
@@ -360,7 +394,7 @@ class JsonModeTests(ModelbanditCli):
         payload = self.one_object(out)
         self.assertEqual(payload["mode"], "check-secrets")
         self.assertIs(payload["verdict"], True)   # the proceed polarity
-        self.assertEqual(payload["status"], "safe")
+        self.assertEqual(payload["outcome"], "safe")
         self.assertEqual(self.zone_of(payload),
                          {"path": None, "regime": "open",
                           "declared": None, "resolved": None})
@@ -374,7 +408,7 @@ class JsonModeTests(ModelbanditCli):
         self.assertEqual(code, 0)
         payload = self.one_object(out)
         self.assertIs(payload["verdict"], False)
-        self.assertEqual(payload["status"], "sensitive")
+        self.assertEqual(payload["outcome"], "sensitive")
         self.assertEqual(payload["rule"],
                          "password, token or key assignment")
         self.assertIsNone(payload["reason"])
@@ -385,7 +419,7 @@ class JsonModeTests(ModelbanditCli):
         self.assertEqual(code, 0)
         payload = self.one_object(out)
         self.assertIs(payload["verdict"], False)
-        self.assertEqual(payload["status"], "not-certified")
+        self.assertEqual(payload["outcome"], "not-certified")
         self.assertEqual(payload["reason"], "no material given")
         self.assertIsNone(payload["rule"])
 
@@ -398,13 +432,63 @@ class JsonModeTests(ModelbanditCli):
         self.assertEqual(code, 0)
         payload = self.one_object(out)
         self.assertIs(payload["verdict"], False)
-        self.assertEqual(payload["status"], "zone-blocked")
+        self.assertEqual(payload["outcome"], "zone-blocked")
         self.assertEqual(self.zone_of(payload)["regime"], "closed")
         self.assertIn("remote free route is prohibited",
                       payload["reason"])
         self.assertIsNone(payload["rule"])
 
     # --- --assert-allowed -------------------------------------------------
+
+    def test_a_stopped_budgeted_run_still_answers_with_one_object(self):
+        # Build 2 (review concession): one object per invocation - the
+        # ranking's own stop included. The table stays lines; the object is
+        # the last and only JSON line; stderr stays empty (json replaces the
+        # stop message).
+        self.write_policy(policy_with(exposure={"deepseek/": "trains"}))
+        out, err, code = self.run_cli("--domain", "writing", "--sensitive",
+                                      "--budget", "1000", "--json")
+        self.assertEqual(code, 0)
+        # The stop message moved into the object; only the harness's quota
+        # warning may remain on stderr.
+        self.assertNotIn("no candidate admitted", err)
+        payload = self.last_json_line_is_the_only_json_line(out)
+        self.assertEqual(payload["mode"], "budget")
+        self.assertIs(payload["ok"], True)
+        self.assertEqual(payload["verdict"], "no-candidate-admitted")
+        self.assertIn("no candidate admitted", payload["reason"])
+        self.zone_of(payload)
+
+    def test_an_empty_pool_stop_still_answers_with_one_object(self):
+        self.write_policy(policy_with(domains={"writing": ["content_writing"]},
+                                      hints={}, summaries={}))
+        world = build_world()
+        world["classifications"]["classifications"][0]["models"] = []
+        out, err, code = self.run_cli("--domain", "writing", "--budget",
+                                      "1000", "--json", world=world)
+        self.assertEqual(code, 0)
+        self.assertNotIn("no ranked candidates", err)
+        payload = self.last_json_line_is_the_only_json_line(out)
+        self.assertEqual(payload["mode"], "budget")
+        self.assertEqual(payload["verdict"], "no-ranked-candidates")
+        self.assertIn("no ranked candidates", payload["reason"])
+
+    def test_json_alongside_a_losing_flag_is_a_usage_error(self):
+        # The flag would be silently ignored - dispatch order decides which
+        # mode wins - so the combination stops as the usage error it is
+        # (review: --status + a writer passed the gate while the writer won).
+        for argv in (("--json", "--status", "--write-secrets"),
+                     ("--json", "--check-secrets", "--write-zones"),
+                     ("--json", "--assert-allowed", "--domain", "writing"),
+                     ("--json", "--status", "--domain", "writing",
+                      "--budget", "1000"),
+                     ("--json", "--domain", "writing"),
+                     ("--json",)):
+            with self.subTest(argv=argv):
+                _, err, code = self.run_cli(*argv,
+                                            "--working-dir", self.root)
+                self.assertEqual(code, 2)
+                self.assertIn("--json", err)
 
     def test_assert_allowed_allowed_is_one_object(self):
         out, err, code = self.run_cli("--assert-allowed", "--json",
