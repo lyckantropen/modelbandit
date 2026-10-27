@@ -72,6 +72,12 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    is the explanation for their absence. Locally served models stay; Exposure,
    Footprint, quota and catalog exclusions keep their marked, never hidden
    behaviour.
+   When the zones file is absent or the effective posture is `zone:
+   undeclared (closed)`, surface that to the user and offer to run **Set up
+   the free-use zones** below before this run relies on free routes: with
+   nothing declared, remote free routes (`:free`, `opencode/*`) are excluded
+   from this run. Offered every time it applies, never silently skipped —
+   the same discipline as the due policy in step 7.
    Done when: candidates are ranked by their share of the domain's traffic,
     prices and data timestamp shown. Cataloged
     OpenCode `opencode/*` models
@@ -292,6 +298,46 @@ conduct this interview before relying on project-specific rules:
    error: empty material is not safe by default, so obtain the material before
    claiming a safe shape.
 
+## Set up the free-use zones
+
+When `zones.json` is absent, or the user wants to move a folder's posture,
+conduct this interview before a run relies on free routes — the machine
+starts closed everywhere, so this is the interview's only opening move:
+
+1. Discover candidate folders: the working folder, its repositories, and
+   the worktree roots this machine's harnesses create ticket worktrees
+   under. Ask one question per folder, in the user's own terms: *"may free
+   models — some of which retain what you send — run on content here?"*
+   and record one of the three answers:
+   - `open` — free models may run on content here, whatever a route retains.
+   - `sensitive` — a free route that may retain what you send (`trains`) is
+     excluded; no-retention free routes and models served on this machine
+     stay.
+   - `closed` — no remote free route may run here at all; models served on
+     this machine never leave it and stay in.
+2. Carry the worktree-root rule from **Closed-zone protocol** into the
+   answers: an **undeclared worktree root stays closed** however open its
+   repository, so ask about the directory the worktrees live in and declare
+   it — that lets the origin repository's zone decide the worktree's
+   posture, never the bare path the worktree happens to sit on.
+3. Anything unasked stays `closed`: the interview can open less, never
+   more. `"default"` stays `"closed"` and the file lists only the folders
+   the user actually answered for.
+4. Propose the resulting JSON in full:
+
+   ```json
+   {"zones": [{"path": "~/work", "free": "open"}], "default": "closed"}
+   ```
+
+   Write it with `scripts/modelbandit.py --write-zones`, the JSON on stdin —
+   no mode ever needs this file hand-written. It validates before it writes:
+   an invalid config refuses with status 4 naming the offending entry and
+   writes nothing, so an attempt over an existing file cannot corrupt it.
+   Then have the user review the printed path and the file's contents before
+   anything relies on them, and verify afterwards — the next run's `zone:`
+   header, or `scripts/modelbandit.py --assert-allowed --model <id>
+   --working-dir <folder>`, states the posture now in force.
+
 ## Reference
 
 - **Domains** — five, mapped to leaderboard tags in `policy.json`: research,
@@ -374,7 +420,11 @@ conduct this interview before relying on project-specific rules:
   locally served models, which never leave the machine; a paid no-retention
   route still serves. Exposure exclusions are the shape's, not the zone's, so
   they mark and never hide, and because `closed` implies `sensitive` an
-  exposed *paid* route is excluded there exactly as under `sensitive`.
+  exposed *paid* route is excluded there exactly as under `sensitive`. For
+  setup, follow **Set up the free-use zones**; `--write-zones` reads the
+  interview's proposal from stdin, validates it through this loader's
+  rules, and writes the file atomically — no mode needs `zones.json`
+  hand-written.
 
 - **Pre-flight (`--assert-allowed`)** — `scripts/modelbandit.py --assert-allowed
   --model <id> --working-dir <folder>` answers one question for an
