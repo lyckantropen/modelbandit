@@ -801,8 +801,14 @@ def known_regime(value, *, where: str) -> str:
     return value
 
 
-def validate_zones(payload, *, source: str = ZONES_FILE) -> dict:
-    """The zones file's contents, validated — additive against the default."""
+def validate_zones(payload, *, source: str = ZONES_FILE, environ=None) -> dict:
+    """The zones file's contents, validated — additive against the default.
+
+    Two entries naming the same normalised path stop loudly: the resolver
+    would take the last one, and a later entry could silently reopen a path
+    an earlier one closed — the one direction a fail-closed resolver must
+    never take.
+    """
     if not isinstance(payload, dict):
         raise SystemExit(f"{source} must be a JSON object with "
                          f"{' / '.join(ZONES_KEYS)}")
@@ -815,6 +821,7 @@ def validate_zones(payload, *, source: str = ZONES_FILE) -> dict:
         raise SystemExit(f"zones in {source} must be a list of "
                          f"{{{' / '.join(ZONE_KEYS)}}} objects")
     zones = []
+    seen: dict[str, int] = {}
     for index, entry in enumerate(entries, 1):
         where = f"zone #{index} in {source}"
         if not isinstance(entry, dict):
@@ -827,6 +834,11 @@ def validate_zones(payload, *, source: str = ZONES_FILE) -> dict:
         path = entry.get("path")
         if not isinstance(path, str) or not path.strip():
             raise SystemExit(f"{where} needs a non-empty string path")
+        normalised = compare_path(path, environ=environ)
+        if normalised in seen:
+            raise SystemExit(f"zone #{index} in {source} duplicates zone "
+                             f"#{seen[normalised]} ({path})")
+        seen[normalised] = index
         zones.append({"path": path,
                       "free": known_regime(entry.get("free"), where=where)})
     default = known_regime(payload.get("default", DEFAULT_REGIME),
@@ -845,7 +857,7 @@ def load_zones(path: str | None = None, *, environ=None) -> dict:
             payload = json.load(f)
     except (OSError, ValueError) as exc:
         raise SystemExit(f"cannot read zones file {path}: {exc}") from None
-    return validate_zones(payload, source=path)
+    return validate_zones(payload, source=path, environ=environ)
 
 
 def stricter(left: str, right: str) -> str:
@@ -886,12 +898,49 @@ def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
     return Zone(path=best[1]["path"], regime=best[1]["free"])
 
 
+def _under_modules(common: str) -> bool:
+    """Whether a git common dir is a submodule's, under a `.git/modules`
+    directory — a path belonging to neither the submodule nor the
+    superproject."""
+    parts = common.split(os.sep)
+    return any(parts[i] == ".git" and parts[i + 1] == "modules"
+               for i in range(len(parts) - 1))
+
+
+def _module_origin(common: str, root: str, run) -> str | None:
+    """The submodule working tree a `.git/modules` git dir serves.
+
+    `core.worktree` in the module's config names its working tree, relative
+    to the git dir — the same answer whether git is asked from the module's
+    own checkout or from a linked worktree of it. Without that setting,
+    `--show-toplevel` answers for the checkout itself; nothing answerable
+    means no origin, never the bogus `.git/modules` path.
+    """
+    try:
+        worktree = str(run(["config", "core.worktree"]) or "").strip()
+    except Exception:
+        worktree = ""
+    if worktree:
+        return os.path.normpath(os.path.join(common, worktree))
+    try:
+        top = str(run(["rev-parse", "--show-toplevel"]) or "").strip()
+    except Exception:
+        return None
+    if not top:
+        return None
+    return os.path.normpath(top if os.path.isabs(top)
+                            else os.path.join(root, top))
+
+
 def git_origin(root: str, *, run=None) -> str | None:
     """The repository a folder belongs to, from its shared `.git` directory.
 
     `git rev-parse --git-common-dir` reports the main worktree's `.git` for a
     linked worktree, so a ticket worktree resolves to the repository it came
-    from rather than to where it happens to live. Git missing, failing or
+    from rather than to where it happens to live. A submodule's git dir lives
+    under the superproject's `.git/modules/<name>`, which belongs to neither
+    repository, so there the origin is the submodule's own working tree — the
+    repository whose content the folder holds. Git missing, failing or
     reporting nothing usable answers None — a run then carries only its
     working folder's zone.
     """
@@ -907,7 +956,10 @@ def git_origin(root: str, *, run=None) -> str | None:
         return None
     if not os.path.isabs(common):
         common = os.path.join(root, common)
-    origin = os.path.dirname(os.path.normpath(common))
+    common = os.path.normpath(common)
+    if _under_modules(common):
+        return _module_origin(common, root, run)
+    origin = os.path.dirname(common)
     if not origin or not os.path.dirname(origin):
         return None
     return origin

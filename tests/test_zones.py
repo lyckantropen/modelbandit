@@ -6,6 +6,7 @@ test reads this machine's `$HOME`, runs git, or touches the network.
 """
 
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -119,6 +120,47 @@ class ZonesFileTests(TempDirMixin):
         path = self.write_zones({"zones": ["not-a-zone"]})
         with self.assertRaisesRegex(SystemExit, "zone #1"):
             bind.load_zones(path)
+
+
+class DuplicateZoneTests(TempDirMixin):
+    """Two entries naming the same normalised path stop loudly: last-wins
+    would silently reopen a closed declaration — the one direction a
+    fail-closed resolver must never take."""
+
+    import json as _json
+
+    def write_zones(self, payload):
+        return self.write("zones.json", self._json.dumps(payload))
+
+    def load(self, payload):
+        return bind.load_zones(self.write_zones(payload))
+
+    def test_an_identical_path_declared_twice_stops(self):
+        payload = {"zones": [zone(PRIVATE, "closed"), zone(PRIVATE, "open")]}
+        with self.assertRaisesRegex(SystemExit, r"zone #2 .* zone #1"):
+            self.load(payload)
+
+    def test_the_stop_names_the_source_and_the_path(self):
+        payload = {"zones": [zone(PRIVATE, "closed"), zone(PRIVATE, "sensitive")]}
+        with self.assertRaisesRegex(SystemExit, "zones.json"):
+            self.load(payload)
+        with self.assertRaisesRegex(SystemExit, "private"):
+            self.load(payload)
+
+    def test_a_path_that_only_normalises_the_same_stops(self):
+        twin = PRIVATE + os.sep + "."
+        payload = {"zones": [zone(PRIVATE, "closed"), zone(twin, "open")]}
+        with self.assertRaisesRegex(SystemExit, r"zone #2 .* zone #1"):
+            self.load(payload)
+
+    def test_paths_fold_case_where_the_platform_does(self):
+        payload = {"zones": [zone(PRIVATE, "closed"),
+                             zone(PRIVATE.upper(), "open")]}
+        if os.name == "nt":
+            with self.assertRaisesRegex(SystemExit, "zone #2"):
+                self.load(payload)
+        else:
+            self.assertEqual(len(self.load(payload)["zones"]), 2)
 
 
 class ZoneResolverTests(unittest.TestCase):
@@ -291,6 +333,167 @@ class OriginZoneTests(unittest.TestCase):
         bind.effective_zone(REPO, zones=self.ZONES, run=run,
                             environ=dict(ENV))
         self.assertEqual(len(calls), 1)  # one git call, no duplicate lookup
+
+
+SUPER = os.path.join(HOME, "super")
+SUBMODULE = os.path.join(SUPER, "sub")
+# A submodule's git dir lives under the superproject's `.git/modules/<name>`,
+# whatever folder git is asked from.
+SUB_COMMON = os.path.join(SUPER, ".git", "modules", "sub")
+SUB_WORKTREE = os.path.join(HOME, "elsewhere", "sub-wt")
+# `core.worktree` in the module's config names its working tree, relative to
+# the git dir.
+MODULE_WORKTREE = ".." + os.sep + ".." + os.sep + ".." + os.sep + "sub"
+
+
+def module_run(common_dir=SUB_COMMON, *, worktree=MODULE_WORKTREE,
+               toplevel=SUBMODULE):
+    """A git runner shaped like the submodule case: the common dir sits under
+    `.git/modules`, `core.worktree` names the module's working tree."""
+    def run(args):
+        if args == ["rev-parse", "--git-common-dir"]:
+            return common_dir + "\n"
+        if args == ["config", "core.worktree"]:
+            if worktree is None:
+                raise OSError("core.worktree is unset")
+            return worktree + "\n"
+        if args == ["rev-parse", "--show-toplevel"]:
+            if toplevel is None:
+                raise OSError("not a working tree")
+            return toplevel + "\n"
+        raise OSError(f"unexpected git call: {args}")
+    return run
+
+
+class SubmoduleOriginTests(unittest.TestCase):
+    """A submodule is judged by the repository whose working tree it is — its
+    own root — never by the superproject's `.git/modules` directory."""
+
+    def test_a_submodule_checkout_resolves_to_its_own_root(self):
+        self.assertEqual(bind.git_origin(SUBMODULE, run=module_run()),
+                         SUBMODULE)
+
+    def test_a_worktree_of_the_submodule_resolves_to_the_submodule_root(self):
+        self.assertEqual(bind.git_origin(SUB_WORKTREE, run=module_run()),
+                         SUBMODULE)
+
+    def test_an_unset_core_worktree_falls_back_to_the_toplevel(self):
+        self.assertEqual(
+            bind.git_origin(SUBMODULE, run=module_run(worktree=None)),
+            SUBMODULE)
+
+    def test_an_unanswerable_module_git_dir_answers_none(self):
+        # neither core.worktree nor a toplevel: no origin, not the bogus
+        # `.git/modules` path a bare parent would give.
+        self.assertIsNone(
+            bind.git_origin(SUBMODULE,
+                            run=module_run(worktree=None, toplevel=None)))
+
+    def test_a_plain_common_dir_is_never_rerouted(self):
+        self.assertEqual(bind.git_origin(REPO, run=lambda args: ".git\n"),
+                         REPO)
+
+    def test_a_folder_inside_the_submodule_is_governed_by_its_zone(self):
+        # the zone declared on the submodule's path covers the folder; the
+        # bogus `.git/modules` origin used to out-vote it with the closed
+        # default.
+        zones = {"zones": [zone(SUBMODULE, "open")], "default": "closed"}
+        self.assertEqual(
+            bind.effective_zone(os.path.join(SUBMODULE, "deep"), zones=zones,
+                                run=module_run(), environ=dict(ENV)),
+            bind.Zone(path=SUBMODULE, regime="open"))
+
+    def test_a_worktree_of_the_submodule_honours_the_submodule_zone(self):
+        zones = {"zones": [zone(SUBMODULE, "open"), zone(SUB_WORKTREE, "open")],
+                 "default": "closed"}
+        self.assertEqual(
+            bind.effective_zone(SUB_WORKTREE, zones=zones, run=module_run(),
+                                environ=dict(ENV)),
+            bind.Zone(path=SUB_WORKTREE, regime="open"))
+
+
+class SubmoduleFixtureTests(TempDirMixin):
+    """Real repositories under a temporary directory: a superproject, a
+    submodule in it, a linked worktree of that submodule, and a linked
+    worktree of the superproject. Local file protocol only — no network —
+    and zones are passed in, so no machine config is read."""
+
+    def setUp(self):
+        super().setUp()
+        config = self.write("git-config", "")
+        self.env = dict(os.environ,
+                        GIT_CONFIG_GLOBAL=config, GIT_CONFIG_SYSTEM=config,
+                        GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0",
+                        GIT_AUTHOR_NAME="Fixture",
+                        GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                        GIT_COMMITTER_NAME="Fixture",
+                        GIT_COMMITTER_EMAIL="fixture@example.invalid")
+        self.subrepo = self.make_repo("subrepo")
+        self.super_root = self.make_repo("super")
+        self.sub = os.path.join(self.super_root, "sub")
+        self.super_wt = os.path.join(self.root, "wt-super")
+        self.sub_wt = os.path.join(self.root, "wt-sub")
+        self.git(self.super_root, "-c", "protocol.file.allow=always",
+                 "submodule", "add", "-q", self.subrepo, "sub")
+        self.git(self.super_root, "commit", "-qm", "add sub")
+        self.git(self.sub, "worktree", "add", self.sub_wt, "-b", "sub-wt")
+        self.git(self.super_root, "worktree", "add", self.super_wt,
+                 "-b", "super-wt")
+
+    def make_repo(self, name):
+        path = os.path.join(self.root, name)
+        os.makedirs(path)
+        self.git(path, "init", "-q")
+        self.git(path, "commit", "--allow-empty", "-qm", name)
+        return path
+
+    def git(self, cwd, *args):
+        completed = subprocess.run(["git", "-C", cwd, *args], env=self.env,
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace")
+        self.assertEqual(completed.returncode, 0,
+                         f"git {' '.join(args)} failed: {completed.stderr}")
+        return completed.stdout
+
+    def test_a_submodule_honours_its_own_declaration(self):
+        zones = {"zones": [zone(self.sub, "open")], "default": "closed"}
+        self.assertEqual(bind.effective_zone(self.sub, zones=zones),
+                         bind.Zone(path=self.sub, regime="open"))
+
+    def test_a_folder_inside_the_submodule_honours_the_declaration(self):
+        deep = os.path.join(self.sub, "deep")
+        os.makedirs(deep)
+        zones = {"zones": [zone(self.sub, "open")], "default": "closed"}
+        self.assertEqual(bind.effective_zone(deep, zones=zones),
+                         bind.Zone(path=self.sub, regime="open"))
+
+    def test_a_worktree_of_the_submodule_honours_the_submodule_zone(self):
+        zones = {"zones": [zone(self.sub, "open"), zone(self.sub_wt, "open")],
+                 "default": "closed"}
+        self.assertEqual(bind.effective_zone(self.sub_wt, zones=zones),
+                         bind.Zone(path=self.sub_wt, regime="open"))
+
+    def test_a_plain_repo_resolves_itself(self):
+        zones = {"zones": [zone(self.super_root, "open")], "default": "closed"}
+        self.assertEqual(bind.effective_zone(self.super_root, zones=zones),
+                         bind.Zone(path=self.super_root, regime="open"))
+
+    def test_a_plain_worktree_still_inherits_its_repository(self):
+        zones = {"zones": [zone(self.super_root, "closed"),
+                           zone(self.super_wt, "open")],
+                 "default": "closed"}
+        self.assertEqual(bind.effective_zone(self.super_wt, zones=zones),
+                         bind.Zone(path=self.super_root, regime="closed"))
+
+    def test_a_closed_submodule_blocks_remote_free_and_admits_local(self):
+        zones = {"zones": [zone(self.sub, "closed")], "default": "open"}
+        resolved = bind.effective_zone(self.sub, zones=zones)
+        self.assertEqual(resolved, bind.Zone(path=self.sub, regime="closed"))
+        self.assertIn("remote free route is prohibited",
+                      bind.zone_block("z-ai/glm-5.4:free", resolved, policy={}))
+        local_policy = {"free_models": {"qwen3-coder-30b": {"exposure": "local"}}}
+        self.assertIsNone(bind.zone_block("qwen3-coder-30b", resolved,
+                                          policy=local_policy))
 
 
 def candidate(mid, *, exposure="no-retention", is_free=False, local=False):
