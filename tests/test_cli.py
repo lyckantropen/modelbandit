@@ -1064,10 +1064,14 @@ class CliTests(unittest.TestCase):
                              if ln.startswith("| ")
                              and ln.split("|")[1].strip().isdigit()), 12)
 
-    def test_sensitive_shape_with_no_admitted_candidate_exits(self):
+    def test_sensitive_shape_with_no_admitted_candidate_stops_with_zero(self):
+        # A completed run with no pick: the answer is the message on stderr
+        # (byte-identical to v1), and the status stays 0 (issue #41).
         self.sensitive_policy({"deepseek/": "trains"})
-        _, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
-        self.assertIn("no candidate admitted", code)
+        out, err, code, _ = self.run_cli("--domain", "writing", "--sensitive")
+        self.assertEqual(code, 0)
+        self.assertIn("no candidate admitted", err)
+        self.assertNotIn("no candidate admitted", out)
 
     def test_missing_scoring_block_exits_with_key(self):
         pol = json.loads(json.dumps(POLICY))
@@ -1076,7 +1080,7 @@ class CliTests(unittest.TestCase):
             json.dump(pol, f)
         _, err, code, calls = self.run_cli("--domain", "writing")
         # Rules/config error, status 4 — not the raw SystemExit payload,
-        # which a shell would report as 1 (the Secrets-gate status).
+        # which a shell would report as 1 (the generic failure code).
         self.assertEqual(code, 4)
         self.assertIn("scoring", err)
         self.assertEqual(calls, [])
@@ -1131,7 +1135,7 @@ class CliTests(unittest.TestCase):
                 json.dump(pol, f)
             _, err, code, _ = self.run_cli("--domain", "writing")
             # Loudly = named on stderr with status 4; the raw payload
-            # would exit 1 in a shell, the Secrets-gate status.
+            # would exit 1 in a shell, the generic failure code.
             self.assertEqual(code, 4)
             self.assertIn(f"{path}.{key}", err)
 
@@ -1435,7 +1439,7 @@ class CliTests(unittest.TestCase):
         self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
         guarded, _, guard_code, _ = self.guard(
             "deepseek/deepseek-v4-pro", sensitive=True, zones=zones)
-        self.assertEqual(guard_code, 5)
+        self.assertEqual(guard_code, 0)
         self.assertIn(expected, guarded)
 
     def test_an_undeclared_folder_reports_undeclared_and_closed(self):
@@ -1567,7 +1571,7 @@ class CliTests(unittest.TestCase):
             with self.subTest(model=model):
                 out, _, code, calls = self.guard(model,
                                                  zones=self.zone_of("closed"))
-                self.assertEqual(code, 5)
+                self.assertEqual(code, 0)
                 self.assertIn("blocked", out)
                 self.assertIn("blocked by the free-use zone", out)
                 self.assertIn(f"zone: {self._tmp.name} (closed)", out)
@@ -1578,14 +1582,14 @@ class CliTests(unittest.TestCase):
         self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      zones=self.zone_of("sensitive"))
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("exposed (trains)", out)
 
     def test_assert_allowed_blocks_an_exposed_paid_route_in_a_closed_zone(self):
         self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      zones=self.zone_of("closed"))
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("exposed (trains)", out)
 
     def test_an_unstated_shape_is_sensitive_and_the_output_says_so(self):
@@ -1595,7 +1599,7 @@ class CliTests(unittest.TestCase):
         self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      zones=self.zone_of("open"))
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("exposed (trains)", out)
         self.assertIn("shape: sensitive (assumed)", out)
 
@@ -1610,7 +1614,7 @@ class CliTests(unittest.TestCase):
     def test_plain_states_a_shape_never_opens_a_zone(self):
         out, _, code, _ = self.guard("vendor/model:free", plain=True,
                                      zones=self.zone_of("closed"))
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("remote free route is prohibited", out)
         self.assertIn("shape: plain (via --plain)", out)
 
@@ -1619,7 +1623,7 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      sensitive=True,
                                      zones=self.zone_of("open"))
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("exposed (trains)", out)
         self.assertIn("shape: sensitive (via --sensitive)", out)
 
@@ -1649,10 +1653,11 @@ class CliTests(unittest.TestCase):
 
     def test_assert_allowed_needs_no_policy_file(self):
         absent = os.path.join(self._tmp.name, "absent.json")
-        _, _, code, calls = self.guard("vendor/model:free",
-                                       zones=self.zone_of("closed"),
-                                       policy_path=absent)
-        self.assertEqual(code, 5)
+        blocked, _, code, calls = self.guard("vendor/model:free",
+                                             zones=self.zone_of("closed"),
+                                             policy_path=absent)
+        self.assertEqual(code, 0)
+        self.assertIn("blocked by the free-use zone", blocked)
         self.assertEqual(calls, [])
 
         out, err, code, calls = self.guard("deepseek/deepseek-v4-pro",
@@ -1688,7 +1693,7 @@ class CliTests(unittest.TestCase):
 
     def test_assert_allowed_treats_an_undeclared_folder_as_closed(self):
         out, _, code, _ = self.guard("vendor/model:free", zones_default="closed")
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("zone: undeclared (closed)", out)
 
     def test_assert_allowed_admits_a_local_catalog_entry_in_a_closed_zone(self):
@@ -1717,7 +1722,7 @@ class CliTests(unittest.TestCase):
             json.dump(pol, f)
         out, _, code, _ = self.guard(model,
                                      zones=self.zone_of("closed"))
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("remote free route is prohibited", out)
         self.assertIn(f"model: {model}", out)
 
@@ -1766,7 +1771,7 @@ class CliTests(unittest.TestCase):
                                                  "free": "closed"}],
                                          working_dir=link)
 
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("blocked by the free-use zone", out)
         self.assertIn(f"zone: {closed_dir} (closed)", out)
         self.assertEqual(calls, [])
@@ -2138,10 +2143,11 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         self.assertIn("budget: $1.00 -> under", out)
 
-    def test_budget_over_exits_2(self):
+    def test_budget_over_exits_zero_with_the_over_verdict(self):
+        # Over budget is a verdict on stdout, not a failure: exit 0 (v2).
         out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "2",
                                        "--budget", "0.1")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 0)
         self.assertIn("budget: $0.10 -> OVER", out)
 
     def test_token_overrides_change_projection(self):
@@ -2205,10 +2211,11 @@ class CliTests(unittest.TestCase):
                                   "--in-tokens", "20000", "--out-tokens", "12000")
         self.assertEqual(overridden, baseline)
 
-    def test_over_budget_still_exits_2_at_an_accepted_boundary(self):
-        _, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "2",
-                                     "--budget", "0.1", "--cached-share", "0")
-        self.assertEqual(code, 2)
+    def test_over_budget_still_exits_zero_at_an_accepted_boundary(self):
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "2",
+                                       "--budget", "0.1", "--cached-share", "0")
+        self.assertEqual(code, 0)
+        self.assertIn("budget: $0.10 -> OVER", out)
 
     # --- Free-request quota: a cliff before the plan is drawn --------------
 
@@ -2362,7 +2369,7 @@ class CliTests(unittest.TestCase):
     # The machine-readable companion to the README Setup section: read-only
     # and fully offline. Exit 0 whenever setup files are absent (the
     # documented default), 4 only when a file that exists fails validation —
-    # never 1, 2, 3 or 5.
+    # never an answer code, never a traceback.
 
     def status(self, *, working_dir=None, policy_path=None, zones=None,
                zones_default="open", zones_absent=False):
@@ -2538,7 +2545,7 @@ class PolicyFileTests(CliTests):
     """One policy loader: every entry point reads the policy file the same
     way, as UTF-8, and a policy that cannot be read or trusted is a
     policy/config error (status 4) — never a locale-dependent mangle, never
-    an uncaught traceback, never a Secrets-gate verdict (1)."""
+    an uncaught traceback, never a Secrets-gate verdict."""
 
     def write_policy(self, policy):
         with open(self.policy_path, "w", encoding="utf-8") as f:
@@ -2625,8 +2632,8 @@ class PolicyFileTests(CliTests):
         # A policy that parses and loads but cannot be trusted is a
         # rules/config error on the ranking path too: an uncaught
         # SystemExit from load_policy_config would fall through as status 1,
-        # the Secrets-gate verdict, which is exactly what this class pins
-        # against.
+        # a generic operational failure rather than any verdict, which is
+        # exactly what this class pins against.
         self.write_policy({"domains": {}})
         for argv in (["--domain", "writing"], ["--check-policy"]):
             with self.subTest(entry=argv[0]):

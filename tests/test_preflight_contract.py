@@ -2,11 +2,17 @@
 
 An orchestrator that asks `--assert-allowed` whether a model may serve gets an
 answer no more permissive than the plan's admission, in both dimensions the
-mechanism promises — Exposure and the free-use zone. The property is pinned
-across a small matrix of Exposure, regime and route kind (paid, `:free`,
-`opencode/*`, locally served), with the plan's verdict taken through the same
-admission seam the ranked table and the deal consult (`admit`), its catalog
-and Footprint clauses neutralized so the two gates judge the same clauses.
+mechanism promises — Exposure and the free-use zone. The plan's verdict is
+taken through the same admission seam the ranked table and the deal consult
+(`admit`), its catalog and Footprint clauses neutralized so the two gates
+judge the same clauses; the pre-flight's verdict is read at its **egress**
+(issue #41, exit contract v2): the printed `allowed:` / `blocked by the
+free-use zone` lines say which answer came back, and the status is pinned to
+0 for either — status says the tool ran, the line says what's true, so the
+property can never lean on a status code again.
+
+The property is pinned across a small matrix of Exposure, regime and route
+kind (paid, `:free`, `opencode/*`, locally served).
 
 The matrix includes the stale-policy cells a `local` catalogue label on a
 remote serving identity would produce (constructed directly, bypassing the
@@ -20,9 +26,12 @@ not Sensitive — an unstated shape is Sensitive for both gates, and a stated
 shape is judged as stated on both sides.
 """
 
+import io
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
@@ -51,9 +60,43 @@ def policy_for(prefix: str, exposure: str) -> dict:
             "summaries": SUMMARIES}
 
 
-class PreflightNeverLooserThanPlanTests(unittest.TestCase):
-    """zone_block is None (the pre-flight allows) only where the plan's
-    admission admits the same route and shape."""
+class EgressVerdictMixin:
+    """Read the pre-flight's verdict at its egress — never from a status."""
+
+    def preflight_answer(self, mid, zone, policy, *, sensitive_preflight):
+        """The pre-flight's verdict for one cell.
+
+        Runs `run_assert_allowed` for the cell's zone and policy (both
+        injected the way a caller supplies them) and reads the printed
+        verdict lines: exactly one of `allowed: <id>` or `blocked by the
+        free-use zone` must come back, and the exit contract v2 pins the
+        status to 0 for either answer — the status never carries the
+        verdict.
+        """
+        printed = io.StringIO()
+        with mock.patch.object(modelbandit, "effective_zone",
+                               return_value=zone), \
+                mock.patch.object(modelbandit, "policy_facts",
+                                  return_value=policy), \
+                redirect_stdout(printed):
+            code = modelbandit.run_assert_allowed(
+                model=mid, plain=not sensitive_preflight)
+        out = printed.getvalue()
+        allowed = [line for line in out.splitlines()
+                   if line.startswith("allowed: ")]
+        blocked = [line for line in out.splitlines()
+                   if line == "blocked by the free-use zone"]
+        self.assertEqual(len(allowed) + len(blocked), 1,
+                         f"exactly one verdict line expected, got:\n{out}")
+        self.assertEqual(
+            code, 0, f"any verdict exits 0 (issue #41), got {code!r}:\n{out}")
+        return bool(allowed), out
+
+
+class PreflightNeverLooserThanPlanTests(EgressVerdictMixin,
+                                        unittest.TestCase):
+    """The pre-flight's `allowed:` verdict only where the plan's admission
+    admits the same route and shape."""
 
     def assert_never_looser(self, mid, policy, *, local, sensitive_plan,
                             sensitive_preflight):
@@ -62,20 +105,21 @@ class PreflightNeverLooserThanPlanTests(unittest.TestCase):
             with self.subTest(mid=mid, regime=regime,
                               sensitive_plan=sensitive_plan,
                               sensitive_preflight=sensitive_preflight):
-                preflight = modelbandit.zone_block(mid, zone, policy=policy,
-                                            sensitive=sensitive_preflight)
+                allowed, printed = self.preflight_answer(
+                    mid, zone, policy, sensitive_preflight=sensitive_preflight)
                 shape = modelbandit.Shape(
                     sensitive=sensitive_plan,
                     regime=modelbandit.shape_regime(zone,
                                              sensitive=sensitive_plan))
                 plan = modelbandit.admit(shape, modelbandit.candidate_for(mid, policy,
                                                             local=local))
-                if preflight is None:
+                if allowed:
                     self.assertTrue(plan.admitted, (
                         f"pre-flight allows {mid} at regime {regime} "
                         f"(preflight sensitive={sensitive_preflight}) but the "
                         f"plan refuses it (plan sensitive={sensitive_plan}, "
-                        f"reason: {plan.reason})"))
+                        f"reason: {plan.reason}); pre-flight output:\n"
+                        f"{printed}"))
 
     def test_the_same_shape_never_loses_to_the_pre_flight(self):
         for kind, mid, prefix, exposures, local in CELLS:
@@ -101,7 +145,8 @@ class PreflightNeverLooserThanPlanTests(unittest.TestCase):
                         sensitive_plan=False, sensitive_preflight=True)
 
 
-class LocalLabelRefusedByBothGatesTests(unittest.TestCase):
+class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
+                                        unittest.TestCase):
     """A remote Free route labelled `local` is refused for a Sensitive shape
     and refused in a closed regime — by the plan's source filter and by the
     pre-flight alike; the two gates cannot disagree about the same route."""
@@ -124,16 +169,17 @@ class LocalLabelRefusedByBothGatesTests(unittest.TestCase):
                 source = modelbandit.zone_prohibition(
                     closed, modelbandit.candidate_for(mid, policy, local=local))
                 self.assertIn("remote free route is prohibited", source)
-                # The pre-flight: the same refusals, zone_block answering.
-                self.assertIn(
-                    "remote free route is prohibited",
-                    modelbandit.zone_block(mid, modelbandit.Zone(path="z", regime="closed"),
-                                    policy=policy))
-                self.assertIn(
-                    "exposed (trains)",
-                    modelbandit.zone_block(mid, modelbandit.Zone(path="z",
-                                                   regime="sensitive"),
-                                    policy=policy, sensitive=True))
+                # The pre-flight, read at its egress: the same refusals.
+                allowed, printed = self.preflight_answer(
+                    mid, modelbandit.Zone(path="z", regime="closed"), policy,
+                    sensitive_preflight=False)
+                self.assertFalse(allowed)
+                self.assertIn("remote free route is prohibited", printed)
+                allowed, printed = self.preflight_answer(
+                    mid, modelbandit.Zone(path="z", regime="sensitive"),
+                    policy, sensitive_preflight=True)
+                self.assertFalse(allowed)
+                self.assertIn("exposed (trains)", printed)
 
 
 if __name__ == "__main__":

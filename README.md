@@ -203,8 +203,9 @@ order, each pointing at where its rule lives:
    ([SKILL.md reference](skills/modelbandit/SKILL.md#reference)).
 4. **`--assert-allowed` pre-flight — before launch.** An orchestrator holding
    a model id — from a plan, another agent, a previous run — asks the zone
-   first: exit **0** means it may serve in that folder's effective zone, exit
-   **5** means the free-use zone blocks it. No policy file, no classification
+   first: launch only when the pre-flight says `allowed`. An error, a
+   missing field, a malformed response — anything else means do not launch.
+   No policy file, no classification
    fetch, no network, and it fails closed: with no shape stated it assumes
    Sensitive and says so ([command](#directly)).
 5. **Closed-zone protocol — what the agent does when a zone blocks.** The
@@ -304,9 +305,10 @@ python3 skills/modelbandit/scripts/modelbandit.py --check-policy
 ```
 
 Pre-flight a model against the machine's free-use zones
-(`$XDG_CONFIG_HOME/modelbandit/zones.json`) before launching it — exit 0 when
-it may serve, 5 when the zone blocks it; no policy file, classification or
-network needed:
+(`$XDG_CONFIG_HOME/modelbandit/zones.json`) before launching it — the output
+says `allowed: <id>` or `blocked by the free-use zone`, and either verdict
+exits 0, so read the verdict, not the status; no policy file, classification
+or network needed:
 
 ```bash
 python3 skills/modelbandit/scripts/modelbandit.py --assert-allowed --model z-ai/glm-5.4:free --working-dir .

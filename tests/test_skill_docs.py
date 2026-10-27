@@ -124,5 +124,71 @@ class MigrationRoutingTests(unittest.TestCase):
         self.assertEqual(TEXT.count("read `migrate.md` and follow it"), 1)
 
 
+class ExitContractV2WordingTests(unittest.TestCase):
+    """Issue #41 pins: the closed-zone protocol launches only on the
+    `allowed` verdict (default-deny), and the exit-status reference carries
+    the v2 table — status says the tool ran, output says what's true."""
+
+    def test_protocol_step4_launches_only_on_the_allowed_verdict(self):
+        body = section("Closed-zone protocol")
+        self.assertIn("Launch only when the pre-flight says `allowed`",
+                      body)
+        self.assertIn("anything else means do not launch", body)
+        self.assertNotIn("exit **5**", body)
+        self.assertNotIn("Exit **0** means", body)
+
+    def test_the_exit_statuses_reference_is_the_v2_table(self):
+        body = section("Reference")
+        self.assertIn("ran to completion: any verdict", body)
+        self.assertIn("carries no contract meaning", body)
+        self.assertIn("could not form a verdict", body)
+        self.assertIn("read the verdict lines (or `--json`), not `$?` "
+                      "(ADR-0004)", body)
+        self.assertNotIn("**1** Secrets gate sensitive", body)
+        self.assertNotIn("**5** blocked by the free-use zone", body)
+
+
+class Adr0004Tests(unittest.TestCase):
+    """AC6: ADR-0004 is present."""
+
+    ADR = os.path.join(ROOT, "docs", "adr",
+                       "0004-status-says-if-the-tool-ran.md")
+
+    def test_adr_0004_exists(self):
+        self.assertTrue(os.path.isfile(self.ADR))
+
+    def test_structure_mirrors_the_earlier_adrs(self):
+        def structure(path):
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            self.assertTrue(lines[0].startswith("# "), path)
+            self.assertFalse(lines[0].startswith("## "), path)
+            return [line for line in lines if line.startswith("## ")]
+
+        self.assertEqual(structure(self.ADR),
+                         structure(os.path.join(ROOT, "docs", "adr",
+                                                "0003-fail-closed-by-default"
+                                                ".md")))
+
+    def test_the_decision_and_both_rejected_alternatives_are_recorded(self):
+        with open(self.ADR, encoding="utf-8") as f:
+            text = flat(f.read())
+        # The v2 table, decision and retirement.
+        self.assertIn("ran to completion", text)
+        self.assertIn("no contract meaning", text)
+        self.assertIn("could not form a verdict", text)
+        self.assertIn("Retired: **3** (not-certified), **5** (zone-block), "
+                      "**1** (sensitive)", text)
+        # Rejected: keep the integer enum — every verdict burns a code and
+        # the 1-collision stays.
+        self.assertIn("Keep the integer enum", text)
+        self.assertIn("every new verdict burns a code", text)
+        # Rejected: a --gate boolean — no honest nonzero for "false", and
+        # jq -e already owns shell booleans.
+        self.assertIn("`--gate` boolean flag", text)
+        self.assertIn("no honest nonzero remains for", text)
+        self.assertIn("`jq -e '.allowed'` already owns shell booleans", text)
+
+
 if __name__ == "__main__":
     unittest.main()

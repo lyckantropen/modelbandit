@@ -545,14 +545,19 @@ def secrets_check(material: str, *, root: str | None = None,
     return secrets_verdict(material, machine=facts, rules=rules)
 
 
-SECRETS_SAFE, SECRETS_SENSITIVE, SECRETS_NOT_CERTIFIED = 0, 1, 3
-# Exit status 2 belongs to argparse's usage errors; rules/config errors use 4.
+# Exit contract v2 (ADR-0004): status says whether the tool ran; the output
+# says what's true. 0 is any completed verdict (the printed lines say which),
+# 2 belongs to argparse's usage errors, 4 means rules/config stopped the tool
+# before it could form a verdict. 1 is CPython's generic operational failure
+# and is never assigned here; the answer codes 1 (sensitive), 3 (not
+# certified) and 5 (zone block) are retired, as is the over-budget run's
+# borrowed 2 — answers live in the output, never in a nonzero status.
 RULES_CONFIG_ERROR = 4
-# The free-use zone's own refusal: a distinct status, so a zone block is never
-# mistaken for merely sensitive (1) or safe (0). Shared by --check-secrets and
-# the --assert-allowed pre-flight.
-ZONE_BLOCKED = 5
-SECRETS_ZONE_BLOCKED = ZONE_BLOCKED
+
+
+def emit_json(payload: dict) -> None:
+    """One JSON object per `--json` invocation on stdout — stdlib json only."""
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 def closed_regime_provenance(sources, zones: dict, *, environ=None,
@@ -579,19 +584,21 @@ def run_secrets_check(*, working_dir: str | None = None,
                       material: str | None = None,
                       outside_files=(), model: str | None = None,
                       policy_path: str | None = None,
-                      sensitive: bool = False) -> int:
+                      sensitive: bool = False, as_json: bool = False) -> int:
     """Print the Secrets gate's verdict for one shape's material.
 
     Material is read from stdin; the zone the check judged by, the verdict,
-    the rule that tripped and the rules file in force are printed. Exit status
-    distinguishes them: 0 safe, 1 sensitive, 2 usage error, 3 not certified,
-    4 rules/config error, 5 blocked by the free-use zone. A shape with no material
-    given cannot be certified — silence is never read as safe.
+    the rule that tripped and the rules file in force are printed. Every
+    verdict exits 0 — safe, sensitive, not certified, or blocked by the
+    free-use zone — and the printed lines say which (exit contract v2,
+    ADR-0004); 4 is a rules/config error and 2 a usage error. A shape with
+    no material given cannot be certified — silence is never read as safe.
 
-    Status 5 is the zone's own answer, ahead of the content verdict: material
-    whose provenance has the effective closed regime, or a
-    `--model` the effective zone's regime cannot admit. The zone is named;
-    the material never is.
+    The zone answers ahead of the content verdict: material whose
+    provenance has the effective closed regime, or a `--model` the
+    effective zone's regime cannot admit. The zone is named; the material
+    never is. With `as_json`, one JSON object replaces the lines (mode,
+    ok, verdict, status, zone, reason, rule).
     """
     if material is None:
         try:
@@ -611,7 +618,8 @@ def run_secrets_check(*, working_dir: str | None = None,
         print(f"secrets gate: rules/config error ({exc.code})", file=sys.stderr)
         return RULES_CONFIG_ERROR
     zone = effective_zone(path_base, zones=zones)
-    print(f"zone: {zone_label(zone, sensitive=sensitive)}")
+    if not as_json:
+        print(f"zone: {zone_label(zone, sensitive=sensitive)}")
     blocked, reason = None, None
     if outside_paths:
         blocked = closed_regime_provenance(outside_paths, zones)
@@ -627,23 +635,48 @@ def run_secrets_check(*, working_dir: str | None = None,
         reason = zone_block(model, zone, policy=facts, sensitive=sensitive)
         blocked = zone
     if reason is not None:
-        print("secrets gate: blocked by the free-use zone")
-        print(f"zone: {zone_label(blocked, sensitive=sensitive)}")
-        print(f"reason: {reason}")
-        return SECRETS_ZONE_BLOCKED
+        # A zone block is a verdict, not a failure: exit 0, the lines say
+        # blocked (v2). The zone is named; the material never is.
+        if as_json:
+            emit_json({"mode": "check-secrets", "ok": True,
+                       "status": "zone-blocked", "verdict": False,
+                       "zone": zone_payload(blocked),
+                       "reason": reason, "rule": None})
+        else:
+            print("secrets gate: blocked by the free-use zone")
+            print(f"zone: {zone_label(blocked, sensitive=sensitive)}")
+            print(f"reason: {reason}")
+        return 0
     if not isinstance(material, str) or not material.strip():
-        print("secrets gate: not certified (no material given)")
-        return SECRETS_NOT_CERTIFIED
+        if as_json:
+            emit_json({"mode": "check-secrets", "ok": True,
+                       "status": "not-certified", "verdict": False,
+                       "zone": zone_payload(zone),
+                       "reason": "no material given", "rule": None})
+        else:
+            print("secrets gate: not certified (no material given)")
+        return 0
     sensitive, rule = secrets_check(material, root=root, rules=rules,
                                     outside_files=outside_paths)
     if sensitive:
-        print("secrets gate: sensitive")
-        print(f"rule: {rule}")
+        if as_json:
+            emit_json({"mode": "check-secrets", "ok": True,
+                       "status": "sensitive", "verdict": False,
+                       "zone": zone_payload(zone),
+                       "reason": None, "rule": rule})
+        else:
+            print("secrets gate: sensitive")
+            print(f"rule: {rule}")
+    elif as_json:
+        emit_json({"mode": "check-secrets", "ok": True,
+                   "status": "safe", "verdict": True,
+                   "zone": zone_payload(zone),
+                   "reason": None, "rule": None})
     else:
         print("secrets gate: safe")
-    if os.path.exists(rules_path):
+    if not as_json and os.path.exists(rules_path):
         print(f"rules: {rules_path}")
-    return SECRETS_SENSITIVE if sensitive else SECRETS_SAFE
+    return 0
 
 
 def run_secrets_writer(*, working_dir: str | None = None,
@@ -837,6 +870,17 @@ def zone_label(zone: Zone, *, sensitive: bool = False) -> str:
         return f"{zone.label()} ({posture})"
     declared = f"declared: {zone.path}" if zone.path else "undeclared"
     return f"{zone.resolved} ({posture}) ({declared})"
+
+
+def zone_payload(zone: Zone) -> dict:
+    """The `zone` object every `--json` verdict carries: the place the
+    judgement landed (`path`), the regime, the declaration (null when no
+    declaration matched) and the resolved place when a link moved it — the
+    same facts the human `zone:` line spells."""
+    return {"path": zone.resolved if zone.resolved else zone.path,
+            "regime": zone.regime,
+            "declared": zone.path,
+            "resolved": zone.resolved}
 
 
 def zones_path(*, environ=None) -> str:
@@ -1183,7 +1227,8 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
 
 def run_assert_allowed(*, model: str, working_dir: str | None = None,
                        policy_path: str | None = None,
-                       plain: bool = False, restated: bool = False) -> int:
+                       plain: bool = False, restated: bool = False,
+                       as_json: bool = False) -> int:
     """Pre-flight: may this model serve in this folder's zone?
 
     The dispatch contract fails closed: an unstated shape is **Sensitive**,
@@ -1195,10 +1240,14 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     accepted with the same verdict.
 
     Prints the effective posture (`zone: <path> (<regime>)`) and either the
-    model as allowed (exit 0) or a free-use zone block (exit 5). The
-    zone is named; the shape's content never is. No policy file, classification
-    fetch or network is needed, so an orchestrator can refuse to launch a model
-    the plan should not have produced before anything is fetched.
+    model as allowed (`allowed: <id>`) or a free-use zone block — both
+    verdicts exit 0 and the lines say which (exit contract v2, ADR-0004:
+    launch only on `allowed`; the status says the tool ran). The zone is
+    named; the shape's content never is. No policy file, classification
+    fetch or network is needed, so an orchestrator can refuse to launch a
+    model the plan should not have produced before anything is fetched.
+    With `as_json`, one JSON object replaces the lines (mode, ok, allowed,
+    model, shape, zone, reason).
     """
     try:
         zone = effective_zone(working_dir)
@@ -1206,6 +1255,16 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     except SystemExit as exc:
         print(f"pre-flight: policy/config error ({exc.code})", file=sys.stderr)
         return RULES_CONFIG_ERROR
+    model_id = norm_id(model)
+    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain)
+    if as_json:
+        emit_json({"mode": "assert-allowed", "ok": True,
+                   "allowed": reason is None,
+                   "model": model_id,
+                   "shape": "plain" if plain else "sensitive",
+                   "zone": zone_payload(zone),
+                   "reason": reason})
+        return 0
     print(f"zone: {zone_label(zone, sensitive=restated)}")
     if plain:
         print("shape: plain (via --plain)")
@@ -1213,13 +1272,12 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         print("shape: sensitive (via --sensitive)")
     else:
         print("shape: sensitive (assumed)")
-    model_id = norm_id(model)
-    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain)
     if reason is not None:
+        # A block is a verdict, not a failure: exit 0, the lines say blocked.
         print("blocked by the free-use zone")
         print(f"model: {model_id}")
         print(f"reason: {reason}")
-        return ZONE_BLOCKED
+        return 0
     print(f"allowed: {model_id}")
     return 0
 
@@ -1239,7 +1297,7 @@ def load_policy_bundle(policy_path: str | None) -> dict:
 
 def run_status(*, working_dir: str | None = None,
                policy_path: str | None = None,
-               sensitive: bool = False) -> int:
+               sensitive: bool = False, as_json: bool = False) -> int:
     """The offline setup report: zone, zones file, secrets file, policy age.
 
     The machine-readable companion to the README Setup section — read-only
@@ -1249,9 +1307,10 @@ def run_status(*, working_dir: str | None = None,
     spelled the way the run header spells it.
 
     Exit status: 0 whenever the setup files are absent — a missing zones or
-    secrets file is the documented default, not an error; 4 only when a file
-    that exists fails validation (zones or policy), named on stderr. This
-    mode never produces 1, 2, 3 or 5.
+    secrets file is the documented default, not an answer the status must
+    carry; 4 only when a file that exists fails validation (zones or
+    policy), named on stderr. With `as_json`, one JSON object replaces the
+    lines (mode, ok, zone, zones_file, secrets_file, policy).
     """
     policy_path = policy_path or DEFAULT_POLICY
     try:
@@ -1266,8 +1325,20 @@ def run_status(*, working_dir: str | None = None,
     except SystemExit as exc:
         print(f"status: config error ({exc.code})", file=sys.stderr)
         return RULES_CONFIG_ERROR
-    print(f"zone: {zone_label(zone, sensitive=sensitive)}")
     label = zones_file_label()
+    root = resolve_working_root(working_dir)
+    secrets_path = os.path.join(root, RULES_FILE)
+    secrets_present = os.path.exists(secrets_path)
+    age = policy_age_days(policy_path)
+    if as_json:
+        emit_json({"mode": "status", "ok": True,
+                   "zone": zone_payload(zone),
+                   "zones_file": {"path": label, "present": zones_present},
+                   "secrets_file": {"path": secrets_path,
+                                    "present": secrets_present},
+                   "policy": {"path": policy_path, "age_days": age}})
+        return 0
+    print(f"zone: {zone_label(zone, sensitive=sensitive)}")
     if zones_present:
         print(f"zones file: present ({label})")
     else:
@@ -1277,15 +1348,12 @@ def run_status(*, working_dir: str | None = None,
         # interview.
         print(zones_absent_line())
         print(f"next: create {label} — see the skill's setup interview")
-    root = resolve_working_root(working_dir)
-    secrets_path = os.path.join(root, RULES_FILE)
-    if os.path.exists(secrets_path):
+    if secrets_present:
         # Presence only: the report never reads, parses or prints contents.
         print(f"secrets file: present ({secrets_path})")
     else:
         print(f"secrets file: absent ({secrets_path}) — "
               f"built-in default rules apply")
-    age = policy_age_days(policy_path)
     age_txt = f"{age}d old" if age is not None else "unknown"
     print(f"policy: {policy_path} — {age_txt}")
     return 0
@@ -3079,9 +3147,10 @@ def main() -> None:
                     help="Secrets gate check: reads the shape's material from "
                          "stdin and prints the verdict and rule; repeat "
                          "--outside-file PATH for named outside content. "
-                         "Exit 0 safe, 1 sensitive, 3 not certified, 4 "
-                         "rules/config error, 5 blocked by the free-use zone; 2 is "
-                         "reserved for usage errors.")
+                         "Exit 0 for every verdict — safe, sensitive, not "
+                         "certified, or blocked by the free-use zone — the "
+                         "printed lines say which; 4 rules/config error, "
+                         "2 usage errors. --json answers with one object.")
     ap.add_argument("--outside-file", action="append", default=[], metavar="PATH",
                     help="include this outside file's capped content in --check-secrets "
                          "(repeatable; relative paths use --working-dir)")
@@ -3091,10 +3160,11 @@ def main() -> None:
                          "assumed Sensitive (printed as `shape: sensitive "
                          "(assumed)`); --plain states the material is not "
                          "Sensitive, --sensitive restates the default. Exit 0 "
-                         "allowed, 5 blocked by the free-use zone, 4 "
-                         "policy/config error. The zone is named, the shape's "
-                         "content never is. No board or classification is "
-                         "fetched; no network is needed.")
+                         "either way — the output says `allowed: <id>` or "
+                         "`blocked by the free-use zone`, so launch only on "
+                         "allowed; 4 policy/config error. The zone is named, "
+                         "the shape's content never is. No board or "
+                         "classification is fetched; no network is needed.")
     ap.add_argument("--plain", action="store_true",
                     help="with --assert-allowed: state that the shape's "
                          "material is not Sensitive — the pre-flight assumes "
@@ -3130,7 +3200,15 @@ def main() -> None:
                          "classification, no quota. Exit 0 even when setup "
                          "files are absent (the documented default); 4 only "
                          "when an existing zones or policy file fails "
-                         "validation.")
+                         "validation. --json answers with one object.")
+    ap.add_argument("--json", action="store_true",
+                    help="answer with one JSON object on stdout instead of "
+                         "the human lines: --check-secrets, --assert-allowed, "
+                         "--status, and a budgeted ranking run (--domain with "
+                         "--budget); a usage error anywhere else. `ok` is "
+                         "always true — the status says the tool ran, the "
+                         "object says what's true. The ranking table itself "
+                         "is never JSON-ized.")
     ap.add_argument("--scope", action="store_true",
                     help="with the policy check (implied), print two fact lines "
                          "under each gap, stale-summary and stale-signal "
@@ -3200,6 +3278,18 @@ def main() -> None:
     if args.plain and args.sensitive:
         ap.error("--plain and --sensitive contradict; state one shape")
 
+    # --json answers the verdict modes only; the ranking table is never
+    # JSON-ized (issue #41), so anywhere else the flag would be silently
+    # ignored — it stops as the usage error it is.
+    if args.json and not (
+            args.check_secrets or args.assert_allowed or args.status
+            or (args.domain and args.budget is not None
+                and not (args.write_secrets or args.write_zones
+                         or args.list_domains or args.check_policy
+                         or args.scope or args.anchors is not None))):
+        ap.error("--json is read only by --check-secrets, --assert-allowed, "
+                 "--status and a budgeted ranking run (--domain with --budget)")
+
     if args.assert_allowed:
         # The pre-flight reads the zone and the local policy, never the board:
         # an orchestrator refuses a model the plan should not have produced
@@ -3211,7 +3301,7 @@ def main() -> None:
         raise SystemExit(run_assert_allowed(
             model=args.model, working_dir=args.working_dir,
             policy_path=args.policy, plain=args.plain,
-            restated=args.sensitive))
+            restated=args.sensitive, as_json=args.json))
     if args.check_secrets:
         # The gate reads the working folder, never the network: no policy and
         # no board are needed to decide whether a shape is Sensitive.
@@ -3219,7 +3309,8 @@ def main() -> None:
                                            outside_files=args.outside_file,
                                            model=args.model,
                                            policy_path=args.policy,
-                                           sensitive=args.sensitive))
+                                           sensitive=args.sensitive,
+                                           as_json=args.json))
     if args.write_secrets:
         raise SystemExit(run_secrets_writer(working_dir=args.working_dir))
     if args.write_zones:
@@ -3237,7 +3328,8 @@ def main() -> None:
         # report (exit 4).
         raise SystemExit(run_status(working_dir=args.working_dir,
                                     policy_path=args.policy,
-                                    sensitive=args.sensitive))
+                                    sensitive=args.sensitive,
+                                    as_json=args.json))
 
     # One policy loader for every entry point: the ranking path reports a
     # policy/config error (status 4) instead of letting an unreadable or
@@ -3576,12 +3668,18 @@ def main() -> None:
                 print(f"  {mid}: {note}")
 
     if pick is None:
+        # A completed run that found nothing to pick: the answer (why there
+        # is no pick) goes to stderr on its own line — byte-identical to the
+        # v1 message — and the status stays 0 (exit contract v2, ADR-0004).
         if excluded:
-            raise SystemExit(
-                "shape: no candidate admitted — every ranked "
-                f"candidate is excluded ({', '.join(excluded)}); drop "
-                "the restrictive shape setting or pick another domain")
-        raise SystemExit("domain has no ranked candidates in the model list")
+            print("shape: no candidate admitted — every ranked "
+                  f"candidate is excluded ({', '.join(excluded)}); drop "
+                  "the restrictive shape setting or pick another domain",
+                  file=sys.stderr)
+        else:
+            print("domain has no ranked candidates in the model list",
+                  file=sys.stderr)
+        raise SystemExit(0)
     if excluded and rows_out \
             and not decisions[rows_out[0][0]].admitted:
         print(f"\nnote: top of task order {rows_out[0][0]} is excluded "
@@ -3644,10 +3742,27 @@ def main() -> None:
           f"(floor ${floor_total:.2f})"
           + (f" | baseline anchor: ${base_per * args.tickets:.2f}" if base_per else ""))
     if args.budget is not None:
-        verdict = "under" if total <= args.budget else "OVER"
-        print(f"budget: ${args.budget:.2f} -> {verdict}")
-        if total > args.budget:
-            sys.exit(2)
+        over_budget = total > args.budget
+        if args.json:
+            # The budget verdict is this run's answer, in place of the human
+            # line; the ranking table above stays line output (never
+            # JSON-ized — issue #41).
+            emit_json({"mode": "budget", "ok": True,
+                       "over_budget": over_budget,
+                       "budget": args.budget,
+                       "projection": {"tickets": args.tickets,
+                                      "total": total,
+                                      "floor": floor_total,
+                                      "baseline": (base_per * args.tickets
+                                                   if base_per else None)},
+                       "zone": zone_payload(zone)})
+        else:
+            verdict = "under" if not over_budget else "OVER"
+            print(f"budget: ${args.budget:.2f} -> {verdict}")
+        if over_budget:
+            # Over budget is a verdict, not a failure: exit 0 with the OVER
+            # line (v2 retires the borrowed usage status; ADR-0004).
+            sys.exit(0)
 
 
 if __name__ == "__main__":

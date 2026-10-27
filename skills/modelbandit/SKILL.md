@@ -33,13 +33,14 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    sensitive or **not certified**, and names a rule when one trips it
    (`hostname`, `username`, `home path`, `local address`, `gitignored content
    (.env)`, outside-file content, a credential pattern, `phrase #N`,
-   `pattern #N`). Exit status is 0 for safe, 1 for sensitive, 2 for usage
-   errors, 3 for **not certified** — no material given, never read as safe —
-   4 for a rules/config error, or **5 for blocked by the free-use zone**: a
-   named outside source whose effective regime is closed (including the
-   undeclared closed default), or a `--model` its effective zone cannot admit.
-   A block is a stop, never a Sensitive verdict — see **Closed-zone protocol**
-   below.
+   `pattern #N`). Every verdict exits **0** — safe, sensitive, **not
+   certified** (no material given, never read as safe), or **blocked by the
+   free-use zone**: a named outside source whose effective regime is closed
+   (including the undeclared closed default), or a `--model` its effective
+   zone cannot admit — and the printed lines say which: status says the
+   check ran, output says what's true (ADR-0004). **2** is a usage error,
+   **4** a rules/config error. A block is a stop, never a Sensitive verdict —
+   see **Closed-zone protocol** below.
    Content-inclusion, any-of: the shape is **Sensitive** when its material
    carries content drawn from a file outside the working folder, or from a
    gitignored file inside it, or passwords/tokens/keys, or identifiers
@@ -219,9 +220,12 @@ area:
    scripts/modelbandit.py --assert-allowed --model <id> --working-dir <folder>
    ```
 
-   Exit **0** means the model may serve there; exit **5** means it is blocked by
-   the free-use zone, with effective posture and regime named (never content).
-   The dispatch fails closed: with no shape stated the pre-flight assumes the
+   Launch only when the pre-flight says `allowed` — an error, a missing
+   field, a malformed response, anything else means do not launch. The
+   verdict lines carry the answer, and either answer exits **0**: `allowed:
+   <id>`, or `blocked by the free-use zone` with effective posture and
+   regime named (never content) — status says the pre-flight ran, the lines
+   say what's true. The dispatch fails closed: with no shape stated the pre-flight assumes the
    material is Sensitive and says so (`shape: sensitive (assumed)`), so a
    route that retains training data is refused by default; when you know the
    material is not Sensitive, say so explicitly with `--plain`
@@ -229,7 +233,8 @@ area:
    default. The pre-flight reads
    the zones file and, when present, the local policy's Exposure facts: no
    policy file, no classification fetch, no network. Status **4** is a
-   policy/config error and **2** a usage error.
+   policy/config error and **2** a usage error — neither is an answer, and
+   neither launches.
 
 Exposure exclusions stay visible: in a `sensitive` or `closed` zone the table
 marks an exposed (`trains`) route with its reason and never picks or deals it,
@@ -295,10 +300,10 @@ conduct this interview before relying on project-specific rules:
    rules file will not appear in ordinary `git diff`.
 5. Run `scripts/modelbandit.py --check-secrets --working-dir <folder>` with the actual
    shape material on stdin, adding `--outside-file PATH` for each named outside
-   source. The gate reads the rules file itself. Exit 0 is safe, 1 is Sensitive,
-   2 is a usage error, 3 means **not certified**, and 4 means a rules/config
-   error: empty material is not safe by default, so obtain the material before
-   claiming a safe shape.
+   source. The gate reads the rules file itself. Every verdict exits 0 and the
+   printed line says which — safe, Sensitive, **not certified** — **2** is a
+   usage error and **4** a rules/config error: empty material is not safe by
+   default, so obtain the material before claiming a safe shape.
 
 ## Set up the free-use zones
 
@@ -430,9 +435,13 @@ starts closed everywhere, so this is the interview's only opening move:
 
 - **Pre-flight (`--assert-allowed`)** — `scripts/modelbandit.py --assert-allowed
   --model <id> --working-dir <folder>` answers one question for an
-  orchestrator: may this model serve in that folder's effective zone? Exit
-  **0** yes, **5** blocked by the free-use zone, or **4** policy/config error.
-  The output names the effective zone (`zone: <path> (<regime>)`, with
+  orchestrator: may this model serve in that folder's effective zone? The
+  output answers — `allowed: <id>` or `blocked by the free-use zone` — and
+  either verdict exits **0** (status says the tool ran; output says what's
+  true); **4** is a policy/config error and **2** a usage error, and neither
+  is an answer: default-deny, launch only on `allowed`. `--json` answers
+  with one object (`allowed`, `zone`, `reason`) instead of the lines. The
+  output names the effective zone (`zone: <path> (<regime>)`, with
   `sensitive via --sensitive` when the flag tightens `open`, and the resolved
   place named when a link moved the judgement), states the shape
   it judged — `shape: sensitive (assumed)` with none stated, because the
@@ -452,11 +461,18 @@ starts closed everywhere, so this is the interview's only opening move:
   Refuse to launch a model the pre-flight
   blocks instead of substituting one.
 
-- **Exit statuses** — **0** safe / allowed; **1** Secrets gate sensitive;
-  **2** usage error (argparse), and an over-budget run; **3** Secrets gate not
-  certified; **4** rules/config error (secrets rules, zones file or policy);
-  **5** blocked by the free-use zone (`--check-secrets`, `--assert-allowed`).
-  A block is never reported as sensitive, safe or over budget.
+- **Exit statuses** — **0** ran to completion: any verdict — safe,
+  sensitive, not certified, allowed, blocked by the free-use zone,
+  over-budget, empty pool, no candidate admitted. **1** carries no contract
+  meaning: what CPython and generic operational failures (network
+  unreachable, unreadable input) produce — never an answer. **2** usage
+  errors (argparse's own channel). **4** rules/config error (secrets rules,
+  zones file or policy): the tool could not form a verdict, so it stays
+  nonzero and `&&`-chains stay fail-closed on errors. The retired answers —
+  1 for Sensitive, 3 for not certified, 5 for the zone block, 2 for
+  over-budget — live in the output now: read the verdict lines (or
+  `--json`), not `$?` (ADR-0004). A block is never reported as sensitive,
+  safe or over budget.
 
 - **Hints** — user observations in `policy.json`, structured: a `note` (shown
   beside the ranking), `fit` (favor/avoid/neutral, per domain), and `evidence`
@@ -489,9 +505,10 @@ starts closed everywhere, so this is the interview's only opening move:
   agent's to supply (the tool never reads it for you). It prints the zone it
   judged by (`zone: <path> (<regime>)`, with the resolved place named when a
   link moved the judgement) and names the rule that tripped it.
-  Exit status (**0** safe, **1** sensitive, **2** usage error, **3** not
-  certified — no material given, never "safe" — **4** rules/config error,
-  **5** blocked by the free-use zone; see **Exit statuses**). Status 5 answers
+  Exit status (**0** for every verdict, **2** usage error, **4**
+  rules/config error; see **Exit statuses**) — the printed lines say which:
+  safe, sensitive, not certified (**not certified** = no material given,
+  never "safe"), or blocked by the free-use zone. The zone answer comes
   before the content does and names the zone, never the material: a named
   `--outside-file` whose effective regime is `closed` (declared or the default,
   resolved with origin included), or a `--model` the effective zone cannot

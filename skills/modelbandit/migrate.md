@@ -15,7 +15,8 @@ an old invocation. This file lists the old names on purpose.
   `~/.config/modelbandit/`): the tool never finds a zones file, every path
   reads as undeclared, and undeclared is `closed` — **zones fall back to
   `closed` everywhere**. No error names the move; runs just stop at the zone
-  gate with status 5.
+  gate with `blocked by the free-use zone` in the output — an answer, exit 0
+  like any verdict, not a failure (ADR-0004).
 - **Secrets file not renamed** (`modelrouter.secrets.json` →
   `modelbandit.secrets.json` in each project): the gate silently **falls back
   to the built-in rules only** — the project's own phrases and patterns are
@@ -41,9 +42,9 @@ an old invocation. This file lists the old names on purpose.
        `modelbandit.secrets.json` (`git mv` if tracked, plain rename if
        gitignored), then verify that project:
        `python3 skills/modelbandit/scripts/modelbandit.py --check-secrets
-       --working-dir <project>` — exit 0, and the project's own rules still
-       trip where they used to. Skipped → secrets fall back to built-in rules
-       only.
+       --working-dir <project>` — the verdict reads `safe` on ordinary
+       material, and the project's own rules still trip where they used to.
+       Skipped → secrets fall back to built-in rules only.
 - [ ] Delete the stale cache: `rm -rf ~/.cache/modelbind`. Skipped → the
        orphaned directory lingers; nothing else breaks (24h TTL, refetches
        free).

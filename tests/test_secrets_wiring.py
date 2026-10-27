@@ -331,8 +331,8 @@ class SecretsCheckTests(TempDirMixin):
 
 
 class SecretsCliTests(TempDirMixin):
-    """`--check-secrets`: material on stdin, verdict and rule out, exit status
-    distinguishing safe from sensitive."""
+    """`--check-secrets`: material on stdin, verdict and rule out — every
+    verdict exits 0 (issue #41), the printed lines distinguish them."""
 
     def run_cli(self, *argv, stdin=""):
         out, err = io.StringIO(), io.StringIO()
@@ -361,10 +361,10 @@ class SecretsCliTests(TempDirMixin):
         self.assertEqual(code, 0)
         self.assertIn("secrets gate: safe", out)
 
-    def test_sensitive_material_exits_one_and_names_the_rule(self):
+    def test_sensitive_material_exits_zero_and_names_the_rule(self):
         out, _, code = self.run_cli("--check-secrets",
                                     stdin="api_key: sk-1234567890abcdef")
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("secrets gate: sensitive", out)
         self.assertIn("rule: password, token or key assignment", out)
 
@@ -372,7 +372,7 @@ class SecretsCliTests(TempDirMixin):
         for stdin in ("", "   \n\n"):
             with self.subTest(stdin=stdin):
                 out, _, code = self.run_cli("--check-secrets", stdin=stdin)
-                self.assertEqual(code, 3)
+                self.assertEqual(code, 0)
                 self.assertIn("not certified", out)
                 self.assertNotIn("secrets gate: safe", out)
 
@@ -381,7 +381,7 @@ class SecretsCliTests(TempDirMixin):
         out, _, code = self.run_cli("--check-secrets", "--working-dir",
                                     self.root,
                                     stdin="Ship the Project Bluebird notes.")
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("rule: phrase #1", out)
         self.assertIn(os.path.join(self.root, "modelbandit.secrets.json"), out)
 
@@ -425,7 +425,7 @@ class SecretsCliTests(TempDirMixin):
                 "--outside-file", paths[0], "--outside-file", paths[1],
                 stdin=f"Use {line} in deployment.")
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
         self.assertNotIn(line, out)
 
@@ -445,10 +445,10 @@ class SecretsCliTests(TempDirMixin):
 
 
 class ZoneBlockedCheckTests(TempDirMixin):
-    """The check's free-use zone status: 5 when material provenance lies in a
-    path the zones file declares closed, or when the model the shape will use
-    is one the effective zone cannot admit. Statuses 0/1/3/4 keep their
-    meanings, and the material is never echoed."""
+    """The check's free-use zone verdict: blocked when material provenance
+    lies in a path the zones file declares closed, or when the model the
+    shape will use is one the effective zone cannot admit — a verdict like
+    any other (exit 0, issue #41), and the material is never echoed."""
 
     def setUp(self):
         super().setUp()
@@ -503,7 +503,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                         "--outside-file", path,
                                         stdin="Summarize it.")
 
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("secrets gate: blocked by the free-use zone", out)
         self.assertIn(f"zone: {self.closed} (closed)", out)
         self.assertNotIn(line, out + err)        # the content never is
@@ -533,7 +533,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                       "--outside-file", path,
                                       stdin=f"Use {line} in deployment.")
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
 
     def test_a_source_in_a_sensitive_zone_keeps_the_content_verdict(self):
@@ -544,7 +544,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                       "--outside-file", path,
                                       stdin=f"Use {line} in deployment.")
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
 
     def test_an_undeclared_source_is_blocked_by_the_closed_default(self):
@@ -558,18 +558,20 @@ class ZoneBlockedCheckTests(TempDirMixin):
         out, _, code = self.run_check("--working-dir", self.work,
                                       "--outside-file", path,
                                       stdin="Summarize it.")
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("secrets gate: blocked by the free-use zone", out)
         self.assertIn("zone: undeclared (closed)", out)
         self.assertNotIn(line, out)
 
-    def test_sensitive_material_in_a_closed_folder_still_exits_one(self):
+    def test_sensitive_material_in_a_closed_folder_still_exits_zero(self):
         out, _, code = self.run_check("--working-dir", self.closed,
                                       stdin="api_key: sk-1234567890abcdef")
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("secrets gate: sensitive", out)
 
-    def test_sensitive_zone_block_uses_the_same_free_use_status_name(self):
+    def test_sensitive_zone_block_shares_the_zone_block_verdict(self):
+        # The same `blocked by the free-use zone` answer the pre-flight
+        # gives: posture and reason named, exit 0 like every verdict.
         self.write_zones({"zones": [{"path": self.work, "free": "sensitive"}],
                           "default": "closed"})
         policy = os.path.join(self.root, "policy.json")
@@ -581,7 +583,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                       "--policy", policy,
                                       stdin="Summarize the public API.")
 
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("secrets gate: blocked by the free-use zone", out)
         self.assertIn(f"zone: {self.work} (sensitive)", out)
         self.assertIn("reason: exposed (trains)", out)
@@ -590,7 +592,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
         out, _, code = self.run_check("--working-dir", self.closed,
                                       "--model", "z-ai/glm-5.4:free",
                                       stdin="Summarize the public API.")
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("secrets gate: blocked by the free-use zone", out)
         self.assertIn(f"zone: {self.closed} (closed)", out)
         self.assertIn("remote free route is prohibited", out)
@@ -604,11 +606,14 @@ class ZoneBlockedCheckTests(TempDirMixin):
 
     def test_a_blocked_shape_is_not_certified_either(self):
         # The zone answers before the content does: an empty shape in a
-        # closed folder with a free route is blocked (5), not uncertified (3).
-        _, _, code = self.run_check("--working-dir", self.closed,
-                                    "--model", "opencode/glm-5.3-flash",
-                                    stdin="")
-        self.assertEqual(code, 5)
+        # closed folder with a free route is blocked, not uncertified —
+        # the verdict on stdout, exit 0 like every other answer.
+        out, _, code = self.run_check("--working-dir", self.closed,
+                                      "--model", "opencode/glm-5.3-flash",
+                                      stdin="")
+        self.assertEqual(code, 0)
+        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertNotIn("not certified", out)
 
     # --- provenance judges the place a path reaches: links resolved ------
 
@@ -637,7 +642,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                         os.path.join(link, "notes.txt"),
                                         stdin="Summarize it.")
 
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn("secrets gate: blocked by the free-use zone", out)
         self.assertIn(f"zone: {self.closed} (closed)", out)
         self.assertNotIn(line, out + err)
@@ -655,7 +660,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                       os.path.join(link, "notes.txt"),
                                       stdin=f"Use {line} in deployment.")
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
 
     def test_a_provenance_block_names_the_resolved_place_of_a_declared_link(self):
@@ -673,7 +678,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                         os.path.join(self.closed, "notes.txt"),
                                         stdin="Summarize it.")
 
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 0)
         self.assertIn(f"zone: {self.closed} (closed) (declared: {link})", out)
         self.assertNotIn(line, out + err)
 
@@ -855,7 +860,7 @@ class SecretsEndToEndTests(TempDirMixin):
         self.write_rules({"phrases": ["Project Bluebird"]})
 
         after, code = self.run_check(self.root, material)
-        self.assertEqual(code, 1, after)
+        self.assertEqual(code, 0, after)
         self.assertIn("secrets gate: sensitive", after)
         self.assertIn("rule: phrase #1", after)
 
@@ -869,14 +874,14 @@ class SecretsEndToEndTests(TempDirMixin):
 
         out, code = self.run_check(self.root, material)
 
-        self.assertEqual(code, 1, out)
+        self.assertEqual(code, 0, out)
         self.assertIn("rule: gitignored content (.env)", out)
 
     def test_injected_machine_identifier_trips_end_to_end(self):
         out, code = self.run_check(
             self.root, f"Deploy to {HOST} tonight.",
             machine={"hostname": HOST, "identifiers": [HOST]})
-        self.assertEqual(code, 1, out)
+        self.assertEqual(code, 0, out)
         self.assertIn("rule: hostname", out)
 
     def test_material_matching_nothing_is_safe_with_empty_machine_facts(self):
