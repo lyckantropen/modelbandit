@@ -610,6 +610,73 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                     stdin="")
         self.assertEqual(code, 5)
 
+    # --- provenance judges the place a path reaches: links resolved ------
+
+    def link(self, link, target):
+        """A junction on Windows (`mklink /J` needs no privileges), a symlink
+        elsewhere."""
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", link, target],
+                capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        else:
+            os.symlink(target, link)
+        return link
+
+    def test_a_source_named_through_a_link_into_a_closed_zone_blocks(self):
+        # The source is named through a junction that sits in the open work
+        # zone and points into the closed vault: the place it reaches
+        # governs, the zone is named and the content never is.
+        line = "PROVENANCE_BEHIND_LINK_3c9a"
+        self.source(self.closed, line)
+        link = self.link(os.path.join(self.work, "shortcut"), self.closed)
+
+        out, err, code = self.run_check("--working-dir", self.work,
+                                        "--outside-file",
+                                        os.path.join(link, "notes.txt"),
+                                        stdin="Summarize it.")
+
+        self.assertEqual(code, 5)
+        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn(f"zone: {self.closed} (closed)", out)
+        self.assertNotIn(line, out + err)
+
+    def test_a_source_through_a_link_into_an_open_zone_keeps_the_verdict(self):
+        # The mirror direction: a link outside the open zone pointing at it
+        # reaches open content, so the zone does not block and the Secrets
+        # gate answers for the material itself.
+        line = "OPEN_CONTENT_THROUGH_LINK_5d1b"
+        self.source(self.work, line)
+        link = self.link(os.path.join(self.root, "to-work"), self.work)
+
+        out, _, code = self.run_check("--working-dir", self.work,
+                                      "--outside-file",
+                                      os.path.join(link, "notes.txt"),
+                                      stdin=f"Use {line} in deployment.")
+
+        self.assertEqual(code, 1)
+        self.assertIn("rule: outside-file content", out)
+
+    def test_a_provenance_block_names_the_resolved_place_of_a_declared_link(self):
+        # A zone declared through a link governs the place it reaches; the
+        # block names both the resolved place and the declared path.
+        link = self.link(os.path.join(self.root, "closed-link"), self.closed)
+        self.write_zones({"zones": [{"path": self.work, "free": "open"},
+                                    {"path": link, "free": "closed"}],
+                          "default": "closed"})
+        line = "DECLARED_LINK_PROVENANCE_8e4f"
+        self.source(self.closed, line)
+
+        out, err, code = self.run_check("--working-dir", self.work,
+                                        "--outside-file",
+                                        os.path.join(self.closed, "notes.txt"),
+                                        stdin="Summarize it.")
+
+        self.assertEqual(code, 5)
+        self.assertIn(f"zone: {self.closed} (closed) (declared: {link})", out)
+        self.assertNotIn(line, out + err)
+
 
 class SecretsWriterCliTests(TempDirMixin):
     """`--write-secrets` merges confirmed rules without removing prior rules."""

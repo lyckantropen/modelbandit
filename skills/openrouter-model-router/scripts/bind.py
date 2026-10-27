@@ -749,9 +749,16 @@ _ENV_VAR = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 @dataclasses.dataclass(frozen=True)
 class Zone:
-    """The zone that decided a run: the declared path, or None undeclared."""
+    """The zone that decided a run: the declared path, or None undeclared.
+
+    `resolved` carries the place the run was judged at when a link moved the
+    judgement - the working folder or the declaration itself spells one place
+    and reaches another. None when nothing moved, so every existing header
+    keeps its shape.
+    """
     path: str | None
     regime: str
+    resolved: str | None = None
 
     def label(self) -> str:
         return "undeclared" if self.path is None else self.path
@@ -760,11 +767,19 @@ class Zone:
 def zone_label(zone: Zone, *, sensitive: bool = False) -> str:
     """The run header's statement: `<path> (<regime>)`, or
     `undeclared (closed)` when no declared path matched. An open zone tightened
-    by `--sensitive` names both the declared and effective posture.
+    by `--sensitive` names both the declared and effective posture. When a
+    link moved the judgement, the header names the resolved place - with the
+    declared path noted, or `undeclared` when no declaration matched - so a
+    declaration cannot silently cover content it did not name.
     """
     if sensitive and zone.regime == "open":
-        return f"{zone.label()} (open; sensitive via --sensitive)"
-    return f"{zone.label()} ({zone.regime})"
+        posture = "open; sensitive via --sensitive"
+    else:
+        posture = zone.regime
+    if zone.resolved is None:
+        return f"{zone.label()} ({posture})"
+    declared = f"declared: {zone.path}" if zone.path else "undeclared"
+    return f"{zone.resolved} ({posture}) ({declared})"
 
 
 def zones_path(*, environ=None) -> str:
@@ -786,11 +801,23 @@ def expand_path(text: str, *, environ=None) -> str:
                         text)
 
 
+def display_path(text: str, *, environ=None) -> str:
+    """The place a path reaches: `~` and variables expanded, links resolved
+    to the real filesystem place, the platform's own case kept. Strict
+    resolution is off: a path that does not exist yet - a zone declared ahead
+    of its folder - resolves to its written form and still compares.
+    """
+    return os.path.realpath(
+        os.path.abspath(os.path.normpath(expand_path(text, environ=environ))),
+        strict=False)
+
+
 def compare_path(text: str, *, environ=None) -> str:
     """A path normalised for comparison on this platform: `~` and variables
-    expanded, absolute, and case-folded where the platform folds it."""
-    return os.path.normcase(
-        os.path.abspath(os.path.normpath(expand_path(text, environ=environ))))
+    expanded, links resolved to the place the path reaches, absolute, and
+    case-folded where the platform folds it. A zone is the place a path
+    reaches, never the string it is spelled with."""
+    return os.path.normcase(display_path(text, environ=environ))
 
 
 def known_regime(value, *, where: str) -> str:
@@ -885,8 +912,17 @@ def _covers(zone_path: str, folder: str) -> bool:
 
 def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
     """The zone governing `folder`: the longest declared path that covers it,
-    else the file's default. A declared path may name the folder exactly."""
+    else the file's default. A declared path may name the folder exactly.
+
+    Both sides compare the place the path reaches - links resolved - so a
+    junction or symlink is judged by the content it leads to. When a link
+    moved the judgement, the zone carries the resolved place for the header:
+    the declaration itself spells one place and reaches another, or the
+    working folder does while the place it reaches is not the declared path.
+    """
     target = compare_path(folder, environ=environ)
+    spelled = os.path.normcase(
+        os.path.abspath(os.path.normpath(expand_path(folder, environ=environ))))
     best = None
     for entry in zones.get("zones", []):
         declared = compare_path(entry["path"], environ=environ)
@@ -894,8 +930,19 @@ def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
                                           or len(declared) >= len(best[0])):
             best = (declared, entry)
     if best is None:
-        return Zone(path=None, regime=zones.get("default", DEFAULT_REGIME))
-    return Zone(path=best[1]["path"], regime=best[1]["free"])
+        if spelled == target:
+            return Zone(path=None, regime=zones.get("default", DEFAULT_REGIME))
+        return Zone(path=None, regime=zones.get("default", DEFAULT_REGIME),
+                    resolved=display_path(folder, environ=environ))
+    entry = best[1]
+    declared_spelled = os.path.normcase(os.path.abspath(
+        os.path.normpath(expand_path(entry["path"], environ=environ))))
+    declared_moved = declared_spelled != best[0]
+    place = display_path(folder, environ=environ)
+    if declared_moved or (spelled != target
+                          and os.path.normcase(place) != declared_spelled):
+        return Zone(path=entry["path"], regime=entry["free"], resolved=place)
+    return Zone(path=entry["path"], regime=entry["free"])
 
 
 def _under_modules(common: str) -> bool:
