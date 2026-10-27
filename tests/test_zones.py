@@ -247,6 +247,114 @@ class ZoneResolverTests(unittest.TestCase):
         self.assertEqual(bind.DEFAULT_REGIME, "closed")
 
 
+def make_link(link, target):
+    """A junction on Windows (`mklink /J` needs no privileges), a symlink
+    elsewhere. Answers False when the platform cannot build one."""
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/d", "/c", "mklink", "/J", link, target],
+            capture_output=True, text=True)
+        return completed.returncode == 0
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        return False
+    return True
+
+
+class LinkZoneTests(TempDirMixin):
+    """A zone governs the place a path reaches, not the string it is spelled
+    with: a junction or symlink is judged by the content it leads to, in both
+    directions - a link inside an open zone into a closed area borrows
+    nothing, and a link to an open package is not refused."""
+
+    def setUp(self):
+        super().setUp()
+        self.open_dir = os.path.join(self.root, "open-zone")
+        self.closed_dir = os.path.join(self.root, "closed-vault")
+        os.makedirs(self.open_dir)
+        os.makedirs(self.closed_dir)
+
+    def zones(self, entries, default="open"):
+        return {"zones": [{"path": path, "free": free}
+                          for path, free in entries],
+                "default": default}
+
+    @staticmethod
+    def no_git(args):
+        raise OSError("not a repository")
+
+    def test_a_link_inside_an_open_zone_into_a_closed_area_is_judged_closed(self):
+        link = os.path.join(self.open_dir, "shortcut")
+        self.assertTrue(make_link(link, self.closed_dir))
+        zones = self.zones([(self.open_dir, "open"),
+                            (self.closed_dir, "closed")])
+        self.assertEqual(
+            bind.effective_zone(link, zones=zones, run=self.no_git),
+            bind.Zone(path=self.closed_dir, regime="closed"))
+
+    def test_a_link_outside_the_open_zone_pointing_at_it_is_judged_open(self):
+        link = os.path.join(self.root, "elsewhere", "to-open")
+        os.makedirs(os.path.dirname(link))
+        self.assertTrue(make_link(link, self.open_dir))
+        zones = self.zones([(self.open_dir, "open")])
+        self.assertEqual(
+            bind.effective_zone(link, zones=zones, run=self.no_git),
+            bind.Zone(path=self.open_dir, regime="open"))
+
+    def test_a_declaration_spelled_through_a_link_names_the_resolved_place(self):
+        # The declaration names the link; the zone governs the folder it
+        # reaches, and the header says so instead of the link's spelling.
+        vault = os.path.join(self.root, "vault")
+        os.makedirs(vault)
+        link = os.path.join(self.root, "vault-link")
+        self.assertTrue(make_link(link, vault))
+        resolved = bind.resolve_zone(vault, self.zones([(link, "open")],
+                                                      default="closed"))
+        self.assertEqual(resolved.path, link)
+        self.assertEqual(resolved.regime, "open")
+        self.assertEqual(bind.zone_label(resolved),
+                         f"{vault} (open) (declared: {link})")
+
+    def test_a_link_out_of_every_declared_place_reports_the_resolved_place(self):
+        # The spelled path sits inside the open zone; the place it reaches is
+        # undeclared and closed. `undeclared (closed)` alone would read as if
+        # the open zone had been left by choice.
+        link = os.path.join(self.open_dir, "shortcut")
+        elsewhere = os.path.join(self.root, "elsewhere")
+        os.makedirs(elsewhere)
+        self.assertTrue(make_link(link, elsewhere))
+        resolved = bind.resolve_zone(link, self.zones([(self.open_dir, "open")],
+                                                      default="closed"))
+        self.assertIsNone(resolved.path)
+        self.assertEqual(resolved.regime, "closed")
+        self.assertEqual(bind.zone_label(resolved),
+                         f"{elsewhere} (closed) (undeclared)")
+
+    def test_a_declared_zone_path_that_does_not_exist_yet_still_applies(self):
+        # Resolution is not existence: a zone declared ahead of its folder
+        # validates and compares against the paths spelled under it.
+        ghost = os.path.join(self.root, "not-built-yet")
+        zones = self.zones([(ghost, "closed")])
+        self.assertEqual(bind.validate_zones(dict(zones))["zones"],
+                         [{"path": ghost, "free": "closed"}])
+        self.assertEqual(
+            bind.resolve_zone(os.path.join(ghost, "x"), zones),
+            bind.Zone(path=ghost, regime="closed"))
+
+    def test_two_declarations_of_one_place_through_a_link_stop_loudly(self):
+        # The link and its target are one place: declaring it open in one
+        # spelling and closed in the other is the duplicate a fail-closed
+        # resolver stops, not a last-wins reopening.
+        link = os.path.join(self.root, "vault-link")
+        self.assertTrue(make_link(link, self.closed_dir))
+        payload = {"zones": [{"path": self.closed_dir, "free": "closed"},
+                             {"path": link, "free": "open"}],
+                   "default": "open"}
+        with self.assertRaisesRegex(SystemExit, "zone #2"):
+            bind.validate_zones(payload)
+
+
 class OriginZoneTests(unittest.TestCase):
     """A worktree carries the posture of the repository it came from."""
 
@@ -512,6 +620,27 @@ class SubmoduleFixtureTests(TempDirMixin):
         self.assertIn("exposed (trains)",
                       bind.zone_block("qwen/qwen3-coder-30b:free", sensitive,
                                       policy=policy, sensitive=True))
+
+    def make_link(self, link, target):
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", link, target],
+                capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        else:
+            os.symlink(target, link)
+        return link
+
+    def test_a_link_to_the_repository_resolves_to_the_same_origin(self):
+        # A junction placed outside the repository, pointing at it, is judged
+        # by the repository it reaches: the folder's resolved place and the
+        # git origin agree, so a closed repository stays closed either way.
+        link = self.make_link(os.path.join(self.root, "repo-link"),
+                              self.super_root)
+        zones = {"zones": [zone(self.super_root, "closed")], "default": "open"}
+        self.assertEqual(
+            bind.effective_zone(link, zones=zones),
+            bind.Zone(path=self.super_root, regime="closed"))
 
 
 def candidate(mid, *, exposure="no-retention", is_free=False, local=False):

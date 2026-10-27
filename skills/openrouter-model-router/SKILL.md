@@ -55,9 +55,14 @@ to a rung on each candidate's ladder.
 2. **Pull popularity.** Run `scripts/bind.py` (mechanics: `--help`). It reads
    the task-classification leaderboards and the daily token rankings, cached
    24h, and prices every candidate at live rates. Every run's header states
-   the free-use zone that governed it — `zone: <path> (<regime>)`, or
+   the free-use zone that governed it - `zone: <path> (<regime>)`, or
    `zone: undeclared (closed)` when no declared path matched. If `--sensitive`
    tightens an open zone, the header says `(open; sensitive via --sensitive)`.
+   A zone is the place a path reaches, not the string it is spelled with:
+   junctions and symlinks are resolved before matching, and when the resolved
+   place differs from the declared path the header names it -
+   `zone: <resolved> (<regime>) (declared: <path>)`, or `(... ) (undeclared)`
+   when no declaration matched.
    `--check-policy` and `--assert-allowed` report the same effective posture.
    A closed effective regime removes every remote Free route before anything
    else happens: those
@@ -374,7 +379,8 @@ conduct this interview before relying on project-specific rules:
   orchestrator: may this model serve in that folder's effective zone? Exit
   **0** yes, **5** blocked by the free-use zone, or **4** policy/config error.
   The output names the effective zone (`zone: <path> (<regime>)`, with
-  `sensitive via --sensitive` when the flag tightens `open`), states the shape
+  `sensitive via --sensitive` when the flag tightens `open`, and the resolved
+  place named when a link moved the judgement), states the shape
   it judged — `shape: sensitive (assumed)` with none stated, because the
   dispatch fails closed; `shape: plain (via --plain)` when `--plain` states
   the material is not Sensitive; `shape: sensitive (via --sensitive)` when the
@@ -427,7 +433,8 @@ conduct this interview before relying on project-specific rules:
   material on stdin and repeatable `--outside-file PATH` arguments for named
   outside content. It needs no policy and no network; the material is the
   agent's to supply (the tool never reads it for you). It prints the zone it
-  judged by (`zone: <path> (<regime>)`) and names the rule that tripped it.
+  judged by (`zone: <path> (<regime>)`, with the resolved place named when a
+  link moved the judgement) and names the rule that tripped it.
   Exit status (**0** safe, **1** sensitive, **2** usage error, **3** not
   certified — no material given, never "safe" — **4** rules/config error,
   **5** blocked by the free-use zone; see **Exit statuses**). Status 5 answers

@@ -7,6 +7,7 @@ cached=40%, effort multiplier 1.0 at `measured`) unless stated.
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1054,9 +1055,9 @@ class CliTests(unittest.TestCase):
     # --- pre-flight: --assert-allowed -----------------------------------
 
     def guard(self, model, *, zones=None, zones_default="open", sensitive=False,
-              plain=False, policy_path=None):
+              plain=False, policy_path=None, working_dir=None):
         argv = ["--assert-allowed", "--model", model,
-                "--working-dir", self._tmp.name]
+                "--working-dir", working_dir or self._tmp.name]
         if sensitive:
             argv.append("--sensitive")
         if plain:
@@ -1232,6 +1233,95 @@ class CliTests(unittest.TestCase):
         _, _, code, calls = self.run_cli("--model", "vendor/model:free")
         self.assertEqual(code, 2)
         self.assertEqual(calls, [])
+
+    # --- zones judge the place a path reaches: links resolved ------------
+
+    def link(self, link, target):
+        """A junction on Windows (`mklink /J` needs no privileges), a symlink
+        elsewhere."""
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", link, target],
+                capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        else:
+            os.symlink(target, link)
+        return link
+
+    def test_pre_flight_judges_a_link_by_the_place_it_reaches(self):
+        # A junction inside an open zone pointing into a closed area is
+        # judged closed: the pre-flight blocks the remote free route, names
+        # the zone, and never echoes content.
+        open_dir = os.path.join(self._tmp.name, "open-zone")
+        closed_dir = os.path.join(self._tmp.name, "closed-zone")
+        os.makedirs(open_dir)
+        os.makedirs(closed_dir)
+        link = self.link(os.path.join(open_dir, "shortcut"), closed_dir)
+
+        out, _, code, calls = self.guard("vendor/model:free",
+                                         zones=[{"path": open_dir,
+                                                 "free": "open"},
+                                                {"path": closed_dir,
+                                                 "free": "closed"}],
+                                         working_dir=link)
+
+        self.assertEqual(code, 5)
+        self.assertIn("blocked by the free-use zone", out)
+        self.assertIn(f"zone: {closed_dir} (closed)", out)
+        self.assertEqual(calls, [])
+
+    def test_pre_flight_admits_work_that_reaches_an_open_zone_through_a_link(self):
+        # The mirror direction: a link outside the open zone pointing at the
+        # open package is judged open - no false negative for allowed work.
+        # The shape is stated (the material is not Sensitive) so the free
+        # route's Exposure does not decide this; the zone does.
+        open_dir = os.path.join(self._tmp.name, "open-zone")
+        os.makedirs(open_dir)
+        link = self.link(os.path.join(self._tmp.name, "to-open"), open_dir)
+
+        out, _, code, _ = self.guard("vendor/model:free", plain=True,
+                                     zones=[{"path": open_dir,
+                                             "free": "open"}],
+                                     working_dir=link)
+
+        self.assertEqual(code, 0)
+        self.assertIn(f"zone: {open_dir} (open)", out)
+        self.assertIn("allowed: vendor/model:free", out)
+
+    def test_pre_flight_names_the_resolved_place_of_a_declared_link(self):
+        # A declaration spelled through a link governs the place it reaches,
+        # and the header says so instead of the link's spelling.
+        target = os.path.join(self._tmp.name, "free-zone")
+        os.makedirs(target)
+        link = self.link(os.path.join(self._tmp.name, "free-link"), target)
+
+        out, _, code, _ = self.guard("vendor/model:free", plain=True,
+                                     zones=[{"path": link, "free": "open"}],
+                                     working_dir=link)
+
+        self.assertEqual(code, 0)
+        self.assertIn(f"zone: {target} (open) (declared: {link})", out)
+        self.assertIn("allowed: vendor/model:free", out)
+
+    def test_a_link_into_a_closed_zone_removes_remote_free_routes_from_a_ranking(self):
+        self.free_risk_policy(
+            {"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+        open_dir = os.path.join(self._tmp.name, "open-zone")
+        closed_dir = os.path.join(self._tmp.name, "closed-zone")
+        os.makedirs(open_dir)
+        os.makedirs(closed_dir)
+        link = self.link(os.path.join(open_dir, "shortcut"), closed_dir)
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", link, world=world,
+            zones=[{"path": open_dir, "free": "open"},
+                   {"path": closed_dir, "free": "closed"}])
+
+        self.assertIsNone(code)
+        self.assertIn(f"zone: {closed_dir} (closed)", out)
+        self.assertNotIn("vendor/model:free", out)
+        self.assertNotIn("| admit |", out)
 
     def test_free_risk_price_is_uniform_across_exposure(self):
         # Same share, different Exposure, same risk-derived price and score.

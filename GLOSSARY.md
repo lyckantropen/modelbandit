@@ -71,7 +71,8 @@ _Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
 **Zone**
 The machine-wide declaration of where free models may run: a path with a
 regime for everything under it, resolved by longest prefix, with anything
-undeclared `closed`. A run's effective zone is the stricter of its working
+undeclared `closed`. A zone governs the place a path reaches - links resolved
+- never the string it is spelled with. A run's effective zone is the stricter of its working
 folder's and its origin repository's, so a worktree carries the posture of the
 content it holds. Additive-only: a file can open less, never more.
 _Avoid_: allowlist, permission (it is a place, not a grant)
