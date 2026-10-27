@@ -310,7 +310,7 @@ class ClosedZoneGateTests(unittest.TestCase):
         decision = bind.admit(shape("closed"),
                               candidate("z-ai/glm-5.4:free", is_free=True))
         self.assertFalse(decision.admitted)
-        self.assertIn("closed zone", decision.reason)
+        self.assertIn("remote free route is prohibited", decision.reason)
 
     def test_closed_excludes_a_harness_free_route(self):
         for mid in ("opencode/glm-5.3-flash-free", "opencode/nemotron-3-ultra-free"):
@@ -428,7 +428,7 @@ class RegimeOrderingTests(unittest.TestCase):
     def test_the_zone_prohibition_is_the_zone_clause_alone(self):
         # The source filter drops what the zone forbids; Exposure exclusions
         # stay in the table, marked with their reason.
-        self.assertIn("closed zone",
+        self.assertIn("remote free route is prohibited",
                       bind.zone_prohibition(
                           shape("closed"),
                           candidate("a/b:free", is_free=True)))
@@ -449,7 +449,7 @@ class RegimeOrderingTests(unittest.TestCase):
                       bind.regime_prohibition(shape("sensitive"), exposed_paid))
         self.assertIn("exposed",
                       bind.regime_prohibition(shape("closed"), exposed_paid))
-        self.assertIn("closed zone",
+        self.assertIn("remote free route is prohibited",
                       bind.regime_prohibition(shape("closed"), remote_free))
         self.assertIsNone(bind.regime_prohibition(shape("sensitive"),
                                                   remote_free))

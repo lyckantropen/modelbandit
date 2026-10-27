@@ -337,9 +337,15 @@ class SecretsCliTests(TempDirMixin):
     def run_cli(self, *argv, stdin=""):
         out, err = io.StringIO(), io.StringIO()
         code = None
+        config_home = os.path.join(self.root, "config")
+        os.makedirs(os.path.join(config_home, "modelrouter"), exist_ok=True)
+        with open(os.path.join(config_home, "modelrouter", "zones.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"zones": [], "default": "open"}, f)
         with mock.patch.object(sys, "argv", ["bind.py", *argv]), \
                 mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
                 mock.patch("bind.machine_facts", return_value={"identifiers": []}), \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
                 mock.patch("bind.fetch_json",
                            side_effect=AssertionError("no network in a gate")), \
                 redirect_stdout(out), redirect_stderr(err):
@@ -448,10 +454,14 @@ class ZoneBlockedCheckTests(TempDirMixin):
         super().setUp()
         self.config = os.path.join(self.root, "config")
         self.work = os.path.join(self.root, "work")
+        self.sensitive = os.path.join(self.root, "sensitive-notes")
         self.closed = os.path.join(self.root, "closed-vault")
         os.makedirs(self.work)
+        os.makedirs(self.sensitive)
         os.makedirs(self.closed)
         self.write_zones({"zones": [{"path": self.work, "free": "open"},
+                                    {"path": self.sensitive,
+                                     "free": "sensitive"},
                                     {"path": self.closed, "free": "closed"}],
                           "default": "closed"})
 
@@ -494,8 +504,8 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                         stdin="Summarize it.")
 
         self.assertEqual(code, 5)
-        self.assertIn("secrets gate: blocked by a closed zone", out)
-        self.assertIn(self.closed, out)          # the zone is named
+        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn(f"zone: {self.closed} (closed)", out)
         self.assertNotIn(line, out + err)        # the content never is
         self.assertNotIn("outside-file content", out)
 
@@ -526,18 +536,32 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertEqual(code, 1)
         self.assertIn("rule: outside-file content", out)
 
-    def test_an_undeclared_source_is_still_judged_by_content(self):
-        # Only a declared closed path blocks; nothing declared means the
-        # content verdict stands, so 0 and 1 keep their meanings.
+    def test_a_source_in_a_sensitive_zone_keeps_the_content_verdict(self):
+        line = "SENSITIVE_ZONE_TENANT_7291"
+        path = self.source(self.sensitive, line)
+
+        out, _, code = self.run_check("--working-dir", self.work,
+                                      "--outside-file", path,
+                                      stdin=f"Use {line} in deployment.")
+
+        self.assertEqual(code, 1)
+        self.assertIn("rule: outside-file content", out)
+
+    def test_an_undeclared_source_is_blocked_by_the_closed_default(self):
+        # The machine-wide default closes undeclared paths, so provenance
+        # blocks before the Secrets gate judges the material.
         other = os.path.join(self.root, "undeclared")
         os.makedirs(other)
-        path = self.source(other, "UNDECLARED_ZONE_LINE_5c0d")
+        line = "UNDECLARED_ZONE_LINE_5c0d"
+        path = self.source(other, line)
 
         out, _, code = self.run_check("--working-dir", self.work,
                                       "--outside-file", path,
                                       stdin="Summarize it.")
-        self.assertEqual(code, 0)
-        self.assertIn("secrets gate: safe", out)
+        self.assertEqual(code, 5)
+        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn("zone: undeclared (closed)", out)
+        self.assertNotIn(line, out)
 
     def test_sensitive_material_in_a_closed_folder_still_exits_one(self):
         out, _, code = self.run_check("--working-dir", self.closed,
@@ -545,14 +569,31 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertEqual(code, 1)
         self.assertIn("secrets gate: sensitive", out)
 
+    def test_sensitive_zone_block_uses_the_same_free_use_status_name(self):
+        self.write_zones({"zones": [{"path": self.work, "free": "sensitive"}],
+                          "default": "closed"})
+        policy = os.path.join(self.root, "policy.json")
+        with open(policy, "w", encoding="utf-8") as f:
+            json.dump({"exposure": {"deepseek/": "trains"}}, f)
+
+        out, _, code = self.run_check("--working-dir", self.work,
+                                      "--model", "deepseek/model",
+                                      "--policy", policy,
+                                      stdin="Summarize the public API.")
+
+        self.assertEqual(code, 5)
+        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn(f"zone: {self.work} (sensitive)", out)
+        self.assertIn("reason: exposed (trains)", out)
+
     def test_the_model_the_shape_will_use_is_checked_against_the_zone(self):
         out, _, code = self.run_check("--working-dir", self.closed,
                                       "--model", "z-ai/glm-5.4:free",
                                       stdin="Summarize the public API.")
         self.assertEqual(code, 5)
-        self.assertIn(f"secrets gate: blocked by a closed zone "
-                      f"({self.closed} (closed))", out)
-        self.assertIn("closed zone (no remote free route)", out)
+        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn(f"zone: {self.closed} (closed)", out)
+        self.assertIn("remote free route is prohibited", out)
 
     def test_a_paid_model_in_a_closed_zone_is_not_blocked(self):
         out, _, code = self.run_check("--working-dir", self.closed,
@@ -717,10 +758,16 @@ class SecretsEndToEndTests(TempDirMixin):
         argv = ["bind.py", "--check-secrets", "--working-dir", working_dir]
         for path in outside_files:
             argv.extend(("--outside-file", path))
+        config_home = os.path.join(self.root, "config")
+        os.makedirs(os.path.join(config_home, "modelrouter"), exist_ok=True)
+        with open(os.path.join(config_home, "modelrouter", "zones.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"zones": [], "default": "open"}, f)
         with mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(sys, "stdin", io.StringIO(material)), \
                 mock.patch("bind.machine_facts",
                            return_value=machine or {"identifiers": []}), \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
                 redirect_stdout(out), redirect_stderr(err):
             try:
                 bind.main()

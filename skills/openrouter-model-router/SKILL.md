@@ -33,10 +33,11 @@ to a rung on each candidate's ladder.
    (.env)`, outside-file content, a credential pattern, `phrase #N`,
    `pattern #N`). Exit status is 0 for safe, 1 for sensitive, 2 for usage
    errors, 3 for **not certified** — no material given, never read as safe —
-   4 for a rules/config error, or **5 for blocked by a closed zone**: a named
-   outside source inside a path the zones file declares closed, or a `--model`
-   the effective zone cannot admit. A block is a stop, never a Sensitive
-   verdict — see **Closed-zone protocol** below.
+   4 for a rules/config error, or **5 for blocked by the free-use zone**: a
+   named outside source whose effective regime is closed (including the
+   undeclared closed default), or a `--model` its effective zone cannot admit.
+   A block is a stop, never a Sensitive verdict — see **Closed-zone protocol**
+   below.
    Content-inclusion, any-of: the shape is **Sensitive** when its material
    carries content drawn from a file outside the working folder, or from a
    gitignored file inside it, or passwords/tokens/keys, or identifiers
@@ -55,8 +56,11 @@ to a rung on each candidate's ladder.
    the task-classification leaderboards and the daily token rankings, cached
    24h, and prices every candidate at live rates. Every run's header states
    the free-use zone that governed it — `zone: <path> (<regime>)`, or
-   `zone: undeclared (closed)` when no declared path matched — and a closed
-   zone removes every remote Free route before anything else happens: those
+   `zone: undeclared (closed)` when no declared path matched. If `--sensitive`
+   tightens an open zone, the header says `(open; sensitive via --sensitive)`.
+   `--check-policy` and `--assert-allowed` report the same effective posture.
+   A closed effective regime removes every remote Free route before anything
+   else happens: those
    candidates are never ranked, scored, dealt or listed, and the `zone:` line
    is the explanation for their absence. Locally served models stay; Exposure,
    Footprint, quota and catalog exclusions keep their marked, never hidden
@@ -171,6 +175,8 @@ regime a run works under is the **stricter** of its working folder's zone and
 the zone of the repository the folder came from (the parent of
 `git rev-parse --git-common-dir`), so `closed` implies `sensitive` and every
 stricter regime dominates the milder ones in every dimension.
+Headers state the effective posture; an open zone tightened by `--sensitive`
+is shown as `zone: <path> (open; sensitive via --sensitive)`.
 
 A **closed area** is a path whose effective regime is `closed`. In a closed
 area:
@@ -182,7 +188,8 @@ area:
    the rule.
 2. **When a task cannot be completed without it, stop.** Say which zone blocks
    it (`zone: <path> (closed)`) and why the content is unavoidable, and wait
-   for the user to open the zone or move the task.
+   for the user to open the zone or move the task. An undeclared path has the
+   default `closed` regime and blocks in the same way.
 3. **Never route around the block.** Do not substitute a paid model for a
    closed zone — a closed zone is closed because of where the content is, not
    because of what the route costs. Do not reclassify the shape (`--sensitive`
@@ -197,8 +204,9 @@ area:
    scripts/bind.py --assert-allowed --model <id> --working-dir <folder>
    ```
 
-   Exit **0** means the model may serve there; exit **5** means the zone blocks
-   it, and the output names the zone (never any content). The pre-flight reads
+   Exit **0** means the model may serve there; exit **5** means it is blocked by
+   the free-use zone, with effective posture and regime named (never content).
+   The pre-flight reads
    the zones file and, when present, the local policy's Exposure facts: no
    policy file, no classification fetch, no network. Status **4** is a
    policy/config error and **2** a usage error.
@@ -357,11 +365,12 @@ conduct this interview before relying on project-specific rules:
 - **Pre-flight (`--assert-allowed`)** — `scripts/bind.py --assert-allowed
   --model <id> --working-dir <folder>` answers one question for an
   orchestrator: may this model serve in that folder's effective zone? Exit
-  **0** yes, **5** no — the model is prohibited by the regime (a remote free
-  route in a closed zone; an exposed route in a `sensitive` or `closed` one).
-  The output names the zone (`zone: <path> (<regime>)`, then
-  `allowed: <id>` or `blocked: <id> — <reason>`); it never carries the shape's
-  content. It needs no policy file, no classification fetch and no network —
+  **0** yes, **5** blocked by the free-use zone, or **4** policy/config error.
+  The output names the effective zone (`zone: <path> (<regime>)`, with
+  `sensitive via --sensitive` when the flag tightens `open`) and then
+  `allowed: <id>` or `blocked by the free-use zone` with model and reason; it
+  never carries the shape's content. It needs no policy file, no classification
+  fetch and no network —
   a missing policy is an empty policy, so a route the file does not describe
   resolves by the defaults (a `:free` or `opencode/*` route exposed, a paid
   route no-retention, a cataloged `local` entry local). `--sensitive` may
@@ -406,13 +415,11 @@ conduct this interview before relying on project-specific rules:
   judged by (`zone: <path> (<regime>)`) and names the rule that tripped it.
   Exit status (**0** safe, **1** sensitive, **2** usage error, **3** not
   certified — no material given, never "safe" — **4** rules/config error,
-  **5** blocked by a closed zone; see **Exit statuses**). Status 5 answers
+  **5** blocked by the free-use zone; see **Exit statuses**). Status 5 answers
   before the content does and names the zone, never the material: a named
-  `--outside-file` whose folder the zones file declares closed (resolved the
-  way a run resolves its working folder, origin included), or a `--model` the
-  effective zone cannot admit. An undeclared source is not a declared closed
-  path, so it keeps the content verdict — a block is about a path the user
-  closed, and only a declared one can be named. The tool assembles
+  `--outside-file` whose effective regime is `closed` (declared or the default,
+  resolved with origin included), or a `--model` the effective zone cannot
+  admit. The tool assembles
   everything mechanical: the project's `modelrouter.secrets.json` at the
   working-folder root (the git root when in a repository, else the folder),
   this machine's identifiers (hostname, login, home path, non-loopback local

@@ -933,7 +933,7 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and "qwen/qwen3-coder-30b |" in ln)
-        self.assertNotIn("closed zone", row)
+        self.assertNotIn("remote free route is prohibited", row)
         self.assertIn("default pick (top of task order): qwen/qwen3-coder-30b",
                       out)
 
@@ -979,6 +979,27 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         self.assertIn(f"zone: {self._tmp.name} (sensitive)", out)
 
+    def test_sensitive_flag_is_shown_as_the_effective_posture_in_every_header(self):
+        zones = self.zone_of("open")
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", "--working-dir",
+            self._tmp.name, zones=zones)
+        self.assertIsNone(code)
+        expected = f"zone: {self._tmp.name} (open; sensitive via --sensitive)"
+        self.assertIn(expected, out)
+
+        checked, _, check_code, _ = self.run_cli(
+            "--check-policy", "--sensitive", "--working-dir", self._tmp.name,
+            zones=zones)
+        self.assertIsNone(check_code)
+        self.assertIn(expected, checked)
+
+        self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
+        guarded, _, guard_code, _ = self.guard(
+            "deepseek/deepseek-v4-pro", sensitive=True, zones=zones)
+        self.assertEqual(guard_code, 5)
+        self.assertIn(expected, guarded)
+
     def test_an_undeclared_folder_reports_undeclared_and_closed(self):
         out, _, code, _ = self.run_cli("--domain", "writing",
                                        zones_default="closed")
@@ -991,6 +1012,29 @@ class CliTests(unittest.TestCase):
             zones=self.zone_of("closed"))
         self.assertIsNone(code)
         self.assertIn(f"zone: {self._tmp.name} (closed)", out)
+
+    def test_check_policy_filters_zone_prohibited_free_routes_before_gaps(self):
+        pol = json.loads(json.dumps(POLICY))
+        pol["domains"] = {"writing": ["content_writing"]}
+        pol["free_models"] = {"vendor/model": {
+            "context_length": 262_144, "exposure": "no-retention"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        world = self.free_world(("vendor/model:free", 0.5))
+
+        closed, _, code, _ = self.run_cli(
+            "--check-policy", "--top", "8", "--working-dir", self._tmp.name,
+            world=world, zones=self.zone_of("closed"))
+        opened, _, open_code, _ = self.run_cli(
+            "--check-policy", "--top", "8", "--working-dir", self._tmp.name,
+            world=world, zones=self.zone_of("open"))
+
+        self.assertIsNone(code)
+        self.assertIsNone(open_code)
+        gaps_closed = closed[closed.index("Research gaps"):closed.index("Stale summaries")]
+        gaps_open = opened[opened.index("Research gaps"):opened.index("Stale summaries")]
+        self.assertNotIn("vendor/model:free", gaps_closed)
+        self.assertIn("vendor/model:free", gaps_open)
 
     def test_a_closed_zone_excludes_an_exposed_paid_route(self):
         # closed implies sensitive: Exposure is the shape's exclusion and
@@ -1033,7 +1077,8 @@ class CliTests(unittest.TestCase):
                                                  zones=self.zone_of("closed"))
                 self.assertEqual(code, 5)
                 self.assertIn("blocked", out)
-                self.assertIn("closed zone", out)
+                self.assertIn("blocked by the free-use zone", out)
+                self.assertIn(f"zone: {self._tmp.name} (closed)", out)
                 self.assertIn(self._tmp.name, out)   # the zone is named
                 self.assertEqual(calls, [])
 
@@ -1109,14 +1154,21 @@ class CliTests(unittest.TestCase):
 
     def test_assert_allowed_admits_a_local_catalog_entry_in_a_closed_zone(self):
         pol = json.loads(json.dumps(POLICY))
-        pol["free_models"] = {"qwen/qwen3-coder": {
+        model = "qwen/qwen3-coder-30b:free"
+        pol["free_models"] = {"qwen/qwen3-coder-30b": {
             "context_length": 262_144, "exposure": "local"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
-        out, _, code, _ = self.guard("qwen/qwen3-coder-30b",
+        out, _, code, _ = self.guard(model,
                                      zones=self.zone_of("closed"))
         self.assertEqual(code, 0)
-        self.assertIn("allowed: qwen/qwen3-coder-30b", out)
+        self.assertIn(f"allowed: {model}", out)
+
+    def test_assert_allowed_help_documents_policy_config_status(self):
+        out, _, code, _ = self.run_cli("--assert-allowed", "--help")
+        self.assertEqual(code, 0)
+        self.assertIn("--assert-allowed", out)
+        self.assertIn("4 policy/config error", " ".join(out.split()))
 
     def test_assert_allowed_requires_a_model_and_a_mode_to_read_it(self):
         _, _, code, calls = self.run_cli("--assert-allowed")
