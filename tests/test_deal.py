@@ -181,6 +181,31 @@ class EligibilityPoolTests(unittest.TestCase):
         self.assertEqual([mid for mid, _ in rows], ["a/model-1"])
 
 
+class ExposureAdmissionTests(unittest.TestCase):
+    """The deal draws only from candidates the admission seam admits, and an
+    excluded player is never replaced by a lower-ranked one (Eligibility stays
+    popularity)."""
+
+    def test_excluded_candidate_is_never_drawn(self):
+        rows = plan(admitted=frozenset({"b/model-2", "c/model-3"}))
+        self.assertEqual([r["mid"] for r in rows],
+                         ["b/model-2", "c/model-3"])
+        self.assertEqual(sum(r["tickets"] for r in rows), 100)
+
+    def test_no_admission_filter_draws_the_whole_pool(self):
+        rows = plan(admitted=None)
+        self.assertEqual([r["mid"] for r in rows],
+                         ["a/model-1", "b/model-2", "c/model-3"])
+
+    def test_eligibility_pool_admits_only_admitted_members(self):
+        rows = bind.eligibility_pool(POOL, MODELS, {}, 2,
+                                     admitted=frozenset({"a/model-1"}))
+        self.assertEqual([mid for mid, _ in rows], ["a/model-1"])
+
+    def test_nothing_admitted_is_an_empty_deal(self):
+        self.assertEqual(plan(admitted=frozenset()), [])
+
+
 class BaseScaleTests(unittest.TestCase):
     """Every pool member blends at its fit-adjusted task score, never share."""
 

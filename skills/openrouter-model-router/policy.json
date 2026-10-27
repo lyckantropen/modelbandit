@@ -52,9 +52,13 @@
     ]
   },
   "scoring": {
-    "notes": "Task order = share^alpha / cost^beta (cost at the candidate's effort rung; free models priced at the pool's cheapest paid ticket). The exponent ratio decides the ordering, their scale the sharpness. Tuned 2026-10-18 against the balance thresholds across all five domains (top-1 score mass 24-47%, top-2 <= 74%): neither uniform nor dominated. Thresholds are the acceptance criterion for any coefficient change.",
-    "alpha": 0.7,
+    "notes": "Task order = share^alpha / cost^beta (cost at the candidate's effort rung; Free routes use the Nominal floor, derived as scoring.free_risk times the pool's cheapest priced paid ticket, default 0.35, recomputed per pool and shape. It is positive and strictly below the paid ticket, so Free can win without division by zero). The exponent ratio decides the ordering, their scale the sharpness. Tuned 2026-10-26 (alpha 0.6, beta 1.0) when the Nominal floor entered scoring — the fixed floor lifted ops' top-1 past the limit at 0.7 (52%), compression at 0.6 restored balance across all five domains (top-1 score mass 27-49%, top-2 <= 70%): neither uniform nor dominated. Re-tuned 2026-10-26 (alpha 0.4, beta 1.0) against paid-only pools: score mass now judges the paid competition, and Free's participation is the Free share signal's answer, never a threshold's. On the 2026-10-26 boards the paid-only reading at 0.6 put ops one point under the top-1 ceiling (49%) - inside the band, but too thin to call tuned. At 0.4 the five domains read top-1 26-43%, top-2 <= 66%: six points of margin at the binding limit (writing against the 20% floor) and seven under the ceiling, with beta held at 1.0 so the cost ordering Free competes under is unchanged. Free-risk pricing changes Free's score contribution; --check-policy surfaces coefficient drift rather than silently absorbing it. Thresholds are the acceptance criterion for any coefficient change and were not moved (20-50% top-1, top-2 <= 75%).",
+    "alpha": 0.4,
     "beta": 1.0,
+    "free_risk": 0.35,
+    "free_share_inheritance": 0.5,
+    "free_share_inheritance_notes": "A curated Free route (opencode/*, local) inherits this fraction of its family's board share: the free serving is a limited-time, rate-limited surrogate, so it never carries the family's full standing. At 0.5 a coding deal draws ~1/3 free rather than a majority.",
+    "free_quota_reserve": 5,
     "thresholds": {
       "top1_min": 0.2,
       "top1_max": 0.5,
@@ -71,5 +75,46 @@
       "avoid_validated": 0.3,
       "avoid_suspected": 0.5
     }
+  },
+  "free_models": {
+    "opencode/deepseek-v4.1-flash-free": {
+      "context_length": 1048576,
+      "exposure": "no-retention",
+      "summary_ref": "deepseek/deepseek-v4.1-flash"
+    },
+    "opencode/glm-5.3-flash-free": {
+      "context_length": 1048576,
+      "exposure": "no-retention",
+      "summary_ref": "z-ai/glm-5.3-flash"
+    },
+    "opencode/mimo-v2.6-flash-free": {
+      "context_length": 1050000,
+      "exposure": "trains",
+      "summary_ref": "xiaomi/mimo-v2.6-flash"
+    },
+    "opencode/nemotron-3-ultra-free": {
+      "context_length": 1000000,
+      "exposure": "trains",
+      "summary_ref": "nvidia/nemotron-3-ultra-550b-a55b"
+    },
+    "opencode/nemotron-3.5-lightning-free": {
+      "context_length": 1000000,
+      "exposure": "trains",
+      "summary_ref": "nvidia/nemotron-3.5-lightning:free"
+    },
+    "opencode/nemotron-3.5-super-vl-free": {
+      "context_length": 1000000,
+      "exposure": "trains",
+      "summary_ref": "nvidia/nemotron-3.5-super-vl:free"
+    },
+    "opencode/flint-40b-free": {
+      "context_length": 262144,
+      "exposure": "trains",
+      "summary_ref": "recursive/flint-v1.0:free"
+    }
+  },
+  "context_gate": {
+    "headroom": 2.0,
+    "margin": 0.5
   }
 }

@@ -1,8 +1,8 @@
 # Summaries refresh protocol
 
-How `policy.json` `summaries` are produced and kept current. Read this only
-when the skill offers a refresh and the user accepts — `SKILL.md` step 7 is
-the trigger, this is the procedure.
+How `policy.json` `summaries` — and the free-tier catalog — are produced and
+kept current. Read this only when the skill offers a refresh and the user
+accepts — `SKILL.md` step 7 is the trigger, this is the procedure.
 
 ## 1. Scope the cycle
 
@@ -56,7 +56,39 @@ the trigger, this is the procedure.
   and signal coverage gaps — and the user edits the taste. A refresh reconciles
   coverage; it never invents preference.
 
-## 4. Close the loop
+## 4. Free-tier maintenance
+
+The free catalog (`policy.json` `free_models`) is the refresh cycle's to own:
+both platforms document their free tiers as "limited time", so the catalog
+churns with them instead of freezing.
+
+- **Reconcile first.** Each cycle, check what the platforms still serve —
+  OpenRouter's `:free` suffixes and OpenCode's free `opencode/*` models —
+  against the catalog. A ranked OpenRouter `:free` route needs no entry (its
+  window comes from the models list, its Exposure defaults to `trains`);
+  entries exist for what the models list cannot describe — `opencode/*` and
+  local models — and for any route whose documented data use departs from
+  the default.
+- **Admit with its facts.** An entry is keyed by id-prefix and carries
+  `context_length`, `exposure`, and an optional `summary_ref` naming the
+  `summaries` key that judges task fit for the family. Admission requires a
+  resolving summary, found by longest-prefix match in `summaries` or by the
+  entry's explicit `summary_ref`, researched per sections 1–3.
+- **Exposure comes from the provider's own docs.** Take `exposure` from the
+  provider's documented data use, cited in the summary — "collected data may
+  be used to improve the model" or the verbatim quote from NVIDIA's endpoint
+  terms, "do not submit personal or confidential data," is `trains`; a
+  documented no-retention statement is `no-retention`;
+  served on this machine is `local`. A route the catalog does not carry
+  stays `trains` until documented otherwise. A user's explicit `exposure`
+  override in `policy.json` outranks the catalog (longest prefix wins).
+- **Retire with a documented exit.** When a platform stops serving a route,
+  remove its `free_models` entry and leave the exit documented — a dated
+  note in the family's summary, the space-bunny precedent of documenting
+  exits. Free ends without warning; the note is how the churn stays
+  legible.
+
+## 5. Close the loop
 
 - Re-run `--check-policy --top 15` until only accepted drift remains (models
   deliberately excluded, documented as such).
