@@ -1815,7 +1815,8 @@ def exposure_contradiction(mid: str, value: str) -> str | None:
     """
     if value == "local" and local_label_is_void(mid):
         return (f"exposure 'local' contradicts the remote serving identity "
-                f"'{mid}' (opencode/* and :free routes are remote)")
+                f"'{mid}' (opencode/*, opencode-go/*, and :free routes are "
+                f"remote)")
     return None
 
 
@@ -2201,9 +2202,9 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     explicit policy override (prefix-keyed) > locally served > curated free
     catalog entry > the default-exposure facet (a free-slug or harness
     serving trains, a market or plan serving no-retention); an id outside
-    every kind keeps the paid-route assumption.
+    every kind keeps the default no-retention assumption.
 
-    The default is the paid route's assumption — the account's data policy
+    The default is the no-retention assumption — the account's data policy
     already holds it. A free route the catalog does not carry is exposed until
     the user says otherwise.
 
