@@ -2140,6 +2140,12 @@ def load_free_models(policy: dict) -> dict:
 # plan's boundary unnoticed.
 PLAN_CAP_WINDOWS = ("five_hour", "weekly", "monthly")
 
+# The only fields a plans entry may state. An unknown key is a config error:
+# a stray `caps` window would silently invent an unauthorized boundary (the
+# crossing arithmetic iterates caps.items()), and a non-numeric one would
+# surface as a TypeError instead of status 4.
+PLAN_ENTRY_FIELDS = ("list_price", "caps", "exposure", "regions")
+
 
 def _is_finite_number(value) -> bool:
     """A real JSON number: an int or a float, never a bool, never NaN/inf."""
@@ -2159,7 +2165,10 @@ def load_plans(policy: dict) -> dict:
     and an optional region opt-in. Each field could make a plan look safer
     or its Allowance look bigger than the policy says, so each refuses the
     load loudly, naming the entry — nothing half-loaded (ADR-0003,
-    ADR-0005).
+    ADR-0005). An unknown key is refused the same way: `caps` must state
+    exactly the three Allowance windows, because a stray window would
+    silently invent an unauthorized boundary in the crossing arithmetic,
+    and an entry may state only the known plan facts.
 
     The section is its own catalog: an entry whose id the Route-kind seam
     does not answer `plan` is refused here, while `free_models` keeps
@@ -2177,6 +2186,11 @@ def load_plans(policy: dict) -> dict:
             raise SystemExit(f"policy {path}: id must be a non-empty string")
         if not isinstance(entry, dict):
             raise SystemExit(f"policy {path} must be an object")
+        for key in entry:
+            if key not in PLAN_ENTRY_FIELDS:
+                raise SystemExit(
+                    f"policy {path}: unknown key '{key}' (expected "
+                    f"{', '.join(PLAN_ENTRY_FIELDS)})")
         kind = classify_route(mid)
         if kind != "plan":
             raise SystemExit(
@@ -2201,6 +2215,11 @@ def load_plans(policy: dict) -> dict:
             if not _is_finite_number(caps[window]) or caps[window] <= 0:
                 raise SystemExit(
                     f"policy {path}.caps.{window} must be a positive number")
+        for window in caps:
+            if window not in PLAN_CAP_WINDOWS:
+                raise SystemExit(
+                    f"policy {path}.caps: unknown window '{window}' "
+                    f"(expected {', '.join(PLAN_CAP_WINDOWS)})")
         if "exposure" not in entry:
             raise SystemExit(f"policy missing required key: {path}.exposure")
         try:
