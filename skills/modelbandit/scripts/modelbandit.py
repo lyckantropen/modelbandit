@@ -263,8 +263,10 @@ def _is_plain_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-# The Free price class: the kinds that serve at $0 (GLOSSARY, Free route).
-FREE_KINDS = frozenset({"free-slug", "harness", "local"})
+# The Free price class: the kinds that serve at $0 (GLOSSARY, Free route) -
+# every contract-table kind but the two priced ones, so membership is tied
+# to the facet table.
+FREE_KINDS = frozenset(_ROUTE_FACETS) - {"market", "plan"}
 
 
 def is_free_route(mid: str, *, local: bool = False) -> bool:
@@ -296,6 +298,13 @@ def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
     return bool(facets and facets["priced_by_endpoint_spread"])
 
 
+# The remote serving kinds: the contract-table kinds whose ids a policy
+# `local` Exposure label can never claim - every kind but the two a
+# slash-shaped id may legitimately carry (a market slug or a model this
+# machine serves).
+_REMOTE_KINDS = frozenset(_ROUTE_FACETS) - {"market", "local"}
+
+
 def local_label_is_void(mid: str) -> bool:
     """Whether a policy `local` Exposure label is void for this id.
 
@@ -305,7 +314,7 @@ def local_label_is_void(mid: str) -> bool:
     route - so a `local` label on one is void. A market-shaped slash id is
     not voided: local LM Studio ids are slash-shaped too, so the label may
     claim one."""
-    return classify_route(mid) in ("free-slug", "harness", "plan")
+    return classify_route(mid) in _REMOTE_KINDS
 
 
 _SECRET_VALUE_PATTERNS = (
@@ -1905,7 +1914,7 @@ def load_free_models(policy: dict) -> dict:
                                                     entry["exposure"])):
             raise SystemExit(f"policy {path}.exposure: {contradiction}")
         kind = _free_catalog_kind(prefix, entry["exposure"])
-        if kind not in ("free-slug", "harness", "local"):
+        if kind not in FREE_KINDS:
             raise SystemExit(
                 f"policy {path}: route kind '{kind or 'unknown'}' is not a "
                 f"Free route (free-slug, harness, or local); the free "
