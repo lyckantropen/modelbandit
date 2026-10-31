@@ -1827,8 +1827,12 @@ def _free_catalog_kind(prefix: str, exposure: str) -> str | None:
     The ``local`` annotation supplies the local serving fact for a prefix no
     remote namespace claims. A bare two-segment OpenRouter prefix is the
     family the catalog keys a ``:free`` route by, so it declares a free-slug
-    serving; anything else falls to the classifier, which fails closed on an
-    unknown namespace and names a provider-qualified market serving.
+    serving. A ``:free`` suffix on any other shape routes through the seam,
+    which normalizes and classifies the whole prefix: a two-segment slug
+    stays a free-slug serving, while a third segment or a plan namespace
+    under the ``openrouter/`` qualifier is refused at load. Anything else
+    falls to the classifier, which fails closed on an unknown namespace and
+    names the market serving an ``openrouter/`` prefix hides.
     """
     if prefix.startswith("opencode-go/"):
         return "plan"
@@ -1837,7 +1841,7 @@ def _free_catalog_kind(prefix: str, exposure: str) -> str | None:
     if prefix.startswith("opencode/"):
         return "harness"
     if prefix.endswith(":free"):
-        return "free-slug"
+        return classify_route(prefix)
     parts = prefix.split("/")
     if len(parts) == 2 and all(parts):
         return "free-slug"
