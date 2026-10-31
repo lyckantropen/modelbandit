@@ -307,5 +307,77 @@ class PlansStatus4MatrixTests(unittest.TestCase):
                 self.assertIn(line, out)
 
 
+class UnknownPlansKeyTests(unittest.TestCase):
+    """An unknown key is a config error, never a later crash or a silently
+    invented window: `caps` must state exactly the three Allowance windows,
+    and an entry only the known plan facts."""
+
+    def load(self, plans):
+        return modelbandit.load_plans({"plans": plans})
+
+    def test_an_unknown_caps_key_is_refused_naming_it(self):
+        # A stray window key would otherwise invent an unauthorized boundary
+        # (at_cap_verdict iterates caps.items()) or raise a traceback from
+        # the crossing arithmetic: it stops the load instead.
+        caps = {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0,
+                "daily": 5.0}
+        with self.assertRaisesRegex(
+                SystemExit,
+                rf"policy plans\.{re.escape(PLAN_ID)}\.caps: unknown window "
+                rf"'daily'"):
+            self.load({PLAN_ID: plan_entry(caps=caps)})
+
+    def test_a_non_numeric_unknown_caps_key_is_refused_naming_it(self):
+        # The same stray key with a non-numeric value must not reach
+        # at_cap_verdict as a TypeError: the load names the key.
+        caps = {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0,
+                "daily": "lots"}
+        with self.assertRaisesRegex(
+                SystemExit,
+                rf"plans\.{re.escape(PLAN_ID)}\.caps: unknown window 'daily'"):
+            self.load({PLAN_ID: plan_entry(caps=caps)})
+
+    def test_an_unknown_entry_key_is_refused_naming_it(self):
+        with self.assertRaisesRegex(
+                SystemExit,
+                rf"policy plans\.{re.escape(PLAN_ID)}: unknown key 'budget'"):
+            self.load({PLAN_ID: plan_entry(budget=10.0)})
+
+    def test_an_unknown_key_refuses_the_whole_load(self):
+        # Nothing half-loaded: a good entry before the offending one still
+        # never reaches the caller.
+        catalog = {PLAN_ID: plan_entry(),
+                   "opencode-go/other-plan": plan_entry(regions=["eu"],
+                                                        daily=1.0)}
+        with self.assertRaises(SystemExit):
+            self.load(catalog)
+
+
+class UnknownPlansKeyStatus4Tests(unittest.TestCase):
+    """An unknown plans key stops all four entry points with status 4.
+
+    Reuses PlansStatus4MatrixTests' harness and entry-point matrix: the
+    section validates on the shared loaders, so no entry point sees a
+    traceback or a half-loaded catalog.
+    """
+
+    def setUp(self):
+        self.matrix = PlansStatus4MatrixTests()
+        self.matrix.setUp()
+        self.addCleanup(self.matrix.tearDown)
+
+    def test_an_unknown_caps_key_stops_every_entry_point_with_status_4(self):
+        caps = {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0,
+                "daily": 5.0}
+        self.matrix.with_plans({PLAN_ID: plan_entry(caps=caps)})
+        self.matrix.assert_status_4_everywhere(
+            f"plans.{PLAN_ID}.caps: unknown window 'daily'")
+
+    def test_an_unknown_entry_key_stops_every_entry_point_with_status_4(self):
+        self.matrix.with_plans({PLAN_ID: plan_entry(budget=10.0)})
+        self.matrix.assert_status_4_everywhere(
+            f"plans.{PLAN_ID}: unknown key 'budget'")
+
+
 if __name__ == "__main__":
     unittest.main()

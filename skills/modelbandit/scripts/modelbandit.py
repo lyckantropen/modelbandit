@@ -1733,6 +1733,14 @@ def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
     return free_risk * cheapest_paid_ticket
 
 
+# Allowance caps are decimal dollar figures and the drawn sums are binary
+# floats: an exactly-reaching decimal batch (0.2 + 0.1 against 0.3) lands a
+# few ulps past its cap. The one crossing answer carries this money-noise
+# tolerance so exactly-reaching never crosses, while any true crossing --
+# a cent or a tenth of a cent -- still does.
+CAP_MONEY_NOISE = 1e-9
+
+
 def at_cap_verdict(mid: str, plans: dict, drawn: dict,
                    *, local: bool = False) -> dict[str, bool]:
     """The at-cap answer, per window: whether one more ticket of this route
@@ -1745,13 +1753,22 @@ def at_cap_verdict(mid: str, plans: dict, drawn: dict,
     uncataloged plan route -- earns none at all. The allowance ledger
     tracks the drawn totals live, prospective and in-run with no state
     across runs, and consumes this answer per ticket; eviction itself is
-    the ledger's business, never the pricing's."""
+    the ledger's business, never the pricing's.
+
+    The comparison carries a small money-noise tolerance
+    (CAP_MONEY_NOISE): caps are decimal dollar figures, and the sums that
+    reach them are binary floats -- 0.2 + 0.1 lands just past 0.3 -- so an
+    exactly-reaching decimal batch must never read as crossing, while any
+    true crossing (far above the noise) still does. This is the one
+    crossing answer; the tolerance lives here, not in the score's
+    risk-of-Draw arithmetic.
+    """
     entry = plans.get(mid)
     caps = entry.get("caps") if isinstance(entry, dict) else None
     draw = ticket_draw(mid, plans, local=local)
     if not isinstance(caps, dict) or draw is None:
         return {}
-    return {window: drawn.get(window, 0.0) + draw > cap
+    return {window: drawn.get(window, 0.0) + draw > cap + CAP_MONEY_NOISE
             for window, cap in caps.items()}
 
 
@@ -1803,6 +1820,16 @@ class AllowanceLedger:
         windows and so answers nothing."""
         totals = self._drawn.get(mid, {})
         return {window: totals.get(window, 0.0) for window in self._caps(mid)}
+
+    def readout(self, mid: str) -> dict[str, dict[str, float]]:
+        """The figures an `allowance draw:` line states for `mid`, per window:
+        what this run has drawn and the cap it draws against. `{}` for a
+        route with no Allowance (no line is printed for it). A readout, not a
+        verdict: the caller only formats these numbers."""
+        caps = self._caps(mid)
+        totals = self._drawn.get(mid, {})
+        return {window: {"drawn": totals.get(window, 0.0), "cap": cap}
+                for window, cap in caps.items()}
 
     def at_cap(self, mid: str) -> dict[str, bool]:
         """Whether one more ticket of `mid` would cross each window's cap:
@@ -2140,6 +2167,12 @@ def load_free_models(policy: dict) -> dict:
 # plan's boundary unnoticed.
 PLAN_CAP_WINDOWS = ("five_hour", "weekly", "monthly")
 
+# The only fields a plans entry may state. An unknown key is a config error:
+# a stray `caps` window would silently invent an unauthorized boundary (the
+# crossing arithmetic iterates caps.items()), and a non-numeric one would
+# surface as a TypeError instead of status 4.
+PLAN_ENTRY_FIELDS = ("list_price", "caps", "exposure", "regions")
+
 
 def _is_finite_number(value) -> bool:
     """A real JSON number: an int or a float, never a bool, never NaN/inf."""
@@ -2159,7 +2192,10 @@ def load_plans(policy: dict) -> dict:
     and an optional region opt-in. Each field could make a plan look safer
     or its Allowance look bigger than the policy says, so each refuses the
     load loudly, naming the entry — nothing half-loaded (ADR-0003,
-    ADR-0005).
+    ADR-0005). An unknown key is refused the same way: `caps` must state
+    exactly the three Allowance windows, because a stray window would
+    silently invent an unauthorized boundary in the crossing arithmetic,
+    and an entry may state only the known plan facts.
 
     The section is its own catalog: an entry whose id the Route-kind seam
     does not answer `plan` is refused here, while `free_models` keeps
@@ -2177,6 +2213,11 @@ def load_plans(policy: dict) -> dict:
             raise SystemExit(f"policy {path}: id must be a non-empty string")
         if not isinstance(entry, dict):
             raise SystemExit(f"policy {path} must be an object")
+        for key in entry:
+            if key not in PLAN_ENTRY_FIELDS:
+                raise SystemExit(
+                    f"policy {path}: unknown key '{key}' (expected "
+                    f"{', '.join(PLAN_ENTRY_FIELDS)})")
         kind = classify_route(mid)
         if kind != "plan":
             raise SystemExit(
@@ -2201,6 +2242,11 @@ def load_plans(policy: dict) -> dict:
             if not _is_finite_number(caps[window]) or caps[window] <= 0:
                 raise SystemExit(
                     f"policy {path}.caps.{window} must be a positive number")
+        for window in caps:
+            if window not in PLAN_CAP_WINDOWS:
+                raise SystemExit(
+                    f"policy {path}.caps: unknown window '{window}' "
+                    f"(expected {', '.join(PLAN_CAP_WINDOWS)})")
         if "exposure" not in entry:
             raise SystemExit(f"policy missing required key: {path}.exposure")
         try:
@@ -3078,8 +3124,9 @@ def plan_deal(share: dict, models: dict, aff: dict,
     Allowances as the loop assigns it (`ledger`, built from the plans
     catalog when the caller passes none): a row whose next ticket's Draw
     would cross a window's cap leaves the draw for the tickets that remain,
-    and the ticket falls through to the next row that still fits -- the
-    batch keeps assigning. Rows that hold no Allowance -- metered, Free, an
+    and the ticket falls through to the next row that still fits, wrapping
+    to the start of the draw's order at the end -- the batch keeps
+    assigning. Rows that hold no Allowance -- metered, Free, an
     uncataloged plan id -- keep drawing and never enter the ledger.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
@@ -3118,20 +3165,30 @@ def plan_deal(share: dict, models: dict, aff: dict,
     # windows alike and judged as it is assigned -- a row whose next ticket
     # would cross a window's cap leaves the draw for the tickets that
     # remain, and the ticket falls through to the next row that still fits.
-    # The draw itself stays keyed as it was -- ticket i's number is still
-    # seed::i -- so an at-cap row changes who takes a ticket, never the
-    # seeded order they are offered in.
+    # The fall-through is circular, still the draw's own order: a ticket
+    # drawn past an at-cap last row wraps to the start and takes the first
+    # non-evicted row, so no ticket is abandoned while any row still fits
+    # (US6 -- the batch continues within the plan). Only when every row is
+    # evicted does a ticket go unassigned. The draw itself stays keyed as it
+    # was -- ticket i's number is still seed::i -- so an at-cap row changes
+    # who takes a ticket, never the seeded order they are offered in; no
+    # re-deal and no renormalization.
     for i in range(tickets):
         r = random.Random(f"{seed}::{i}").random() * run
-        for j, c in enumerate(cum):
-            if r <= c and not evicted[j]:
-                mid = pool[j][0]
-                if ledger.crosses(mid):
-                    evicted[j] = True
-                    continue
-                counts[j] += 1
-                ledger.charge(mid)
-                break
+        start = next((j for j, c in enumerate(cum) if r <= c), None)
+        if start is None:
+            continue
+        for step in range(len(cum)):
+            j = (start + step) % len(cum)
+            if evicted[j]:
+                continue
+            mid = pool[j][0]
+            if ledger.crosses(mid):
+                evicted[j] = True
+                continue
+            counts[j] += 1
+            ledger.charge(mid)
+            break
     return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
              "tickets": n}
             for (mid, s), b, pr, d, n
@@ -4431,17 +4488,14 @@ def main() -> None:
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
         for row in rows:
             mid = row["mid"]
-            if row["tickets"] == 0 or ticket_draw(
-                    mid, policy["plans"], local=mid in local_ids) is None:
+            readout = ledger.readout(mid)
+            if row["tickets"] == 0 or not readout:
                 continue
-            caps = policy["plans"][mid]["caps"]
-            drawn = ledger.drawn(mid)
-            monthly = drawn["monthly"]
-            five_hour = drawn["five_hour"]
-            print(f"allowance draw: {mid} ${monthly:.2f} of "
-                  f"${caps['monthly']:.2f} "
-                  f"({monthly / caps['monthly']:.1%} of monthly; "
-                  f"{five_hour / caps['five_hour']:.1%} of 5h)")
+            monthly, five_hour = readout["monthly"], readout["five_hour"]
+            print(f"allowance draw: {mid} ${monthly['drawn']:.2f} of "
+                  f"${monthly['cap']:.2f} "
+                  f"({monthly['drawn'] / monthly['cap']:.1%} of monthly; "
+                  f"{five_hour['drawn'] / five_hour['cap']:.1%} of 5h)")
         free_tickets, dealt_tickets = deal_free_share(
             rows, policy, local=local_ids)
         free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0

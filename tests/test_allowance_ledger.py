@@ -22,22 +22,23 @@ serving books nothing.
 The crossing arithmetic is the cost seam's (at_cap_verdict); the ledger owns
 only the drawn totals it feeds that answer.
 
-Fixture style follows test_plan_pool.py: plain dicts, an injected fetch
-recorder, no network.
+Fixture style follows test_plan_pool.py: plain dicts, no network. The
+whole-run cases below reuse test_cli's CLI lifecycle (an injected fetch
+recorder, patched probe/cache/env, captured output); their scenario
+fixtures — ids, plan entries, boards — stay this suite's own.
 """
 
-import io
 import json
 import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
-from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
+sys.path.insert(0, os.path.dirname(__file__))
 import modelbandit  # noqa: E402
+import test_cli  # noqa: E402
 
 PLAN = "opencode-go/deepseek-v4-pro"    # a Plan route: it draws an Allowance
 SECOND = "opencode-go/glm-5.3"          # a second Plan route, its own window
@@ -344,6 +345,74 @@ class DealEvictionTests(unittest.TestCase):
         self.assertLessEqual(tickets_of(one)[PLAN], 2)
 
 
+class EvictionFallThroughWrapsTests(unittest.TestCase):
+    """The fall-through is circular, still the draw's own order: a ticket
+    whose drawn row is at cap is offered to the rows after it and then wraps
+    to the rows before it, so no ticket is abandoned while any row fits."""
+
+    def test_a_ticket_past_an_at_cap_last_row_wraps_to_an_earlier_row(self):
+        # The metered row ranks first on popularity but draws a thin slice
+        # (score 0.1 against the plan row's 1.0); the plan row ranks last and
+        # crosses its 5-hour window after two tickets. Every ticket drawn
+        # past the metered row's slice reaches the at-cap last row first,
+        # wraps, and lands on the metered row: the batch continues instead of
+        # dropping those tickets.
+        share = {OTHER: 0.6, PLAN: 0.4}
+        rows = deal(share, {PLAN: plan_entry(1.0, five_hour=2.0)},
+                    {PLAN: 1.0, OTHER: 0.1})
+        self.assertEqual(tickets_of(rows), {OTHER: 10, PLAN: 2})
+        self.assertEqual(sum(row["tickets"] for row in rows), 12)
+
+
+class DecimalEvictionTests(unittest.TestCase):
+    """A decimal cap is a real boundary: a batch that reaches it exactly is
+    never evicted, while any true crossing still is — binary float noise is
+    not a boundary."""
+
+    SHARE = {PLAN: 0.6, OTHER: 0.4}
+    SCORES = {PLAN: 1.0, OTHER: 0.0}
+
+    def test_three_ten_cent_tickets_fit_a_thirty_cent_cap_exactly(self):
+        # In binary, 0.2 + 0.1 lands just past 0.3: the third ticket reaches
+        # the decimal cap exactly and must stay in the draw.
+        plans = {PLAN: plan_entry(0.10, five_hour=0.30)}
+        rows = deal(self.SHARE, plans, self.SCORES, tickets=3)
+        self.assertEqual(tickets_of(rows), {PLAN: 3, OTHER: 0})
+
+    def test_a_decimal_cap_below_the_sum_still_evicts_the_third(self):
+        plans = {PLAN: plan_entry(0.10, five_hour=0.29)}
+        rows = deal(self.SHARE, plans, self.SCORES, tickets=3)
+        self.assertEqual(tickets_of(rows), {PLAN: 2, OTHER: 1})
+
+    def test_a_decimal_cap_past_the_sum_evicts_the_next_ticket(self):
+        # 0.31 admits the three 0.10 tickets and stops the fourth: the
+        # tolerance never widens a window past its decimal boundary.
+        plans = {PLAN: plan_entry(0.10, five_hour=0.31)}
+        rows = deal(self.SHARE, plans, self.SCORES, tickets=4)
+        self.assertEqual(tickets_of(rows), {PLAN: 3, OTHER: 1})
+
+
+class LedgerReadoutTests(unittest.TestCase):
+    """The readout snapshot the CLI line formats: per window, what this run
+    has drawn and the cap it draws against."""
+
+    PLANS = {PLAN: plan_entry(2.0, five_hour=5.0, monthly=10.0)}
+
+    def test_the_readout_states_each_windows_drawn_and_cap(self):
+        led = ledger(self.PLANS)
+        led.charge(PLAN)
+        self.assertEqual(led.readout(PLAN), {
+            "five_hour": {"drawn": 2.0, "cap": 5.0},
+            "weekly": {"drawn": 2.0, "cap": 100.0},
+            "monthly": {"drawn": 2.0, "cap": 10.0}})
+
+    def test_a_route_without_an_allowance_has_no_readout(self):
+        # The CLI line is not printed for it: no Allowance, nothing to state.
+        led = ledger(self.PLANS)
+        self.assertEqual(led.readout(TWIN), {})
+        self.assertEqual(led.readout(GHOST), {})
+
+
 def market_model(mid=OTHER):
     return {"id": mid, "supported_parameters": ["reasoning_effort"],
             "pricing": {"prompt": "0.0000002", "completion": "0.000001",
@@ -365,12 +434,12 @@ class PickEvictionCliTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.policy_path = os.path.join(self._tmp.name, "policy.json")
-        config_home = os.path.join(self._tmp.name, "config")
-        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
-        with open(os.path.join(config_home, "modelbandit", "zones.json"),
-                  "w", encoding="utf-8") as f:
-            json.dump({"zones": [], "default": "open"}, f)
-        self.config_home = config_home
+        # The shared CLI lifecycle (test_cli.CliTests): injected fetchers,
+        # patched local probe/cache/env, captured stdout/stderr. The scenario
+        # fixtures below (policy, world, boards) stay this suite's own.
+        self.cli = test_cli.CliTests()
+        self.cli.setUp()
+        self.addCleanup(self.cli.tearDown)
 
     def with_policy(self, plans):
         with open(self.policy_path, "w", encoding="utf-8") as f:
@@ -394,40 +463,11 @@ class PickEvictionCliTests(unittest.TestCase):
             }, f)
 
     def run_main(self, world):
-        def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
-            if cache_name == "key.json":
-                raise SystemExit("cannot reach the key endpoint")
-            if cache_name == "models.json":
-                return {"data": world["models"]}
-            if cache_name == "classifications.json":
-                return {"data": world["classifications"]}
-            if cache_name == "rankings.json":
-                return world["rankings"]
-            if url.endswith("/endpoints"):
-                slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
-                return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
-            raise AssertionError(f"unexpected fetch: {url}")
-
-        out, err = io.StringIO(), io.StringIO()
-        argv = ["modelbandit", "--policy", self.policy_path, "--domain",
-                "writing", "--tickets", "12", "--deal", "--seed", "proj"]
-        with mock.patch("modelbandit.fetch_json", side_effect=fake_fetch), \
-                mock.patch("modelbandit.probe_local_models",
-                           return_value={}), \
-                mock.patch.object(modelbandit, "CACHE_DIR",
-                                  os.path.join(self._tmp.name, "cache")), \
-                mock.patch.dict(os.environ,
-                                {"XDG_CONFIG_HOME": self.config_home}), \
-                mock.patch("modelbandit.git_origin", return_value=None), \
-                mock.patch.object(sys, "argv", argv), \
-                redirect_stdout(out), redirect_stderr(err):
-            try:
-                modelbandit.main()
-                code = None
-            except SystemExit as exc:
-                code = exc.code
-            self.assertIn(code, (None, 0), err.getvalue())
-        return out.getvalue(), err.getvalue()
+        out, err, code, _ = self.cli.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "proj", world=world, policy_path=self.policy_path)
+        self.assertIn(code, (None, 0), err)
+        return out, err
 
     def world(self, models, classified):
         return {"models": models, "classifications": board(*classified),
