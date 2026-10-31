@@ -181,6 +181,77 @@ def norm_id(model_id: str) -> str:
     return model_id.removeprefix("openrouter/")
 
 
+_ROUTE_FACETS = {
+    "market": {
+        "zone_refusable_in_closed_regimes": False,
+        "default_exposure": "no-retention",
+        "spends_free_request_counter": False,
+        "needs_policy_catalog_entry": False,
+        "priced_by_endpoint_spread": True,
+        "standing_from": "boards",
+    },
+    "free-slug": {
+        "zone_refusable_in_closed_regimes": True,
+        "default_exposure": "trains",
+        "spends_free_request_counter": True,
+        "needs_policy_catalog_entry": False,
+        "priced_by_endpoint_spread": False,
+        "standing_from": "own board row",
+    },
+    "harness": {
+        "zone_refusable_in_closed_regimes": True,
+        "default_exposure": "trains",
+        "spends_free_request_counter": False,
+        "needs_policy_catalog_entry": True,
+        "priced_by_endpoint_spread": False,
+        "standing_from": "family share",
+    },
+    "plan": {
+        "zone_refusable_in_closed_regimes": False,
+        "default_exposure": "no-retention",
+        "spends_free_request_counter": False,
+        "needs_policy_catalog_entry": True,
+        "priced_by_endpoint_spread": False,
+        "standing_from": "deferred to plan economics",
+    },
+    "local": {
+        "zone_refusable_in_closed_regimes": False,
+        "default_exposure": "local",
+        "spends_free_request_counter": False,
+        "needs_policy_catalog_entry": True,
+        "priced_by_endpoint_spread": False,
+        "standing_from": "family share",
+    },
+}
+
+
+def classify_route(mid: str, *, local: bool = False) -> str | None:
+    """Classify a serving identity from its normalized id and local-serving fact."""
+    if local:
+        return "local"
+    if not isinstance(mid, str):
+        return None
+
+    mid = norm_id(mid)
+    if mid.startswith("opencode-go/"):
+        return "plan" if all(mid[len("opencode-go/"):].split("/")) else None
+    if mid.startswith("opencode/"):
+        return "harness" if all(mid[len("opencode/"):].split("/")) else None
+
+    parts = mid.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    if parts[1].endswith(":free"):
+        return "free-slug" if parts[1][:-len(":free")] else None
+    return "market"
+
+
+def route_facets(kind: str) -> dict | None:
+    """Return the serving-facet contract for a kind, or None if it is unknown."""
+    facets = _ROUTE_FACETS.get(kind)
+    return dict(facets) if facets is not None else None
+
+
 def _is_plain_int(value) -> bool:
     """True for integers, excluding bool (which is an int subclass)."""
     return isinstance(value, int) and not isinstance(value, bool)
