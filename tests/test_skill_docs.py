@@ -190,5 +190,39 @@ class Adr0004Tests(unittest.TestCase):
         self.assertIn("`jq -e '.allowed'` already owns shell booleans", text)
 
 
+class PlanEconomicsWordingTests(unittest.TestCase):
+    """Issue #60: the skill prose tells the shipped plan-economics truth —
+    the plans catalog, the prospective ledger, risk-of-Draw and the readout
+    lines, each pinned to the code's own shapes and vocabulary."""
+
+    def test_reference_names_the_plan_catalog_and_its_facts(self):
+        body = section("Reference")
+        self.assertIn("**Plan catalog (`plans`)**", body)
+        for fact in ("list_price", "five_hour", "weekly", "monthly",
+                     "exposure", "regions", "status 4"):
+            self.assertIn(fact, body)
+
+    def test_reference_states_the_ledger_and_risk_of_draw(self):
+        body = section("Reference")
+        self.assertIn("**Allowance & Draw**", body)
+        self.assertIn("one 5-hour burst", body)
+        self.assertIn("stateless", body)
+        self.assertIn("**Risk of Draw**", body)
+        self.assertIn("ADR-0006", body)
+
+    def test_reference_carries_the_readout_shapes(self):
+        body = section("Reference")
+        self.assertIn("**Plan readout**", body)
+        self.assertIn("allowance draw: <model> $X of $Y "
+                      "(Z% of monthly; W% of 5h)", body)
+        self.assertIn("Draw $Y/ticket", body)
+
+    def test_the_pick_step_names_the_plan_readout(self):
+        self.assertIn("Plan tickets carry their budget facts",
+                      step(5, "Pick — or deal."))
+        self.assertIn("risk of its list-priced Draw",
+                      step(3, "Order by task score."))
+
+
 if __name__ == "__main__":
     unittest.main()
