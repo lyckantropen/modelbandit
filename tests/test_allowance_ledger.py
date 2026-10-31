@@ -22,22 +22,23 @@ serving books nothing.
 The crossing arithmetic is the cost seam's (at_cap_verdict); the ledger owns
 only the drawn totals it feeds that answer.
 
-Fixture style follows test_plan_pool.py: plain dicts, an injected fetch
-recorder, no network.
+Fixture style follows test_plan_pool.py: plain dicts, no network. The
+whole-run cases below reuse test_cli's CLI lifecycle (an injected fetch
+recorder, patched probe/cache/env, captured output); their scenario
+fixtures — ids, plan entries, boards — stay this suite's own.
 """
 
-import io
 import json
 import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
-from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
+sys.path.insert(0, os.path.dirname(__file__))
 import modelbandit  # noqa: E402
+import test_cli  # noqa: E402
 
 PLAN = "opencode-go/deepseek-v4-pro"    # a Plan route: it draws an Allowance
 SECOND = "opencode-go/glm-5.3"          # a second Plan route, its own window
@@ -433,12 +434,12 @@ class PickEvictionCliTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.policy_path = os.path.join(self._tmp.name, "policy.json")
-        config_home = os.path.join(self._tmp.name, "config")
-        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
-        with open(os.path.join(config_home, "modelbandit", "zones.json"),
-                  "w", encoding="utf-8") as f:
-            json.dump({"zones": [], "default": "open"}, f)
-        self.config_home = config_home
+        # The shared CLI lifecycle (test_cli.CliTests): injected fetchers,
+        # patched local probe/cache/env, captured stdout/stderr. The scenario
+        # fixtures below (policy, world, boards) stay this suite's own.
+        self.cli = test_cli.CliTests()
+        self.cli.setUp()
+        self.addCleanup(self.cli.tearDown)
 
     def with_policy(self, plans):
         with open(self.policy_path, "w", encoding="utf-8") as f:
@@ -462,40 +463,11 @@ class PickEvictionCliTests(unittest.TestCase):
             }, f)
 
     def run_main(self, world):
-        def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
-            if cache_name == "key.json":
-                raise SystemExit("cannot reach the key endpoint")
-            if cache_name == "models.json":
-                return {"data": world["models"]}
-            if cache_name == "classifications.json":
-                return {"data": world["classifications"]}
-            if cache_name == "rankings.json":
-                return world["rankings"]
-            if url.endswith("/endpoints"):
-                slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
-                return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
-            raise AssertionError(f"unexpected fetch: {url}")
-
-        out, err = io.StringIO(), io.StringIO()
-        argv = ["modelbandit", "--policy", self.policy_path, "--domain",
-                "writing", "--tickets", "12", "--deal", "--seed", "proj"]
-        with mock.patch("modelbandit.fetch_json", side_effect=fake_fetch), \
-                mock.patch("modelbandit.probe_local_models",
-                           return_value={}), \
-                mock.patch.object(modelbandit, "CACHE_DIR",
-                                  os.path.join(self._tmp.name, "cache")), \
-                mock.patch.dict(os.environ,
-                                {"XDG_CONFIG_HOME": self.config_home}), \
-                mock.patch("modelbandit.git_origin", return_value=None), \
-                mock.patch.object(sys, "argv", argv), \
-                redirect_stdout(out), redirect_stderr(err):
-            try:
-                modelbandit.main()
-                code = None
-            except SystemExit as exc:
-                code = exc.code
-            self.assertIn(code, (None, 0), err.getvalue())
-        return out.getvalue(), err.getvalue()
+        out, err, code, _ = self.cli.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "proj", world=world, policy_path=self.policy_path)
+        self.assertIn(code, (None, 0), err)
+        return out, err
 
     def world(self, models, classified):
         return {"models": models, "classifications": board(*classified),
