@@ -222,10 +222,10 @@ area:
 
    Launch only when the pre-flight says `allowed` — an error, a missing
    field, a malformed response, anything else means do not launch. The
-   verdict lines carry the answer, and either answer exits **0**: `allowed:
-   <id>`, or `blocked by the free-use zone` with effective posture and
-   regime named (never content) — status says the pre-flight ran, the lines
-   say what's true. The dispatch fails closed: with no shape stated the pre-flight assumes the
+   verdict lines carry the answer, and every answer exits **0**: `allowed:
+   <id>`, `blocked by the free-use zone`, or `blocked: unknown serving
+   namespace` — with effective posture and regime named (never content) —
+   status says the pre-flight ran, the lines say what's true. The dispatch fails closed: with no shape stated the pre-flight assumes the
    material is Sensitive and says so (`shape: sensitive (assumed)`), so a
    route that retains training data is refused by default; when you know the
    material is not Sensitive, say so explicitly with `--plain`
@@ -436,8 +436,9 @@ starts closed everywhere, so this is the interview's only opening move:
 - **Pre-flight (`--assert-allowed`)** — `scripts/modelbandit.py --assert-allowed
   --model <id> --working-dir <folder>` answers one question for an
   orchestrator: may this model serve in that folder's effective zone? The
-  output answers — `allowed: <id>` or `blocked by the free-use zone` — and
-  either verdict exits **0** (status says the tool ran; output says what's
+  output answers — `allowed: <id>`, `blocked by the free-use zone`, or
+  `blocked: unknown serving namespace` — and every verdict exits **0**
+  (status says the tool ran; output says what's
   true); **4** is a policy/config error and **2** a usage error, and neither
   is an answer: default-deny, launch only on `allowed`. `--json` answers
   with one object (`allowed`, `zone`, `reason`) instead of the lines. The
@@ -448,22 +449,24 @@ starts closed everywhere, so this is the interview's only opening move:
   dispatch fails closed; `shape: plain (via --plain)` when `--plain` states
   the material is not Sensitive; `shape: sensitive (via --sensitive)` when the
   default is restated — and then
-  `allowed: <id>` or `blocked by the free-use zone` with model and reason; it
+  `allowed: <id>`, `blocked by the free-use zone`, or `blocked: unknown
+  serving namespace` with model and reason; it
   never carries the shape's content. It needs no policy file, no classification
   fetch and no network —
   a missing policy is an empty policy, so a route the file does not describe
   resolves by the defaults (a `:free` or `opencode/*` route exposed, a paid
   route no-retention, a cataloged `local` entry local). Localness is a serving
   fact, never a catalogue claim: a `local` label counts only for an id the
-  route predicate does not classify as remote, so a catalogue label cannot
-  make a remote (`opencode/*`, `:free`) route local or skip the Sensitive gate.
+  Route kind does not classify as a remote serving — a `:free` slug, an
+  `opencode/*` model, an `opencode-go/*` plan route — so a catalogue label
+  cannot make a remote route local or skip the Sensitive gate.
   `--plain` states a shape, never a zone — it cannot open a closed area.
   Refuse to launch a model the pre-flight
   blocks instead of substituting one.
 
 - **Exit statuses** — **0** ran to completion: any verdict — safe,
-  sensitive, not certified, allowed, blocked by the free-use zone,
-  over-budget, empty pool, no candidate admitted. **1** carries no contract
+  sensitive, not certified, allowed, blocked by the free-use zone, unknown
+  serving namespace, over-budget, empty pool, no candidate admitted. **1** carries no contract
   meaning: what CPython and generic operational failures (network
   unreachable, unreadable input) produce — never an answer. **2** usage
   errors (argparse's own channel). **4** rules/config error (secrets rules,
