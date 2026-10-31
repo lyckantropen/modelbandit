@@ -41,9 +41,20 @@ class CacheDirMixin(unittest.TestCase):
 
 
 class ApiKeyTests(unittest.TestCase):
+    # A fake home must satisfy expanduser on every platform: POSIX expands
+    # `~` from HOME, Windows from USERPROFILE (then HOMEDRIVE+HOMEPATH), so
+    # setting only HOME leaves the Windows run pointing at the real home —
+    # three tests failed there, and two others passed only because the file
+    # was never found.
+    def _fake_home(self, home):
+        return mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home},
+                               clear=True)
+
     def test_environment_wins(self):
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "env-key",
-                                          "HOME": "/nonexistent"}, clear=True):
+                                          "HOME": "/nonexistent",
+                                          "USERPROFILE": "/nonexistent"},
+                             clear=True):
             self.assertEqual(modelbandit.api_key(), "env-key")
 
     def _key_from_auth(self, auth_entry):
@@ -52,7 +63,7 @@ class ApiKeyTests(unittest.TestCase):
         os.makedirs(path)
         with open(os.path.join(path, "auth.json"), "w") as f:
             json.dump(auth_entry, f)
-        with mock.patch.dict(os.environ, {"HOME": home}, clear=True):
+        with self._fake_home(home):
             return modelbandit.api_key()
 
     def test_reads_opencode_auth_api_key(self):
@@ -76,11 +87,11 @@ class ApiKeyTests(unittest.TestCase):
         os.makedirs(path)
         with open(os.path.join(path, "auth.json"), "w") as f:
             f.write("{not json")
-        with mock.patch.dict(os.environ, {"HOME": home}, clear=True):
+        with self._fake_home(home):
             self.assertIsNone(modelbandit.api_key())
 
     def test_no_key_anywhere(self):
-        with mock.patch.dict(os.environ, {"HOME": "/nonexistent"}, clear=True):
+        with self._fake_home("/nonexistent"):
             self.assertIsNone(modelbandit.api_key())
 
 
