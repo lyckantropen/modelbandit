@@ -1535,13 +1535,15 @@ def resolve_model(models: dict, by_canon: dict, permaslug: str):
 
 
 # --- Cost seam -------------------------------------------------------------
-# What a ticket costs, in one bounded region: the endpoint bases (worst,
-# primary, best), the blended ticket arithmetic, the effort rungs and their
-# multipliers, and the Nominal floor's pool-cheapest derivation. Nothing
-# outside re-derives a price: the score and the deal reach cost only through
-# this region's single entry point (effective_costs), and every $/ticket
-# basis comes from price_model -- consumers ask the seam for an answer,
-# never the arithmetic.
+# What a ticket costs, in one bounded region, answered three ways: the
+# ticket cost (the endpoint bases worst/primary/best and the blended
+# arithmetic behind them), the Draw (what one ticket burns of a plan's
+# Allowance, at the plan's list price), and the at-cap verdict (whether a
+# ticket's Draw would cross an Allowance window's cap). The pricing
+# arithmetic, the effort rungs and their multipliers, the Nominal floor's
+# pool-cheapest derivation and the one marginal-zero rule (ADR-0006) are
+# internals: nothing outside re-derives a price -- the score and the deal
+# ask the seam for an answer, never the arithmetic.
 
 
 def endpoint_pricings(slug: str, refresh: bool) -> list[dict]:
@@ -1684,31 +1686,96 @@ def price_model(model: dict, eps: list[dict], in_tok: int, out_tok: int,
             "out_min": min(outs), "out_max": max(outs), "n_eps": len(eps)}
 
 
+def ticket_draw(mid: str, plans: dict, *, local: bool = False) -> float | None:
+    """The Draw one ticket of this route burns: what it consumes of an
+    Allowance, counted at the plan's list price (GLOSSARY, Draw). A Plan
+    route answers its catalog entry's list price -- the free-in-plan,
+    zero-Draw serving answers 0 -- and every other serving answers None: a
+    Free route, a metered route, or a plan-shaped id this machine serves
+    has no Allowance to draw down (the local serving fact outranks the id
+    shape). Plan-ness is the Route-kind seam's answer (is_plan_route), and
+    the price comes from the validated plans catalog alone, so a plan route
+    the catalog does not price has no Draw to answer."""
+    if not is_plan_route(mid, local=local):
+        return None
+    entry = plans.get(mid)
+    price = entry.get("list_price") if isinstance(entry, dict) else None
+    return float(price) if _is_finite_number(price) and price >= 0 else None
+
+
 def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
-    """A Free route's ticket cost: Free risk times the pool's cheapest paid
-    ticket. One derived Nominal floor applies uniformly across Free routes.
+    """The Nominal floor: Free risk times the pool's cheapest paid ticket.
+    The no-Draw case of the one marginal-zero rule (ADR-0006) -- a Free
+    route's ticket cost, and a zero-Draw plan serving's fallback alike.
     """
     return free_risk * cheapest_paid_ticket
 
 
-def effective_costs(costs: dict, *, free_risk: float,
-                    free: set[str] | frozenset[str] = frozenset()) -> dict:
-    """The score's cost term for one pool: Free routes at derived Free risk,
-    every paid ticket at its own price.
+def at_cap_verdict(mid: str, plans: dict, drawn: dict,
+                   *, local: bool = False) -> dict[str, bool]:
+    """The at-cap answer, per window: whether one more ticket of this route
+    would cross each Allowance window's cap. `plans` is the policy's
+    validated plan catalog -- the caps and the Draw both read from the
+    route's own entry -- and `drawn` is the Draw the run has already
+    allotted this route, per window (a window nothing is drawn against
+    starts at zero). A window the entry states no cap for earns no verdict,
+    and a route with no Allowance -- a metered route, a Free route, an
+    uncataloged plan route -- earns none at all. The allowance ledger
+    tracks the drawn totals live, prospective and in-run with no state
+    across runs, and consumes this answer per ticket; eviction itself is
+    the ledger's business, never the pricing's."""
+    entry = plans.get(mid)
+    caps = entry.get("caps") if isinstance(entry, dict) else None
+    draw = ticket_draw(mid, plans, local=local)
+    if not isinstance(caps, dict) or draw is None:
+        return {}
+    return {window: drawn.get(window, 0.0) + draw > cap
+            for window, cap in caps.items()}
 
-    `free` names the pool's Free routes — the price class the seam derives
-    (see free_route_ids), never inferred from a zero price. The Nominal floor
-    is Free risk times the cheapest priced paid ticket, or a $1 fallback
-    reference when the pool has
-    no priced paid ticket. A valid risk fraction makes the floor positive and,
-    when paid tickets exist, strictly below their cheapest ticket. A paid
-    ticket that priced at nothing keeps the pool's cheapest paid ticket.
+
+def effective_costs(costs: dict, *, free_risk: float,
+                    free: set[str] | frozenset[str] = frozenset(),
+                    plans: dict | None = None) -> dict:
+    """The score's cost term for one pool: the one marginal-zero rule
+    (ADR-0006) -- a marginal-zero ticket prices as risk of its Draw, never
+    at $0.
+
+    `free` names the pool's Free routes (see free_route_ids), never inferred
+    from a zero price, and carries the serving facts; `plans` is the
+    policy's validated plan catalog, the facts the Draw reads. A Plan route
+    prices as Free risk times its own list-priced Draw; where there is no
+    Draw -- a Free route, a zero-Draw plan serving, a plan route the catalog
+    does not price -- the Nominal floor answers: Free risk times the
+    cheapest priced paid ticket, or the $1 reference when the pool has
+    none. Paid tickets keep their own price, and a paid ticket that priced
+    at nothing keeps the pool's cheapest paid ticket. A valid risk fraction
+    keeps every marginal-zero answer positive -- the floor strictly below
+    the pool's cheapest paid ticket when one exists -- so no ticket wins by
+    dividing by zero.
     """
-    paid = [v for mid, v in costs.items() if mid not in free and v > 0]
+    catalog = plans or {}
+    # Plan-ness is the Route-kind seam's answer (is_plan_route), never the
+    # catalog's; a plan-shaped id the machine serves is a Free route (the
+    # caller's `free` set carries the serving fact), never a plan one.
+    plan_routes = {mid for mid in costs if is_plan_route(mid)} - set(free)
+    draws, floor_ids = {}, set()
+    for mid in costs:
+        if mid in free:
+            floor_ids.add(mid)
+        elif mid in plan_routes:
+            draw = ticket_draw(mid, catalog)
+            if draw:
+                draws[mid] = free_risk * draw
+            else:
+                floor_ids.add(mid)
+    paid = [v for mid, v in costs.items()
+            if mid not in free and mid not in plan_routes and v > 0]
     cheapest_paid = min(paid, default=NOMINAL_REFERENCE_TICKET)
-    has_free = any(mid in free for mid in costs)
-    nominal_floor = nominal_floor_cost(free_risk, cheapest_paid) if has_free else None
-    return {mid: (nominal_floor if mid in free else (v if v > 0 else cheapest_paid))
+    nominal_floor = (nominal_floor_cost(free_risk, cheapest_paid)
+                     if floor_ids else None)
+    return {mid: (draws[mid] if mid in draws else
+                  nominal_floor if mid in floor_ids else
+                  v if v > 0 else cheapest_paid)
             for mid, v in costs.items()}
 
 
@@ -3343,7 +3410,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         effective = effective_costs(
             costs,
             free_risk=config.free_risk,
-            free=free)
+            free=free,
+            plans=policy["plans"])
         scores = {mid: standing(share, effective[mid], None,
                                 config.alpha, config.beta)
                   for (mid, share) in pool}
@@ -3455,7 +3523,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         eff = effective_costs(
             costs,
             free_risk=config.free_risk,
-            free=free_route_ids(costs, policy, local=local_ids))
+            free=free_route_ids(costs, policy, local=local_ids),
+            plans=policy["plans"])
         masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
         t1, t2 = mass_balance(masses)
         ok = (thresholds["top1_min"] <= t1 <= thresholds["top1_max"]
@@ -3931,12 +4000,14 @@ def main() -> None:
         priced[mid] = pr
         pers[mid] = pr[args.pricing_basis]
     # Free routes price at the Nominal floor in the score's cost term — the
-    # same floor for every Exposure — while the table's price columns keep
+    # same floor for every Exposure — and a plan route prices as risk of its
+    # list-priced Draw (ADR-0006) — while the table's price columns keep
     # showing what the route actually costs to run.
     eff_costs = effective_costs(
         pers,
         free_risk=config.free_risk,
-        free=free_route_ids(pers, policy, local=local_ids))
+        free=free_route_ids(pers, policy, local=local_ids),
+        plans=policy["plans"])
 
     rows_out = []
     for mid, s in ranked:
