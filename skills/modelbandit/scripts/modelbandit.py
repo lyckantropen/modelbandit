@@ -257,9 +257,40 @@ def _is_plain_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+# The Free price class: the kinds that serve at $0 (GLOSSARY, Free route).
+FREE_KINDS = frozenset({"free-slug", "harness", "local"})
+
+
 def is_free_route(mid: str, *, local: bool = False) -> bool:
-    """Whether this serving identity is Free, independent of its price."""
-    return local or mid.startswith("opencode/") or mid.endswith(":free")
+    """The Free price class (GLOSSARY): a $0 serving - an OpenRouter `:free`
+    slug, an OpenCode `opencode/*` model, or a model this machine serves.
+    Derived from the Route-kind seam, never re-spelled from the id's shape:
+    what serves an id is the classifier's answer alone. This is what the
+    Nominal floor, the Context gate, the catalog gate and the Free share
+    count - not the zone or quota question; those gates ask their own
+    facets."""
+    return classify_route(mid, local=local) in FREE_KINDS
+
+
+def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
+    """Whether Endpoint spread prices this serving - the market kind's trait
+    alone (the facet contract's `priced_by_endpoint_spread`). Non-market
+    rows make no catalog fetch: a Free route prices from its zero record,
+    and a plan route prices from its own record when plan economics land."""
+    facets = route_facets(classify_route(mid, local=local))
+    return bool(facets and facets["priced_by_endpoint_spread"])
+
+
+def local_label_is_void(mid: str) -> bool:
+    """Whether a policy `local` Exposure label is void for this id.
+
+    Localness is a serving fact, never a catalogue claim: the classifier
+    answers the remote serving namespaces remote whatever a label says - a
+    `:free` slug, an `opencode/*` harness model, an `opencode-go/*` plan
+    route - so a `local` label on one is void. A market-shaped slash id is
+    not voided: local LM Studio ids are slash-shaped too, so the label may
+    claim one."""
+    return classify_route(mid) in ("free-slug", "harness", "plan")
 
 
 _SECRET_VALUE_PATTERNS = (
@@ -1767,12 +1798,13 @@ def load_policy_config(policy: dict) -> PolicyConfig:
 def exposure_contradiction(mid: str, value: str) -> str | None:
     """Why a policy Exposure label contradicts the serving identity, or None.
 
-    Localness is a serving fact, never a catalogue claim: `opencode/*` and
-    `:free` ids are remote serving identities — the route predicate says so
-    whatever a policy entry says — so a `local` label on one is a
-    contradiction the policy stops loudly, naming the entry.
+    Localness is a serving fact, never a catalogue claim: the classifier
+    answers the remote serving namespaces remote — the void rule
+    (local_label_is_void) says so whatever a policy entry says — so a
+    `local` label on one is a contradiction the policy stops loudly,
+    naming the entry.
     """
-    if value == "local" and is_free_route(mid):
+    if value == "local" and local_label_is_void(mid):
         return (f"exposure 'local' contradicts the remote serving identity "
                 f"'{mid}' (opencode/* and :free routes are remote)")
     return None
@@ -2039,9 +2071,10 @@ def effective_costs(costs: dict, *, free_risk: float,
     """The score's cost term for one pool: Free routes at derived Free risk,
     every paid ticket at its own price.
 
-    `free` names the pool's Free routes — a serving fact (see free_route_ids),
-    never inferred from a zero price. The Nominal floor is Free risk times the
-    cheapest priced paid ticket, or a $1 fallback reference when the pool has
+    `free` names the pool's Free routes — the price class the seam derives
+    (see free_route_ids), never inferred from a zero price. The Nominal floor
+    is Free risk times the cheapest priced paid ticket, or a $1 fallback
+    reference when the pool has
     no priced paid ticket. A valid risk fraction makes the floor positive and,
     when paid tickets exist, strictly below their cheapest ticket. A paid
     ticket that priced at nothing keeps the pool's cheapest paid ticket.
@@ -2153,19 +2186,23 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     """One candidate's Exposure, by precedence:
 
     explicit policy override (prefix-keyed) > locally served > curated free
-    catalog entry > ':free'-suffixed slug => trains > default no-retention.
+    catalog entry > the default-exposure facet (a free-slug or harness
+    serving trains, a market or plan serving no-retention); an id outside
+    every kind keeps the paid-route assumption.
 
     The default is the paid route's assumption — the account's data policy
     already holds it. A free route the catalog does not carry is exposed until
     the user says otherwise.
 
-    Localness is a serving fact, never a catalogue claim: a `local` label on a
-    remote serving identity (`opencode/*`, `:free`) is void — the route
-    predicate decides, and it says remote — so the serving facts answer even
-    when a stale policy reached this far without validation.
+    Localness is a serving fact, never a catalogue claim: a `local` label on
+    a remote serving identity is void - the classifier decides, and it says
+    the remote namespaces (`:free`, `opencode/*`, `opencode-go/*`) are
+    remote - so the serving facts answer even when a stale policy reached
+    this far without validation. A market-shaped slash id is not voided:
+    local LM Studio ids are slash-shaped too.
     """
     def stated(value) -> str | None:
-        if value == "local" and is_free_route(mid):
+        if value == "local" and local_label_is_void(mid):
             return None
         return known_exposure(mid, value)
 
@@ -2179,9 +2216,9 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     if isinstance(entry, dict) and entry.get("exposure") \
             and (value := stated(entry["exposure"])) is not None:
         return value
-    if is_free_route(mid):
-        return "trains"
-    return "no-retention"
+    kind = classify_route(mid, local=local)
+    facets = route_facets(kind)
+    return facets["default_exposure"] if facets else "no-retention"
 
 
 def known_exposure(mid: str, value: str) -> str:
@@ -2199,10 +2236,11 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                   intent: str = "measured") -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
     the policy's `exposure` override map and `free_models` catalog, plus its
-    serving price class and Footprint capacities."""
+    Free price class (the seam's answer) and Footprint capacities."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
-    is_free = is_free_route(mid, local=local)
+    kind = classify_route(mid, local=local)
+    is_free = kind in FREE_KINDS
     context_length = (catalog_entry.get("context_length")
                       if isinstance(catalog_entry, dict) else None)
     if context_length is None and model:
@@ -2211,6 +2249,13 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     if (completion_cap is None and is_free
             and isinstance(catalog_entry, dict)):
         completion_cap = catalog_entry.get("max_completion_tokens")
+    # The catalog-entry facet: a harness or local serving is admitted only
+    # through its own catalog entry; a free-slug serving may ride a family
+    # summary without one. Unreached for an id outside every kind - the
+    # clause only runs for a Free price class, and that kind is known.
+    facets = route_facets(kind)
+    needs_catalog_entry = (facets["needs_policy_catalog_entry"]
+                           if facets else True)
     return Candidate(id=mid,
                       exposure=resolve_exposure(
                           mid, free_models=policy.get("free_models", {}),
@@ -2224,22 +2269,16 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                       cataloged=(not is_free or (
                            _free_summary(catalog_entry,
                                          policy.get("summaries", {}), mid)
-                           and (not local and not mid.startswith("opencode/")
+                           and (not needs_catalog_entry
                                 or catalog_match is not None))))
 
 
 def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
-    """The Free routes among `mids`, by the serving rule: a ':free' slug, an
-    OpenCode 'opencode/' model, or one this machine serves (`local`) — the
-    route predicate reports as Free. Never the price: a paid route
+    """The Free routes among `mids` - the price class the seam derives (see
+    is_free_route). Never the price a record shows: a paid route
     may be cheap, and Free is what the harness serves for nothing."""
     local = set(local)
     return {mid for mid in mids if is_free_route(mid, local=mid in local)}
-
-
-def _is_harness_free(mid: str, local_ids) -> bool:
-    """Whether endpoint pricing is absent because the harness serves this id."""
-    return mid.startswith("opencode/") or mid in local_ids
 
 
 def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, int]:
@@ -2323,17 +2362,21 @@ def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
 def zone_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     """Why the free-use zone forbids this candidate outright, or None.
 
-    Free is a serving fact, so a `:free` or `opencode/*` route is remote and a
-    closed zone refuses it, while a model this machine serves never leaves it
-    and stays in. `open` and `sensitive` forbid nothing here — Exposure and the
-    quota answer for them.
+    The zone-refusable facet answers: a closed regime refuses exactly the
+    remote, unaccountable servings - the free-slug and harness kinds -
+    whatever their price, while a market or plan serving is accountable and
+    a model this machine serves never leaves it and stays in. `open` and
+    `sensitive` forbid nothing here - Exposure and the quota answer for
+    them.
 
     This is the source filter: a candidate it names never enters the candidate
     set, so it is not ranked, scored, dealt or listed. The header states the
     zone that made it absent (`zone: <path> (<regime>)`), which is how the
     absence is explained without a row and without a reason column.
     """
-    if (candidate.is_free and not candidate.local
+    facets = route_facets(classify_route(candidate.id,
+                                         local=candidate.local))
+    if (facets and facets["zone_refusable_in_closed_regimes"]
             and regime_at_least(shape.regime, "closed")):
         return "remote free route is prohibited by the effective regime"
     return None
@@ -2379,15 +2422,18 @@ GATES = (zone_gate, exposure_gate, context_gate, catalog_gate)
 
 
 def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
-    """The Free-request quota gate: ':free' routes only.
+    """The Free-request quota gate: the counter's own facet answers.
 
-    The counter is an OpenRouter account fact spent by the routes OpenRouter
-    serves for nothing. A harness-served 'opencode/*' model or a model this
-    machine serves spends none of it, so a spent counter says nothing about
-    them; a paid route is charged credits, not free requests.
+    The counter is an OpenRouter account fact spent by the servings the
+    facet contract charges to it - the free-slug kind alone. A
+    harness-served model, a plan route or a model this machine serves
+    spends none of it, so a spent counter says nothing about them; a paid
+    route is charged credits, not free requests.
     """
-    # This OpenRouter serving counter does not apply to harness-served Free routes.
-    if not verdict.eligible and candidate.id.endswith(":free"):
+    facets = route_facets(classify_route(candidate.id,
+                                         local=candidate.local))
+    if (not verdict.eligible and facets
+            and facets["spends_free_request_counter"]):
         return Decision(False, verdict.reason)
     return ADMITTED
 
@@ -2420,8 +2466,9 @@ def admit(shape: Shape, candidate: Candidate, *,
 # OpenRouter's daily free-request counter: one figure shared by every ':free'
 # route on the account, reset at UTC midnight. The tier ceiling is set by
 # all-time credits purchased, and no response header reports the running
-# count, so it is read from the key payload up front. Harness-served free
-# models — 'opencode/*' and local — never spend it.
+# count, so it is read from the key payload up front. The counter's facet
+# charges the free-slug kind alone; harness, plan and local servings never
+# spend it.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3120,7 +3167,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         costs = {}
         for mid, _ in pool:
             model = models[mid]
-            eps = ([] if _is_harness_free(mid, local_ids)
+            eps = ([] if not priced_by_endpoint_spread(mid,
+                                                       local=mid in local_ids)
                    else endpoint_pricings(mid, False))
             pricing = price_model(model, eps,
                                   in_tok, out_tok, cached, mult_for(model, intent))
@@ -3232,7 +3280,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         costs = {}
         for mid, s in pool:
             m_mult = mult_for(models[mid], intent)
-            eps = ([] if _is_harness_free(mid, local_ids)
+            eps = ([] if not priced_by_endpoint_spread(mid,
+                                                       local=mid in local_ids)
                    else endpoint_pricings(mid, False))
             pricing = price_model(models[mid], eps,
                                   in_tok, out_tok, cached, m_mult)
@@ -3667,8 +3716,9 @@ def main() -> None:
         mid for mid, _ in ranked
         if mid in models and not is_free_route(mid, local=mid in local_ids))
     for mid in completion_fact_ids:
-        endpoint_cache[mid] = ([] if _is_harness_free(mid, local_ids) else
-                               endpoint_pricings(mid, args.refresh))
+        endpoint_cache[mid] = (
+            [] if not priced_by_endpoint_spread(mid, local=mid in local_ids)
+            else endpoint_pricings(mid, args.refresh))
 
     # The one admission decision: the table marks with it, the deal draws
     # from it. Excluded rows stay visible; only the pick and the pool shun
@@ -3707,8 +3757,10 @@ def main() -> None:
         if not m:
             continue
         if mid not in endpoint_cache:
-            endpoint_cache[mid] = ([] if _is_harness_free(mid, local_ids) else
-                                   endpoint_pricings(mid, args.refresh))
+            endpoint_cache[mid] = (
+                [] if not priced_by_endpoint_spread(mid,
+                                                    local=mid in local_ids)
+                else endpoint_pricings(mid, args.refresh))
         eps = endpoint_cache[mid]
         pr = price_model(m, eps,
                          in_tok, out_tok, cached,
