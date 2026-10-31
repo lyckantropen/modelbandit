@@ -1532,6 +1532,16 @@ def resolve_model(models: dict, by_canon: dict, permaslug: str):
     return None, "unresolved"
 
 
+# --- Cost seam -------------------------------------------------------------
+# What a ticket costs, in one bounded region: the endpoint bases (worst,
+# primary, best), the blended ticket arithmetic, the effort rungs and their
+# multipliers, and the Nominal floor's pool-cheapest derivation. Nothing
+# outside re-derives a price: the score and the deal reach cost only through
+# this region's single entry point (effective_costs), and every $/ticket
+# basis comes from price_model -- consumers ask the seam for an answer,
+# never the arithmetic.
+
+
 def endpoint_pricings(slug: str, refresh: bool) -> list[dict]:
     """Per-provider pricing for one model. Failures return [] quietly."""
     safe = re.sub(r"[^a-zA-Z0-9._-]", "--", slug)
@@ -1670,6 +1680,34 @@ def price_model(model: dict, eps: list[dict], in_tok: int, out_tok: int,
     return {"worst": worst[0], "primary": primary, "best": best[0],
             "worst_ep": worst[1].get("name", "?"), "best_ep": best[1].get("name", "?"),
             "out_min": min(outs), "out_max": max(outs), "n_eps": len(eps)}
+
+
+def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
+    """A Free route's ticket cost: Free risk times the pool's cheapest paid
+    ticket. One derived Nominal floor applies uniformly across Free routes.
+    """
+    return free_risk * cheapest_paid_ticket
+
+
+def effective_costs(costs: dict, *, free_risk: float,
+                    free: set[str] | frozenset[str] = frozenset()) -> dict:
+    """The score's cost term for one pool: Free routes at derived Free risk,
+    every paid ticket at its own price.
+
+    `free` names the pool's Free routes — the price class the seam derives
+    (see free_route_ids), never inferred from a zero price. The Nominal floor
+    is Free risk times the cheapest priced paid ticket, or a $1 fallback
+    reference when the pool has
+    no priced paid ticket. A valid risk fraction makes the floor positive and,
+    when paid tickets exist, strictly below their cheapest ticket. A paid
+    ticket that priced at nothing keeps the pool's cheapest paid ticket.
+    """
+    paid = [v for mid, v in costs.items() if mid not in free and v > 0]
+    cheapest_paid = min(paid, default=NOMINAL_REFERENCE_TICKET)
+    has_free = any(mid in free for mid in costs)
+    nominal_floor = nominal_floor_cost(free_risk, cheapest_paid) if has_free else None
+    return {mid: (nominal_floor if mid in free else (v if v > 0 else cheapest_paid))
+            for mid, v in costs.items()}
 
 
 def longest_prefix_match(mid: str, values: dict) -> tuple[str, object] | None:
@@ -2098,34 +2136,6 @@ def task_score(share: float, cost: float, alpha: float, beta: float) -> float:
     """share^alpha / cost^beta. cost must already be floored (see
     effective_costs) so Free routes cannot win on division alone."""
     return share ** alpha / cost ** beta
-
-
-def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
-    """A Free route's ticket cost: Free risk times the pool's cheapest paid
-    ticket. One derived Nominal floor applies uniformly across Free routes.
-    """
-    return free_risk * cheapest_paid_ticket
-
-
-def effective_costs(costs: dict, *, free_risk: float,
-                    free: set[str] | frozenset[str] = frozenset()) -> dict:
-    """The score's cost term for one pool: Free routes at derived Free risk,
-    every paid ticket at its own price.
-
-    `free` names the pool's Free routes — the price class the seam derives
-    (see free_route_ids), never inferred from a zero price. The Nominal floor
-    is Free risk times the cheapest priced paid ticket, or a $1 fallback
-    reference when the pool has
-    no priced paid ticket. A valid risk fraction makes the floor positive and,
-    when paid tickets exist, strictly below their cheapest ticket. A paid
-    ticket that priced at nothing keeps the pool's cheapest paid ticket.
-    """
-    paid = [v for mid, v in costs.items() if mid not in free and v > 0]
-    cheapest_paid = min(paid, default=NOMINAL_REFERENCE_TICKET)
-    has_free = any(mid in free for mid in costs)
-    nominal_floor = nominal_floor_cost(free_risk, cheapest_paid) if has_free else None
-    return {mid: (nominal_floor if mid in free else (v if v > 0 else cheapest_paid))
-            for mid, v in costs.items()}
 
 
 def fit_for(mid: str, fit_map: dict) -> float | None:
