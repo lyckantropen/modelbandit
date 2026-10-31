@@ -1316,13 +1316,14 @@ def policy_facts(path: str | None) -> dict:
     """The policy's Exposure facts when the file exists, else none.
 
     The pre-flight and the secrets check read the local policy for its
-    `exposure` overrides and `free_models` catalog when it is there, and work
-    without it: a missing file is not an error, so the defaults answer (a
-    ':free' or 'opencode/*' route exposed, a paid route no-retention). No
-    board, no classification fetch, no network.
+    `exposure` overrides, its `free_models` catalog and its `plans` catalog
+    when it is there, and work without it: a missing file is not an error,
+    so the defaults answer (a ':free' or 'opencode/*' route exposed, a
+    paid route no-retention). No board, no classification fetch, no network.
     """
     policy = load_policy_file(path)
     policy["free_models"] = load_free_models(policy)
+    policy["plans"] = load_plans(policy)
     load_exposure_overrides(policy)
     return policy
 
@@ -1443,13 +1444,14 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
 
 def load_policy_bundle(policy_path: str | None) -> dict:
     """The one policy load every entry point shares: the file read as
-    UTF-8, the free catalog, and the exposure overrides. Validation and
-    unpacking stay with each caller — it knows what it can tolerate (a
-    missing file is absent setup for the status report, an existing one
-    must be one the ranking trusts) and maps every failure to status 4,
-    never a traceback or a Secrets verdict."""
+    UTF-8, the free catalog, the plan catalog, and the exposure overrides.
+    Validation and unpacking stay with each caller — it knows what it can
+    tolerate (a missing file is absent setup for the status report, an
+    existing one must be one the ranking trusts) and maps every failure to
+    status 4, never a traceback or a Secrets verdict."""
     policy = load_policy_file(policy_path)
     policy["free_models"] = load_free_models(policy)
+    policy["plans"] = load_plans(policy)
     load_exposure_overrides(policy)
     return policy
 
@@ -1961,6 +1963,92 @@ def load_free_models(policy: dict) -> dict:
         if summary_ref is not None and (not isinstance(summary_ref, str)
                                         or not summary_ref.strip()):
             raise SystemExit(f"policy {path}.summary_ref must be a non-empty string")
+    return catalog
+
+
+# The three Allowance windows a plan entry must state caps for, in ledger
+# order: the rolling 5-hour window, the week, the month (GLOSSARY,
+# Allowance). The caps are dollar figures, so every one must be a positive
+# real number — a zero or a misspelling would let a batch run past the
+# plan's boundary unnoticed.
+PLAN_CAP_WINDOWS = ("five_hour", "weekly", "monthly")
+
+
+def _is_finite_number(value) -> bool:
+    """A real JSON number: an int or a float, never a bool, never NaN/inf."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def load_plans(policy: dict) -> dict:
+    """Validate the plan catalog at the policy boundary.
+
+    The `plans` section is the single source the ledger and the Exposure
+    verdicts read a Plan route's facts from: its list price (the Draw's
+    basis), its three Allowance window caps, its training/retention class,
+    and an optional region opt-in. Each field could make a plan look safer
+    or its Allowance look bigger than the policy says, so each refuses the
+    load loudly, naming the entry — nothing half-loaded (ADR-0003,
+    ADR-0005).
+
+    The section is its own catalog: an entry whose id the Route-kind seam
+    does not answer `plan` is refused here, while `free_models` keeps
+    refusing plan-kind entries in parallel — each catalog prices only the
+    servings it owns. A `list_price` of 0 is not bad: it is the zero-Draw,
+    free-in-plan serving whose pricing falls back to the pool-cheapest
+    basis (ADR-0006), so the price must be non-negative, not positive.
+    """
+    catalog = policy.get("plans", {})
+    if not isinstance(catalog, dict):
+        raise SystemExit("policy plans must be an object")
+    for mid, entry in catalog.items():
+        path = f"plans.{mid}"
+        if not isinstance(mid, str) or not mid.strip():
+            raise SystemExit(f"policy {path}: id must be a non-empty string")
+        if not isinstance(entry, dict):
+            raise SystemExit(f"policy {path} must be an object")
+        kind = classify_route(mid)
+        if kind != "plan":
+            raise SystemExit(
+                f"policy {path}: route kind '{kind or 'unknown'}' is not a "
+                f"Plan route (opencode-go/*); the plans catalog prices only "
+                f"Plan servings")
+        if "list_price" not in entry:
+            raise SystemExit(f"policy missing required key: {path}.list_price")
+        if not _is_finite_number(entry["list_price"]) \
+                or entry["list_price"] < 0:
+            raise SystemExit(
+                f"policy {path}.list_price must be a non-negative number")
+        if "caps" not in entry:
+            raise SystemExit(f"policy missing required key: {path}.caps")
+        caps = entry["caps"]
+        if not isinstance(caps, dict):
+            raise SystemExit(f"policy {path}.caps must be an object")
+        for window in PLAN_CAP_WINDOWS:
+            if window not in caps:
+                raise SystemExit(
+                    f"policy missing required key: {path}.caps.{window}")
+            if not _is_finite_number(caps[window]) or caps[window] <= 0:
+                raise SystemExit(
+                    f"policy {path}.caps.{window} must be a positive number")
+        if "exposure" not in entry:
+            raise SystemExit(f"policy missing required key: {path}.exposure")
+        try:
+            known_exposure(mid, entry["exposure"])
+        except SystemExit as exc:
+            raise SystemExit(f"policy {path}.exposure: {exc}") from None
+        if (contradiction := exposure_contradiction(mid, entry["exposure"])):
+            raise SystemExit(f"policy {path}.exposure: {contradiction}")
+        regions = entry.get("regions")
+        if regions is not None and (
+                not isinstance(regions, list)
+                or any(not isinstance(region, str) or not region.strip()
+                       for region in regions)):
+            raise SystemExit(
+                f"policy {path}.regions must be a list of non-empty strings")
     return catalog
 
 
