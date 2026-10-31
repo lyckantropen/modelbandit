@@ -1745,12 +1745,41 @@ def exposure_contradiction(mid: str, value: str) -> str | None:
     return None
 
 
+def _free_catalog_kind(prefix: str, exposure: str) -> str | None:
+    """The Route kind a ``free_models`` entry declares, from its prefix alone.
+
+    Namespace first: ``opencode-go/*`` is a plan serving whatever the entry
+    says (plan has its own catalog), and ``opencode/*`` is a harness serving.
+    The ``local`` annotation supplies the local serving fact for a prefix no
+    remote namespace claims. A bare two-segment OpenRouter prefix is the
+    family the catalog keys a ``:free`` route by, so it declares a free-slug
+    serving; anything else falls to the classifier, which fails closed on an
+    unknown namespace and names a provider-qualified market serving.
+    """
+    if prefix.startswith("opencode-go/"):
+        return "plan"
+    if exposure == "local":
+        return "local"
+    if prefix.startswith("opencode/"):
+        return "harness"
+    if prefix.endswith(":free"):
+        return "free-slug"
+    parts = prefix.split("/")
+    if len(parts) == 2 and all(parts):
+        return "free-slug"
+    return classify_route(prefix)
+
+
 def load_free_models(policy: dict) -> dict:
     """Validate the curated Free route catalog at the policy boundary.
 
     A bad window or misspelled Exposure must stop the run: either could make a
-    candidate look safer or more capable than the policy says. ``summary_ref``
-    remains optional in policy, but when present it must be a usable string.
+    candidate look safer or more capable than the policy says. So must an entry
+    whose Route kind is not Free: the hardcoded $0 of a Free record must never
+    price a plan or market serving, so such an entry is refused at load with a
+    loud config error naming it — nothing half-loaded (ADR-0002, ADR-0005).
+    ``summary_ref`` remains optional in policy, but when present it must be a
+    usable string.
     """
     catalog = policy.get("free_models", {})
     if not isinstance(catalog, dict):
@@ -1778,6 +1807,12 @@ def load_free_models(policy: dict) -> dict:
         if (contradiction := exposure_contradiction(prefix,
                                                     entry["exposure"])):
             raise SystemExit(f"policy {path}.exposure: {contradiction}")
+        kind = _free_catalog_kind(prefix, entry["exposure"])
+        if kind not in ("free-slug", "harness", "local"):
+            raise SystemExit(
+                f"policy {path}: route kind '{kind or 'unknown'}' is not a "
+                f"Free route (free-slug, harness, or local); the free "
+                f"catalog prices only Free servings")
         summary_ref = entry.get("summary_ref")
         if summary_ref is not None and (not isinstance(summary_ref, str)
                                         or not summary_ref.strip()):
