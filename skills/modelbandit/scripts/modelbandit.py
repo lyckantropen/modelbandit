@@ -4374,7 +4374,13 @@ def main() -> None:
             and not decisions[rows_out[0][0]].admitted:
         print(f"\nnote: top of task order {rows_out[0][0]} is excluded "
               f"({decisions[rows_out[0][0]].reason}) — not picked")
-    print(f"\ndefault pick (top of task order): {pick[0]}")
+    pick_line = f"\ndefault pick (top of task order): {pick[0]}"
+    pick_draw = ticket_draw(pick[0], policy["plans"],
+                            local=pick[0] in local_ids)
+    if pick_draw is not None:
+        pick_line += (f" (${pick[1]:.4f}/ticket; "
+                      f"Draw ${pick_draw:.2f}/ticket)")
+    print(pick_line)
     pr_pick = pick[2]
     if pr_pick.get("best_ep") and pr_pick.get("worst_ep") \
             and pr_pick["best_ep"] != pr_pick["worst_ep"]:
@@ -4423,6 +4429,19 @@ def main() -> None:
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
+        for row in rows:
+            mid = row["mid"]
+            if row["tickets"] == 0 or ticket_draw(
+                    mid, policy["plans"], local=mid in local_ids) is None:
+                continue
+            caps = policy["plans"][mid]["caps"]
+            drawn = ledger.drawn(mid)
+            monthly = drawn["monthly"]
+            five_hour = drawn["five_hour"]
+            print(f"allowance draw: {mid} ${monthly:.2f} of "
+                  f"${caps['monthly']:.2f} "
+                  f"({monthly / caps['monthly']:.1%} of monthly; "
+                  f"{five_hour / caps['five_hour']:.1%} of 5h)")
         free_tickets, dealt_tickets = deal_free_share(
             rows, policy, local=local_ids)
         free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0
