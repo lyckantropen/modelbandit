@@ -252,6 +252,12 @@ def route_facets(kind: str) -> dict | None:
     return dict(facets) if facets is not None else None
 
 
+def facets_for(mid: str, *, local: bool = False) -> dict | None:
+    """The facet contract for one id's Route kind, or None when no kind
+    classifies it: the one seam question a bare-id site asks."""
+    return route_facets(classify_route(mid, local=local))
+
+
 def _is_plain_int(value) -> bool:
     """True for integers, excluding bool (which is an int subclass)."""
     return isinstance(value, int) and not isinstance(value, bool)
@@ -286,7 +292,7 @@ def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
     alone (the facet contract's `priced_by_endpoint_spread`). Non-market
     rows make no catalog fetch: a Free route prices from its zero record,
     and a plan route prices from its own record when plan economics land."""
-    facets = route_facets(classify_route(mid, local=local))
+    facets = facets_for(mid, local=local)
     return bool(facets and facets["priced_by_endpoint_spread"])
 
 
@@ -2195,6 +2201,12 @@ class Candidate:
     local: bool = False
 
 
+def facets_for_candidate(candidate: Candidate) -> dict | None:
+    """The facet contract for a candidate's Route kind, or None when no kind
+    classifies it: the one seam question a gate asks about a candidate."""
+    return facets_for(candidate.id, local=candidate.local)
+
+
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
                      overrides: dict | None = None, local: bool = False) -> str:
     """One candidate's Exposure, by precedence:
@@ -2230,8 +2242,7 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     if isinstance(entry, dict) and entry.get("exposure") \
             and (value := stated(entry["exposure"])) is not None:
         return value
-    kind = classify_route(mid, local=local)
-    facets = route_facets(kind)
+    facets = facets_for(mid, local=local)
     return facets["default_exposure"] if facets else "no-retention"
 
 
@@ -2253,8 +2264,8 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     Free price class (the seam's answer) and Footprint capacities."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
-    kind = classify_route(mid, local=local)
-    is_free = kind in FREE_KINDS
+    is_free = is_free_route(mid, local=local)
+    facets = facets_for(mid, local=local)
     context_length = (catalog_entry.get("context_length")
                       if isinstance(catalog_entry, dict) else None)
     if context_length is None and model:
@@ -2270,7 +2281,6 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     # facet of a Free kind alone - plan has no catalog of its own yet, so a
     # plan candidate is never cataloged, and the catalog gate refuses one
     # whatever reaches it.
-    facets = route_facets(kind)
     needs_catalog_entry = (facets["needs_policy_catalog_entry"]
                            if facets else True)
     return Candidate(id=mid,
@@ -2399,8 +2409,7 @@ def zone_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     zone that made it absent (`zone: <path> (<regime>)`), which is how the
     absence is explained without a row and without a reason column.
     """
-    facets = route_facets(classify_route(candidate.id,
-                                         local=candidate.local))
+    facets = facets_for_candidate(candidate)
     if (facets and facets["zone_refusable_in_closed_regimes"]
             and regime_at_least(shape.regime, "closed")):
         return "remote free route is prohibited by the effective regime"
@@ -2455,8 +2464,7 @@ def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
     spends none of it, so a spent counter says nothing about them; a paid
     route is charged credits, not free requests.
     """
-    facets = route_facets(classify_route(candidate.id,
-                                         local=candidate.local))
+    facets = facets_for_candidate(candidate)
     if (not verdict.eligible and facets
             and facets["spends_free_request_counter"]):
         return Decision(False, verdict.reason)
