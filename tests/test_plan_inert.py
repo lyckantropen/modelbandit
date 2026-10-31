@@ -12,8 +12,12 @@ curated free catalog, and the local probe - and none of them can make an
   when a raw, unvalidated dict tries to feed it one;
 - a board may name an `opencode-go/*` id - the traffic feed is OpenRouter's
   and the plan namespace is not an OpenRouter serving, so the models list
-  carries no such model - and an unresolved model never plays: it drops
-  before any pool or the deal is built;
+  carries no such model. An unresolved model never plays: it drops before
+  any pool or the deal is built. Even when a models list does carry the id
+  (a fixture can supply one; OpenRouter's own never will), the pool builders
+  drop the plan kind outright and the catalog gate refuses the plan row - no
+  plan catalog exists to satisfy its needs-catalog facet - so the id still
+  reaches no pool, no admission and no deal;
 - a locally served id joins through its local serving fact, which the seam
   ranks above any id shape, so a plan-shaped id served on this machine
   assembles as a local candidate, never a plan one.
@@ -89,6 +93,37 @@ class PlanNeverEntersThePoolTests(unittest.TestCase):
         share, _, _ = modelbandit.domain_candidates(classif, ["content_writing"],
                                             models, {})
         self.assertNotIn(PLAN, share)
+
+    def test_a_plan_id_the_model_list_carries_never_pools_admits_or_deals(self):
+        # Belt and braces: even with the board AND the models list both
+        # carrying the plan id, it stays only a named, visible share row.
+        # The pool builders drop the plan kind (a plan-shaped id this
+        # machine serves is a local row - the seam's precedence), and the
+        # catalog gate refuses the plan row because no plan catalog exists
+        # to satisfy its needs-catalog facet: never in any pool, never
+        # admitted, never dealt.
+        classif = board((PLAN, 0.6), (MARKET, 0.4))
+        models = {MARKET: market_model(), PLAN: market_model(PLAN)}
+        share, _, _ = modelbandit.domain_candidates(classif, ["content_writing"],
+                                            models, {})
+        self.assertIn(PLAN, share)
+
+        pool = modelbandit.eligibility_pool(share, models, {}, 5)
+        self.assertEqual([mid for mid, _ in pool], [MARKET])
+        paid = modelbandit.paid_pool(share, models, set(), 5)
+        self.assertEqual([mid for mid, _ in paid], [MARKET])
+        parameters = modelbandit.DealParameters(
+            blend_weight=0.6, top_k=5, seed="plan-inert", tickets=12,
+            fit_adjusted_task_scores={MARKET: 1.0, PLAN: 1.0},
+            admitted=frozenset({MARKET, PLAN}))
+        rows = modelbandit.plan_deal(share, models, {}, parameters)
+        self.assertEqual([row["mid"] for row in rows], [MARKET])
+
+        facts = modelbandit.candidate_for(PLAN, {})
+        self.assertFalse(facts.cataloged)
+        decision = modelbandit.admit(modelbandit.Shape(), facts)
+        self.assertFalse(decision.admitted)
+        self.assertIn("requires a policy catalog entry", decision.reason)
 
     def test_a_raw_plan_catalog_prefix_cannot_enter_the_free_merge(self):
         # The load refuses a plan-kind entry (test_free_catalog_kinds.py);

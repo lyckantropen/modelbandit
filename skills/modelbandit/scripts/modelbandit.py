@@ -272,6 +272,15 @@ def is_free_route(mid: str, *, local: bool = False) -> bool:
     return classify_route(mid, local=local) in FREE_KINDS
 
 
+def is_plan_route(mid: str, *, local: bool = False) -> bool:
+    """Whether the seam answers the plan kind for this id - the check the
+    pool choke points use to keep plan inert: no pool or deal row may
+    carry a plan candidate until plan economics land. The local serving
+    fact outranks the id shape, so a plan-shaped id this machine serves is
+    a local row, never a plan one."""
+    return classify_route(mid, local=local) == "plan"
+
+
 def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
     """Whether Endpoint spread prices this serving - the market kind's trait
     alone (the facet contract's `priced_by_endpoint_spread`). Non-market
@@ -2251,8 +2260,11 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
         completion_cap = catalog_entry.get("max_completion_tokens")
     # The catalog-entry facet: a harness or local serving is admitted only
     # through its own catalog entry; a free-slug serving may ride a family
-    # summary without one. Unreached for an id outside every kind - the
-    # clause only runs for a Free price class, and that kind is known.
+    # summary without one. The free catalog prices only Free servings (its
+    # load rule refuses every other kind), so a match there can satisfy the
+    # facet of a Free kind alone - plan has no catalog of its own yet, so a
+    # plan candidate is never cataloged, and the catalog gate refuses one
+    # whatever reaches it.
     facets = route_facets(kind)
     needs_catalog_entry = (facets["needs_policy_catalog_entry"]
                            if facets else True)
@@ -2266,11 +2278,13 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                       completion_cap=completion_cap,
                       output_multiplier=(mult_for(model, intent) if model
                                          else EFFORT_MULTIPLIERS[intent]),
-                      cataloged=(not is_free or (
-                           _free_summary(catalog_entry,
-                                         policy.get("summaries", {}), mid)
-                           and (not needs_catalog_entry
-                                or catalog_match is not None))))
+                      cataloged=((not needs_catalog_entry
+                                  or (is_free
+                                      and catalog_match is not None))
+                                 and (not is_free
+                                      or _free_summary(catalog_entry,
+                                                       policy.get("summaries",
+                                                                  {}), mid))))
 
 
 def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
@@ -2352,10 +2366,16 @@ def context_gate(shape: Shape, candidate: Candidate) -> Decision:
 
 
 def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """Only curated, summary-backed Free routes can enter the Deal."""
+    """Only curated, summary-backed Free routes can enter the Deal, and the
+    plan kind is refused outright: the plan kind needs a policy catalog
+    entry, and no plan catalog exists yet (plan economics land later), so a
+    plan row that somehow forms is never admitted or dealt."""
     if candidate.is_free and not candidate.cataloged:
         return Decision(False, "free route requires a catalog entry and "
                         "summary where applicable (summary resolution is required)")
+    if is_plan_route(candidate.id, local=candidate.local):
+        return Decision(False, "plan route requires a policy catalog entry "
+                               "(none exists yet)")
     return ADMITTED
 
 
@@ -2591,32 +2611,42 @@ def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
 
 
 def paid_pool(share: dict, models: dict, free: set[str],
-              top_k: int) -> list[tuple[str, float]]:
+              top_k: int, local=()) -> list[tuple[str, float]]:
     """The balance criterion's players: the top_k most popular paid models.
 
     Score mass judges the paid competition — the band was calibrated for a
     landscape in which Free routes were not scored at all, and Free's
     participation is answered by the Free share signal, not by a threshold.
     Free routes leave before the cut, so a pool that Free dominates wholly
-    still has a paid competition to judge.
+    still has a paid competition to judge. Plan ids leave too: plan is
+    inert until plan economics land, and no pool builder may fabricate a
+    plan row — the board may still name one, a share row is untouched.
     """
+    local = set(local)
     return [entry for entry in popularity_ranking(share, models)
-            if entry[0] not in free][:top_k]
+            if entry[0] not in free
+            and not is_plan_route(entry[0], local=entry[0] in local)][:top_k]
 
 
 def eligibility_pool(share: dict, models: dict, aff: dict, top_k: int,
-                     admitted: frozenset | None = None) -> list[tuple[str, float]]:
+                     admitted: frozenset | None = None,
+                     local=()) -> list[tuple[str, float]]:
     """The deal's players, computed once for every consumer.
 
     Eligibility stays popularity: the top_k selectable models, plus ranked
     models the user favors (weight > 1) below the cut — the admission seam's
     verdict applied first (``admitted``: the ids it admits; None admits all).
     An excluded player is never replaced by a lower-ranked one: popularity
-    orders, admission only removes. Returns [(mid, share)] in popularity
-    order; the candidate table prices these same players.
+    orders, admission only removes. Plan ids leave here too: plan is inert
+    until plan economics land, and no pool builder may fabricate a plan row
+    — a plan-shaped id this machine serves is a local row (the seam's
+    precedence), and the board may still name one. Returns [(mid, share)]
+    in popularity order; the candidate table prices these same players.
     """
+    local = set(local)
     ranked = [entry for entry in popularity_ranking(share, models)
-              if admitted is None or entry[0] in admitted]
+              if (admitted is None or entry[0] in admitted)
+              and not is_plan_route(entry[0], local=entry[0] in local)]
     return ranked[:top_k] + [(mid, s) for mid, s in ranked[top_k:]
                              if weight_for(mid, aff) > 1.0]
 
@@ -2638,7 +2668,7 @@ def blend_bases(pool: list[tuple[str, float]],
 
 
 def plan_deal(share: dict, models: dict, aff: dict,
-              parameters: DealParameters) -> list[dict]:
+              parameters: DealParameters, local=()) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility is popularity (eligibility_pool). The draw blends the task
@@ -2651,6 +2681,8 @@ def plan_deal(share: dict, models: dict, aff: dict,
     for the whole pool by the caller (blend_bases). Deterministic in seed.
     The pool is admission-filtered before the draw (parameters.admitted), so
     the deal and the ranked table agree about what may serve the shape.
+    Plan ids draw no ticket here either: plan is inert until plan economics
+    land, so the deal's own row list is plan-free whatever reaches it.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
     """
@@ -2658,7 +2690,12 @@ def plan_deal(share: dict, models: dict, aff: dict,
     seed = parameters.seed
     tickets = parameters.tickets
     pool = eligibility_pool(share, models, aff, parameters.top_k,
-                            parameters.admitted)
+                            parameters.admitted, local=local)
+    # The second brace on this function's own output: a plan id that reached
+    # the pool any other way is dropped before the draw.
+    local = set(local)
+    pool = [(mid, s) for mid, s in pool
+            if not is_plan_route(mid, local=mid in local)]
     if not pool:
         return []
     bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
@@ -3114,7 +3151,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         table = domain_weights(signals, name, config.factors)
         eligible.update(mid for mid, _ in
                         eligibility_pool(share_by_domain[name], models,
-                                         table, pool_k))
+                                         table, pool_k, local=local_ids))
 
     gaps, stale, stale_signals = drift_keys(all_ranked, summaries, signals)
 
@@ -3159,7 +3196,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                 mid, policy, local=mid in local_ids,
                 model=models.get(mid))).admitted)
         pool = eligibility_pool(share_by_domain[name], models, aff, pool_k,
-                                admitted)
+                                admitted, local=local_ids)
         free = free_route_ids((mid for mid, _ in pool), policy,
                               local=local_ids)
         if not free:
@@ -3186,7 +3223,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                            top_k=pool_k, seed=FREE_SHARE_CHECK_SEED,
                            tickets=FREE_SHARE_CHECK_TICKETS,
                            fit_adjusted_task_scores=scores,
-                           admitted=admitted))
+                           admitted=admitted), local=local_ids)
         free_tickets, dealt_tickets = deal_free_share(
             rows, policy, local=local_ids)
         shape_key = {"domain": name, "profile": profile_name,
@@ -3265,7 +3302,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         # The band judges the paid competition. Free routes' participation is
         # answered by the Free share signal above, never by this threshold.
         free = free_route_ids(share_by_domain[name], policy, local=local_ids)
-        pool = paid_pool(share_by_domain[name], models, free, pool_k)
+        pool = paid_pool(share_by_domain[name], models, free, pool_k,
+                         local=local_ids)
         if not pool:
             continue
         if len(pool) < 3:
@@ -3736,7 +3774,7 @@ def main() -> None:
     # favored model below --top still scores at the same scale as the rows
     # above it.
     pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k,
-                             admitted)
+                             admitted, local=local_ids)
             if args.deal else [])
 
     if shape.sensitive:
@@ -3912,7 +3950,8 @@ def main() -> None:
             fit_adjusted_task_scores=fit_adjusted_task_scores,
             admitted=admitted,
         )
-        rows = plan_deal(share, models, aff, parameters=deal_parameters)
+        rows = plan_deal(share, models, aff, parameters=deal_parameters,
+                         local=local_ids)
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
