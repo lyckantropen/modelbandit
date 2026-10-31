@@ -282,18 +282,40 @@ def is_free_route(mid: str, *, local: bool = False) -> bool:
 
 def is_plan_route(mid: str, *, local: bool = False) -> bool:
     """Whether the seam answers the plan kind for this id - the check the
-    pool choke points use to keep plan inert: no pool or deal row may
-    carry a plan candidate until plan economics land. The local serving
-    fact outranks the id shape, so a plan-shaped id this machine serves is
-    a local row, never a plan one."""
+    pool choke points use to release only the plan rows the plans catalog
+    prices. The local serving fact outranks the id shape, so a plan-shaped
+    id this machine serves is a local row, never a plan one."""
     return classify_route(mid, local=local) == "plan"
+
+
+# The full-quality serving kinds: the kinds that serve a family's model at its
+# own quality, so a family's board share is split across them. A Free serving
+# is a rate-limited surrogate and keeps its discounted inheritance instead
+# (see _family_share). The kind comes from the classifier, never the id shape.
+_FULL_QUALITY_KINDS = frozenset({"market", "plan"})
+
+
+def family_key(mid: str) -> str | None:
+    """The model family a serving identity belongs to.
+
+    A family is the model, not its market: `deepseek/deepseek-v4-pro` and its
+    plan serving `opencode-go/deepseek-v4-pro` are one family because they
+    serve one model. The family is the last path segment of the normalized id
+    with any `:free` suffix removed, and an id no Route kind classifies has no
+    family. The one place family identity is derived — the split family share
+    reads it, never the id's spelling.
+    """
+    if classify_route(mid) is None:
+        return None
+    name = norm_id(mid).rsplit("/", 1)[-1].removesuffix(":free")
+    return name or None
 
 
 def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
     """Whether Endpoint spread prices this serving - the market kind's trait
     alone (the facet contract's `priced_by_endpoint_spread`). Non-market
     rows make no catalog fetch: a Free route prices from its zero record,
-    and a plan route prices from its own record when plan economics land."""
+    and a plan route prices from its plans entry's Draw."""
     facets = facets_for(mid, local=local)
     return bool(facets and facets["priced_by_endpoint_spread"])
 
@@ -2262,6 +2284,76 @@ def local_candidate_ids(served: dict, free_models: dict) -> set[str]:
             and match[1].get("exposure") == "local"}
 
 
+def _plan_model_record(mid: str) -> dict:
+    """The minimal record a plan serving carries into the table and the gates.
+
+    A plan serving never resolves in OpenRouter's models list, so the plans
+    catalog supplies what the run consumes: the id and the $0 cash price one
+    ticket costs within its Allowance. The plan's list price is a Draw basis
+    (the cost seam's fact), never a per-1M market price, so no per-1M figure
+    is stated here -- the table shows the unknowable columns as `?`/`—`.
+    """
+    return {"id": mid,
+            "pricing": {"prompt": "0", "completion": "0",
+                        "input_cache_read": "0"}}
+
+
+def _family_board_share(share: dict, family: str, local: set[str]) -> float:
+    """The family's board share: the largest figure the board reports for its
+    full-quality servings.
+
+    Twin rows report one family's traffic, so their sum would count it twice;
+    the largest is the closest the board gets to the family's whole. A family
+    the board does not name has no share.
+    """
+    return max((s for mid, s in share.items()
+                if mid not in local and family_key(mid) == family
+                and classify_route(mid) in _FULL_QUALITY_KINDS), default=0.0)
+
+
+def merge_plan_candidates(share: dict, models: dict, plans: dict, *,
+                          local=()) -> tuple[dict, dict]:
+    """Join the validated plans catalog's servings to the candidate set.
+
+    The plan namespace is not an OpenRouter serving, so a plan id never
+    resolves in the models list; the catalog is its one surface. Each
+    cataloged plan serving joins with the minimal record the table and the
+    gates honestly consume (see _plan_model_record) -- no market models-list
+    row is invented.
+
+    Popularity is the family's: a family served twice -- its metered twin and
+    its plan serving -- divides its board share across both full-quality
+    rows, so the family's standing is counted once. A family with one
+    full-quality serving keeps its share whole: the plan row is the family
+    model at full quality, never a rate-limited surrogate, so no Free-route
+    inheritance discount applies. The local serving fact outranks the plan
+    shape: an id this machine serves joins as a local row
+    (merge_local_candidates), never here.
+    """
+    merged_share = dict(share)
+    merged_models = {mid: dict(model) for mid, model in models.items()}
+    local = set(local)
+    plan_ids = [mid for mid in plans
+                if is_plan_route(mid) and mid not in local]
+    if not plan_ids:
+        return merged_share, merged_models
+    for mid in plan_ids:
+        merged_share.setdefault(mid, 0.0)
+        merged_models.setdefault(mid, _plan_model_record(mid))
+    families = sorted({family for family in map(family_key, plan_ids)
+                       if family is not None})
+    for family in families:
+        rows = [mid for mid in merged_share
+                if mid not in local and family_key(mid) == family
+                and classify_route(mid) in _FULL_QUALITY_KINDS]
+        if not rows:
+            continue
+        family_share = _family_board_share(merged_share, family, local)
+        for mid in rows:
+            merged_share[mid] = family_share / len(rows)
+    return merged_share, merged_models
+
+
 def free_candidate_details(mid: str, policy: dict, *, local: bool = False
                            ) -> tuple[int, str] | None:
     """Return the curated window and Exposure for a Free route, if cataloged."""
@@ -2394,17 +2486,21 @@ def facets_for_candidate(candidate: Candidate) -> dict | None:
 
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
-                     overrides: dict | None = None, local: bool = False) -> str:
+                     overrides: dict | None = None, local: bool = False,
+                     plans: dict | None = None) -> str:
     """One candidate's Exposure, by precedence:
 
     explicit policy override (prefix-keyed) > locally served > curated free
-    catalog entry > the default-exposure facet (a free-slug or harness
-    serving trains, a market or plan serving no-retention); an id outside
-    every kind keeps the default no-retention assumption.
+    catalog entry > the plans catalog entry > the default-exposure facet (a
+    free-slug or harness serving trains, a market or plan serving
+    no-retention); an id outside every kind keeps the default no-retention
+    assumption.
 
     The default is the no-retention assumption — the account's data policy
     already holds it. A free route the catalog does not carry is exposed until
-    the user says otherwise.
+    the user says otherwise. A Plan route's training/retention fact is a
+    curated one: it comes from the plans section, the same surface its list
+    price and caps come from.
 
     Localness is a serving fact, never a catalogue claim: a `local` label on
     a remote serving identity is void - the classifier decides, and it says
@@ -2423,11 +2519,12 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
         return value
     if local:
         return "local"
-    match = longest_prefix_match(mid, free_models or {})
-    entry = match[1] if match is not None else {}
-    if isinstance(entry, dict) and entry.get("exposure") \
-            and (value := stated(entry["exposure"])) is not None:
-        return value
+    for catalog in (free_models or {}, plans or {}):
+        match = longest_prefix_match(mid, catalog)
+        entry = match[1] if match is not None else {}
+        if isinstance(entry, dict) and entry.get("exposure") \
+                and (value := stated(entry["exposure"])) is not None:
+            return value
     facets = facets_for(mid, local=local)
     return facets["default_exposure"] if facets else "no-retention"
 
@@ -2446,10 +2543,11 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                   endpoints: list[dict] | None = None,
                   intent: str = "measured") -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
-    the policy's `exposure` override map and `free_models` catalog, plus its
-    Free price class (the seam's answer) and Footprint capacities."""
+    the policy's `exposure` override map, `free_models` and `plans` catalogs,
+    plus its Free price class (the seam's answer) and Footprint capacities."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
+    plan_match = longest_prefix_match(mid, policy.get("plans", {}))
     is_free = is_free_route(mid, local=local)
     facets = facets_for(mid, local=local)
     context_length = (catalog_entry.get("context_length")
@@ -2462,17 +2560,18 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
         completion_cap = catalog_entry.get("max_completion_tokens")
     # The catalog-entry facet: a harness or local serving is admitted only
     # through its own catalog entry; a free-slug serving may ride a family
-    # summary without one. The free catalog prices only Free servings (its
-    # load rule refuses every other kind), so a match there can satisfy the
-    # facet of a Free kind alone - plan has no catalog of its own yet, so a
-    # plan candidate is never cataloged, and the catalog gate refuses one
-    # whatever reaches it.
+    # summary without one; a plan serving needs its plans entry. Each
+    # catalog prices only the servings it owns (its load rule refuses every
+    # other kind), so the plan catalog satisfies the plan kind alone and the
+    # free catalog the Free kinds alone.
     needs_catalog_entry = (facets["needs_policy_catalog_entry"]
                            if facets else True)
+    is_plan = is_plan_route(mid, local=local)
     return Candidate(id=mid,
                       exposure=resolve_exposure(
                           mid, free_models=policy.get("free_models", {}),
-                          overrides=policy.get("exposure", {}), local=local),
+                          overrides=policy.get("exposure", {}), local=local,
+                          plans=policy.get("plans", {})),
                       is_free=is_free,
                       local=local,
                       context_length=context_length,
@@ -2481,7 +2580,8 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                                          else EFFORT_MULTIPLIERS[intent]),
                       cataloged=((not needs_catalog_entry
                                   or (is_free
-                                      and catalog_match is not None))
+                                      and catalog_match is not None)
+                                  or (is_plan and plan_match is not None))
                                  and (not is_free
                                       or _free_summary(catalog_entry,
                                                        policy.get("summaries",
@@ -2567,16 +2667,22 @@ def context_gate(shape: Shape, candidate: Candidate) -> Decision:
 
 
 def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """Only curated, summary-backed Free routes can enter the Deal, and the
-    plan kind is refused outright: the plan kind needs a policy catalog
-    entry, and no plan catalog exists yet (plan economics land later), so a
-    plan row that somehow forms is never admitted or dealt."""
+    """Only curated, summary-backed Free routes and plans-cataloged Plan
+    routes can enter the Deal.
+
+    The catalog-entry facet decides: a Free route needs its free catalog
+    entry (and its family summary where the entry rides one), and a Plan
+    route needs its plans entry — the one surface its list price, caps and
+    training/retention fact come from. A plan row the plans section does not
+    catalog stays visible and refused with this reason.
+    """
     if candidate.is_free and not candidate.cataloged:
         return Decision(False, "free route requires a catalog entry and "
                         "summary where applicable (summary resolution is required)")
-    if is_plan_route(candidate.id, local=candidate.local):
-        return Decision(False, "plan route requires a policy catalog entry "
-                               "(none exists yet)")
+    if (is_plan_route(candidate.id, local=candidate.local)
+            and not candidate.cataloged):
+        return Decision(False, "plan route requires a plans catalog entry "
+                               "(the plans section does not price this id)")
     return ADMITTED
 
 
@@ -2810,42 +2916,48 @@ def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
 
 
 def paid_pool(share: dict, models: dict, free: set[str],
-              top_k: int, local=()) -> list[tuple[str, float]]:
+              top_k: int, local=(), plans=None) -> list[tuple[str, float]]:
     """The balance criterion's players: the top_k most popular paid models.
 
     Score mass judges the paid competition — the band was calibrated for a
     landscape in which Free routes were not scored at all, and Free's
     participation is answered by the Free share signal, not by a threshold.
     Free routes leave before the cut, so a pool that Free dominates wholly
-    still has a paid competition to judge. Plan ids leave too: plan is
-    inert until plan economics land, and no pool builder may fabricate a
-    plan row — the board may still name one, a share row is untouched.
+    still has a paid competition to judge. Plan rows the plans catalog
+    prices play: they are paid servings with a Draw. A plan id the catalog
+    does not price leaves — no pool builder may fabricate an uncataloged
+    plan row; a plan-shaped id this machine serves is a local row (the
+    seam's precedence).
     """
     local = set(local)
+    catalog = plans or {}
     return [entry for entry in popularity_ranking(share, models)
             if entry[0] not in free
-            and not is_plan_route(entry[0], local=entry[0] in local)][:top_k]
+            and (not is_plan_route(entry[0], local=entry[0] in local)
+                 or entry[0] in catalog)][:top_k]
 
 
 def eligibility_pool(share: dict, models: dict, aff: dict, top_k: int,
                      admitted: frozenset | None = None,
-                     local=()) -> list[tuple[str, float]]:
+                     local=(), plans=None) -> list[tuple[str, float]]:
     """The deal's players, computed once for every consumer.
 
     Eligibility stays popularity: the top_k selectable models, plus ranked
     models the user favors (weight > 1) below the cut — the admission seam's
     verdict applied first (``admitted``: the ids it admits; None admits all).
     An excluded player is never replaced by a lower-ranked one: popularity
-    orders, admission only removes. Plan ids leave here too: plan is inert
-    until plan economics land, and no pool builder may fabricate a plan row
-    — a plan-shaped id this machine serves is a local row (the seam's
-    precedence), and the board may still name one. Returns [(mid, share)]
-    in popularity order; the candidate table prices these same players.
+    orders, admission only removes. Plan rows the plans catalog prices play;
+    an uncataloged plan id leaves (a plan-shaped id this machine serves is a
+    local row — the seam's precedence — and the board may still name one).
+    Returns [(mid, share)] in popularity order; the candidate table prices
+    these same players.
     """
     local = set(local)
+    catalog = plans or {}
     ranked = [entry for entry in popularity_ranking(share, models)
               if (admitted is None or entry[0] in admitted)
-              and not is_plan_route(entry[0], local=entry[0] in local)]
+              and (not is_plan_route(entry[0], local=entry[0] in local)
+                   or entry[0] in catalog)]
     return ranked[:top_k] + [(mid, s) for mid, s in ranked[top_k:]
                              if weight_for(mid, aff) > 1.0]
 
@@ -2867,7 +2979,7 @@ def blend_bases(pool: list[tuple[str, float]],
 
 
 def plan_deal(share: dict, models: dict, aff: dict,
-              parameters: DealParameters, local=()) -> list[dict]:
+              parameters: DealParameters, local=(), plans=None) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility is popularity (eligibility_pool). The draw blends the task
@@ -2880,21 +2992,23 @@ def plan_deal(share: dict, models: dict, aff: dict,
     for the whole pool by the caller (blend_bases). Deterministic in seed.
     The pool is admission-filtered before the draw (parameters.admitted), so
     the deal and the ranked table agree about what may serve the shape.
-    Plan ids draw no ticket here either: plan is inert until plan economics
-    land, so the deal's own row list is plan-free whatever reaches it.
+    Plan rows the plans catalog prices draw here too; the second brace keeps
+    an uncataloged plan id out whatever reaches it.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
     """
     blend_weight = parameters.blend_weight
     seed = parameters.seed
     tickets = parameters.tickets
-    pool = eligibility_pool(share, models, aff, parameters.top_k,
-                            parameters.admitted, local=local)
-    # The second brace on this function's own output: a plan id that reached
-    # the pool any other way is dropped before the draw.
     local = set(local)
+    catalog = plans or {}
+    pool = eligibility_pool(share, models, aff, parameters.top_k,
+                            parameters.admitted, local=local, plans=catalog)
+    # The second brace on this function's own output: an uncataloged plan id
+    # that reached the pool any other way is dropped before the draw.
     pool = [(mid, s) for mid, s in pool
-            if not is_plan_route(mid, local=mid in local)]
+            if not is_plan_route(mid, local=mid in local)
+            or mid in catalog]
     if not pool:
         return []
     bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
@@ -3846,8 +3960,13 @@ def main() -> None:
     share, models = merge_local_candidates(
         share, models, served_local, policy["free_models"],
         inheritance=config.free_share_inheritance)
+    # The plans catalog is a plan serving's only way in: its id never resolves
+    # in the models list. A cataloged plan row joins here, at split family
+    # share; the local serving fact outranks it.
+    share, models = merge_plan_candidates(share, models, policy["plans"],
+                                          local=local_ids)
     for mid in share:
-        if is_free_route(mid) and mid in models:
+        if mid in models and (is_free_route(mid) or is_plan_route(mid)):
             matches[mid] = "catalog"
     shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
                   output_tokens=out_tok,
@@ -3970,7 +4089,7 @@ def main() -> None:
     # favored model below --top still scores at the same scale as the rows
     # above it.
     pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k,
-                             admitted, local=local_ids)
+                             admitted, local=local_ids, plans=policy["plans"])
             if args.deal else [])
 
     if shape.sensitive:
@@ -4028,23 +4147,36 @@ def main() -> None:
         i += 1
         per = pr[args.pricing_basis]
         delta = f"{per / base_per:.2f}x" if base_per else "—"
-        spread = "" if pr["n_eps"] <= 1 else \
-            f" ({pr['n_eps']} eps)" if pr["out_max"] / max(pr["out_min"], 1e-9) < 2 else \
-            f" ({pr['n_eps']} eps, wide)"
-        out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
-        if pr["n_eps"] == 0:
-            out_cell += " (no endpoint data)"
+        plan_row = is_plan_route(mid, local=mid in local_ids)
+        if plan_row:
+            # A plan serving states no per-1M market price and no endpoint
+            # spread: the plan catalog's list price is a Draw basis, not a
+            # per-token one. The cells say so; no figure is invented.
+            out_cell = "—"
+        else:
+            spread = "" if pr["n_eps"] <= 1 else \
+                f" ({pr['n_eps']} eps)" if pr["out_max"] / max(pr["out_min"], 1e-9) < 2 else \
+                f" ({pr['n_eps']} eps, wide)"
+            out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
+            if pr["n_eps"] == 0:
+                out_cell += " (no endpoint data)"
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else m.get("context_length")
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = (free_details[1] if free_details else
-                    candidate_for(mid, policy, model=m).exposure
-                    if is_free_route(mid, local=mid in local_ids)
-                    else "—")
-        ladder = effort_ladder(m)
-        rung = resolve_rung(ladder, args.effort)
-        if rung_collapsed(ladder, args.effort):
-            rung = f"{rung} (collapsed)"
+        if free_details:
+            exposure = free_details[1]
+        elif is_free_route(mid, local=mid in local_ids) or plan_row:
+            exposure = candidate_for(mid, policy, model=m).exposure
+        else:
+            exposure = "—"
+        if plan_row:
+            # The catalog states no effort ladder for a plan serving.
+            rung = "—"
+        else:
+            ladder = effort_ladder(m)
+            rung = resolve_rung(ladder, args.effort)
+            if rung_collapsed(ladder, args.effort):
+                rung = f"{rung} (collapsed)"
         fit_cell = ""
         if fit_map:
             shown = f"{fit:.1f}" if fit is not None else "—"
@@ -4147,7 +4279,7 @@ def main() -> None:
             admitted=admitted,
         )
         rows = plan_deal(share, models, aff, parameters=deal_parameters,
-                         local=local_ids)
+                         local=local_ids, plans=policy["plans"])
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
