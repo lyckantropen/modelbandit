@@ -344,6 +344,25 @@ class DealEvictionTests(unittest.TestCase):
         self.assertLessEqual(tickets_of(one)[PLAN], 2)
 
 
+class EvictionFallThroughWrapsTests(unittest.TestCase):
+    """The fall-through is circular, still the draw's own order: a ticket
+    whose drawn row is at cap is offered to the rows after it and then wraps
+    to the rows before it, so no ticket is abandoned while any row fits."""
+
+    def test_a_ticket_past_an_at_cap_last_row_wraps_to_an_earlier_row(self):
+        # The metered row ranks first on popularity but draws a thin slice
+        # (score 0.1 against the plan row's 1.0); the plan row ranks last and
+        # crosses its 5-hour window after two tickets. Every ticket drawn
+        # past the metered row's slice reaches the at-cap last row first,
+        # wraps, and lands on the metered row: the batch continues instead of
+        # dropping those tickets.
+        share = {OTHER: 0.6, PLAN: 0.4}
+        rows = deal(share, {PLAN: plan_entry(1.0, five_hour=2.0)},
+                    {PLAN: 1.0, OTHER: 0.1})
+        self.assertEqual(tickets_of(rows), {OTHER: 10, PLAN: 2})
+        self.assertEqual(sum(row["tickets"] for row in rows), 12)
+
+
 def market_model(mid=OTHER):
     return {"id": mid, "supported_parameters": ["reasoning_effort"],
             "pricing": {"prompt": "0.0000002", "completion": "0.000001",

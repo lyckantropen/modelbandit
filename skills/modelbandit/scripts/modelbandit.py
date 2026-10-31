@@ -3118,20 +3118,30 @@ def plan_deal(share: dict, models: dict, aff: dict,
     # windows alike and judged as it is assigned -- a row whose next ticket
     # would cross a window's cap leaves the draw for the tickets that
     # remain, and the ticket falls through to the next row that still fits.
-    # The draw itself stays keyed as it was -- ticket i's number is still
-    # seed::i -- so an at-cap row changes who takes a ticket, never the
-    # seeded order they are offered in.
+    # The fall-through is circular, still the draw's own order: a ticket
+    # drawn past an at-cap last row wraps to the start and takes the first
+    # non-evicted row, so no ticket is abandoned while any row still fits
+    # (US6 -- the batch continues within the plan). Only when every row is
+    # evicted does a ticket go unassigned. The draw itself stays keyed as it
+    # was -- ticket i's number is still seed::i -- so an at-cap row changes
+    # who takes a ticket, never the seeded order they are offered in; no
+    # re-deal and no renormalization.
     for i in range(tickets):
         r = random.Random(f"{seed}::{i}").random() * run
-        for j, c in enumerate(cum):
-            if r <= c and not evicted[j]:
-                mid = pool[j][0]
-                if ledger.crosses(mid):
-                    evicted[j] = True
-                    continue
-                counts[j] += 1
-                ledger.charge(mid)
-                break
+        start = next((j for j, c in enumerate(cum) if r <= c), None)
+        if start is None:
+            continue
+        for step in range(len(cum)):
+            j = (start + step) % len(cum)
+            if evicted[j]:
+                continue
+            mid = pool[j][0]
+            if ledger.crosses(mid):
+                evicted[j] = True
+                continue
+            counts[j] += 1
+            ledger.charge(mid)
+            break
     return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
              "tickets": n}
             for (mid, s), b, pr, d, n
