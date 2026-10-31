@@ -282,18 +282,40 @@ def is_free_route(mid: str, *, local: bool = False) -> bool:
 
 def is_plan_route(mid: str, *, local: bool = False) -> bool:
     """Whether the seam answers the plan kind for this id - the check the
-    pool choke points use to keep plan inert: no pool or deal row may
-    carry a plan candidate until plan economics land. The local serving
-    fact outranks the id shape, so a plan-shaped id this machine serves is
-    a local row, never a plan one."""
+    pool choke points use to release only the plan rows the plans catalog
+    prices. The local serving fact outranks the id shape, so a plan-shaped
+    id this machine serves is a local row, never a plan one."""
     return classify_route(mid, local=local) == "plan"
+
+
+# The full-quality serving kinds: the kinds that serve a family's model at its
+# own quality, so a family's board share is split across them. A Free serving
+# is a rate-limited surrogate and keeps its discounted inheritance instead
+# (see _family_share). The kind comes from the classifier, never the id shape.
+_FULL_QUALITY_KINDS = frozenset({"market", "plan"})
+
+
+def family_key(mid: str) -> str | None:
+    """The model family a serving identity belongs to.
+
+    A family is the model, not its market: `deepseek/deepseek-v4-pro` and its
+    plan serving `opencode-go/deepseek-v4-pro` are one family because they
+    serve one model. The family is the last path segment of the normalized id
+    with any `:free` suffix removed, and an id no Route kind classifies has no
+    family. The one place family identity is derived — the split family share
+    reads it, never the id's spelling.
+    """
+    if classify_route(mid) is None:
+        return None
+    name = norm_id(mid).rsplit("/", 1)[-1].removesuffix(":free")
+    return name or None
 
 
 def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
     """Whether Endpoint spread prices this serving - the market kind's trait
     alone (the facet contract's `priced_by_endpoint_spread`). Non-market
     rows make no catalog fetch: a Free route prices from its zero record,
-    and a plan route prices from its own record when plan economics land."""
+    and a plan route prices from its plans entry's Draw."""
     facets = facets_for(mid, local=local)
     return bool(facets and facets["priced_by_endpoint_spread"])
 
@@ -1316,13 +1338,14 @@ def policy_facts(path: str | None) -> dict:
     """The policy's Exposure facts when the file exists, else none.
 
     The pre-flight and the secrets check read the local policy for its
-    `exposure` overrides and `free_models` catalog when it is there, and work
-    without it: a missing file is not an error, so the defaults answer (a
-    ':free' or 'opencode/*' route exposed, a paid route no-retention). No
-    board, no classification fetch, no network.
+    `exposure` overrides, its `free_models` catalog and its `plans` catalog
+    when it is there, and work without it: a missing file is not an error,
+    so the defaults answer (a ':free' or 'opencode/*' route exposed, a
+    paid route no-retention). No board, no classification fetch, no network.
     """
     policy = load_policy_file(path)
     policy["free_models"] = load_free_models(policy)
+    policy["plans"] = load_plans(policy)
     load_exposure_overrides(policy)
     return policy
 
@@ -1443,13 +1466,14 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
 
 def load_policy_bundle(policy_path: str | None) -> dict:
     """The one policy load every entry point shares: the file read as
-    UTF-8, the free catalog, and the exposure overrides. Validation and
-    unpacking stay with each caller — it knows what it can tolerate (a
-    missing file is absent setup for the status report, an existing one
-    must be one the ranking trusts) and maps every failure to status 4,
-    never a traceback or a Secrets verdict."""
+    UTF-8, the free catalog, the plan catalog, and the exposure overrides.
+    Validation and unpacking stay with each caller — it knows what it can
+    tolerate (a missing file is absent setup for the status report, an
+    existing one must be one the ranking trusts) and maps every failure to
+    status 4, never a traceback or a Secrets verdict."""
     policy = load_policy_file(policy_path)
     policy["free_models"] = load_free_models(policy)
+    policy["plans"] = load_plans(policy)
     load_exposure_overrides(policy)
     return policy
 
@@ -1530,6 +1554,18 @@ def resolve_model(models: dict, by_canon: dict, permaslug: str):
     if stripped in models:
         return models[stripped], "heuristic"
     return None, "unresolved"
+
+
+# --- Cost seam -------------------------------------------------------------
+# What a ticket costs, in one bounded region, answered three ways: the
+# ticket cost (the endpoint bases worst/primary/best and the blended
+# arithmetic behind them), the Draw (what one ticket burns of a plan's
+# Allowance, at the plan's list price), and the at-cap verdict (whether a
+# ticket's Draw would cross an Allowance window's cap). The pricing
+# arithmetic, the effort rungs and their multipliers, the Nominal floor's
+# pool-cheapest derivation and the one marginal-zero rule (ADR-0006) are
+# internals: nothing outside re-derives a price -- the score and the deal
+# ask the seam for an answer, never the arithmetic.
 
 
 def endpoint_pricings(slug: str, refresh: bool) -> list[dict]:
@@ -1670,6 +1706,204 @@ def price_model(model: dict, eps: list[dict], in_tok: int, out_tok: int,
     return {"worst": worst[0], "primary": primary, "best": best[0],
             "worst_ep": worst[1].get("name", "?"), "best_ep": best[1].get("name", "?"),
             "out_min": min(outs), "out_max": max(outs), "n_eps": len(eps)}
+
+
+def ticket_draw(mid: str, plans: dict, *, local: bool = False) -> float | None:
+    """The Draw one ticket of this route burns: what it consumes of an
+    Allowance, counted at the plan's list price (GLOSSARY, Draw). A Plan
+    route answers its catalog entry's list price -- the free-in-plan,
+    zero-Draw serving answers 0 -- and every other serving answers None: a
+    Free route, a metered route, or a plan-shaped id this machine serves
+    has no Allowance to draw down (the local serving fact outranks the id
+    shape). Plan-ness is the Route-kind seam's answer (is_plan_route), and
+    the price comes from the validated plans catalog alone, so a plan route
+    the catalog does not price has no Draw to answer."""
+    if not is_plan_route(mid, local=local):
+        return None
+    entry = plans.get(mid)
+    price = entry.get("list_price") if isinstance(entry, dict) else None
+    return float(price) if _is_finite_number(price) and price >= 0 else None
+
+
+def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
+    """The Nominal floor: Free risk times the pool's cheapest paid ticket.
+    The no-Draw case of the one marginal-zero rule (ADR-0006) -- a Free
+    route's ticket cost, and a zero-Draw plan serving's fallback alike.
+    """
+    return free_risk * cheapest_paid_ticket
+
+
+# Allowance caps are decimal dollar figures and the drawn sums are binary
+# floats: an exactly-reaching decimal batch (0.2 + 0.1 against 0.3) lands a
+# few ulps past its cap. The one crossing answer carries this money-noise
+# tolerance so exactly-reaching never crosses, while any true crossing --
+# a cent or a tenth of a cent -- still does.
+CAP_MONEY_NOISE = 1e-9
+
+
+def at_cap_verdict(mid: str, plans: dict, drawn: dict,
+                   *, local: bool = False) -> dict[str, bool]:
+    """The at-cap answer, per window: whether one more ticket of this route
+    would cross each Allowance window's cap. `plans` is the policy's
+    validated plan catalog -- the caps and the Draw both read from the
+    route's own entry -- and `drawn` is the Draw the run has already
+    allotted this route, per window (a window nothing is drawn against
+    starts at zero). A window the entry states no cap for earns no verdict,
+    and a route with no Allowance -- a metered route, a Free route, an
+    uncataloged plan route -- earns none at all. The allowance ledger
+    tracks the drawn totals live, prospective and in-run with no state
+    across runs, and consumes this answer per ticket; eviction itself is
+    the ledger's business, never the pricing's.
+
+    The comparison carries a small money-noise tolerance
+    (CAP_MONEY_NOISE): caps are decimal dollar figures, and the sums that
+    reach them are binary floats -- 0.2 + 0.1 lands just past 0.3 -- so an
+    exactly-reaching decimal batch must never read as crossing, while any
+    true crossing (far above the noise) still does. This is the one
+    crossing answer; the tolerance lives here, not in the score's
+    risk-of-Draw arithmetic.
+    """
+    entry = plans.get(mid)
+    caps = entry.get("caps") if isinstance(entry, dict) else None
+    draw = ticket_draw(mid, plans, local=local)
+    if not isinstance(caps, dict) or draw is None:
+        return {}
+    return {window: drawn.get(window, 0.0) + draw > cap + CAP_MONEY_NOISE
+            for window, cap in caps.items()}
+
+
+class AllowanceLedger:
+    """The prospective allowance ledger: three windows, one burst, in-run.
+
+    Every ticket the run assigns a Plan route draws that model's Allowance
+    down in all three windows at once -- the batch is assumed to land in ONE
+    5-hour burst, so a ticket counts against the rolling 5-hour window, the
+    week and the month alike. That is the conservative read: a batch on
+    course to cross a window is flagged by the run that would cross it, not
+    discovered after the monthly total is gone.
+
+    The ledger is prospective and in-run: it starts every run empty, reads
+    no account state and writes none, so two identical runs answer
+    identically and a plan other harnesses share is never planned against a
+    local fiction. The caps are real boundaries -- no reserve is held back
+    against usage this run cannot see, and no overflow flag exists: a row
+    whose next ticket would cross a window leaves the draw for the tickets
+    that remain, and the batch carries on with the rows that still fit.
+    Substitution to the route's metered twin is market resolution's business
+    (later work), never the ledger's.
+
+    The crossing arithmetic is the cost seam's (at_cap_verdict); the ledger
+    owns only the drawn totals it feeds that answer, and a route with no
+    Allowance -- a metered route, a Free route, a plan route the catalog
+    does not price -- keeps no totals at all.
+    """
+
+    def __init__(self, plans: dict | None = None, *, local=()):
+        self.plans = plans or {}
+        self.local = frozenset(local)
+        self._drawn: dict[str, dict[str, float]] = {}
+
+    def _caps(self, mid: str) -> dict:
+        """The window caps `mid` draws down, as its plans entry states them.
+        A route with no Allowance -- a metered route, a Free route, a plan
+        route the catalog does not price, a plan id this machine serves --
+        keeps none, so the windows it cannot draw are not stated."""
+        if ticket_draw(mid, self.plans, local=mid in self.local) is None:
+            return {}
+        entry = self.plans.get(mid)
+        caps = entry.get("caps") if isinstance(entry, dict) else None
+        return caps if isinstance(caps, dict) else {}
+
+    def drawn(self, mid: str) -> dict[str, float]:
+        """The Draw this run has allotted `mid` so far, per window -- zero
+        where nothing has been drawn yet. A route with no Allowance keeps no
+        windows and so answers nothing."""
+        totals = self._drawn.get(mid, {})
+        return {window: totals.get(window, 0.0) for window in self._caps(mid)}
+
+    def readout(self, mid: str) -> dict[str, dict[str, float]]:
+        """The figures an `allowance draw:` line states for `mid`, per window:
+        what this run has drawn and the cap it draws against. `{}` for a
+        route with no Allowance (no line is printed for it). A readout, not a
+        verdict: the caller only formats these numbers."""
+        caps = self._caps(mid)
+        totals = self._drawn.get(mid, {})
+        return {window: {"drawn": totals.get(window, 0.0), "cap": cap}
+                for window, cap in caps.items()}
+
+    def at_cap(self, mid: str) -> dict[str, bool]:
+        """Whether one more ticket of `mid` would cross each window's cap:
+        the seam's verdict over this ledger's own drawn totals."""
+        return at_cap_verdict(mid, self.plans, self._drawn.get(mid, {}),
+                              local=mid in self.local)
+
+    def crosses(self, mid: str) -> bool:
+        """Whether one more ticket of `mid` would cross any window's cap."""
+        return any(self.at_cap(mid).values())
+
+    def charge(self, mid: str) -> bool:
+        """Allot one ticket of `mid` to every window it draws down.
+
+        True when the route keeps an Allowance: the ticket's Draw is booked
+        against all three windows alike, the one-burst read. False when it
+        keeps none -- a metered route, a Free route, a plan route the
+        catalog does not price never enters the ledger. The verdict that
+        keeps a ticket out is the caller's ask (at_cap), never a refusal
+        here: the ledger records what the draw assigned.
+        """
+        draw = ticket_draw(mid, self.plans, local=mid in self.local)
+        if draw is None:
+            return False
+        totals = self._drawn.setdefault(mid, {})
+        for window in self._caps(mid):
+            totals[window] = totals.get(window, 0.0) + draw
+        return True
+
+
+def effective_costs(costs: dict, *, free_risk: float,
+                    free: set[str] | frozenset[str] = frozenset(),
+                    plans: dict | None = None) -> dict:
+    """The score's cost term for one pool: the one marginal-zero rule
+    (ADR-0006) -- a marginal-zero ticket prices as risk of its Draw, never
+    at $0.
+
+    `free` names the pool's Free routes (see free_route_ids), never inferred
+    from a zero price, and carries the serving facts; `plans` is the
+    policy's validated plan catalog, the facts the Draw reads. A Plan route
+    prices as Free risk times its own list-priced Draw; where there is no
+    Draw -- a Free route, a zero-Draw plan serving, a plan route the catalog
+    does not price -- the Nominal floor answers: Free risk times the
+    cheapest priced paid ticket, or the $1 reference when the pool has
+    none. Paid tickets keep their own price, and a paid ticket that priced
+    at nothing keeps the pool's cheapest paid ticket. A valid risk fraction
+    keeps every marginal-zero answer positive -- the floor strictly below
+    the pool's cheapest paid ticket when one exists -- so no ticket wins by
+    dividing by zero.
+    """
+    catalog = plans or {}
+    # Plan-ness is the Route-kind seam's answer (is_plan_route), never the
+    # catalog's; a plan-shaped id the machine serves is a Free route (the
+    # caller's `free` set carries the serving fact), never a plan one.
+    plan_routes = {mid for mid in costs if is_plan_route(mid)} - set(free)
+    draws, floor_ids = {}, set()
+    for mid in costs:
+        if mid in free:
+            floor_ids.add(mid)
+        elif mid in plan_routes:
+            draw = ticket_draw(mid, catalog)
+            if draw:
+                draws[mid] = free_risk * draw
+            else:
+                floor_ids.add(mid)
+    paid = [v for mid, v in costs.items()
+            if mid not in free and mid not in plan_routes and v > 0]
+    cheapest_paid = min(paid, default=NOMINAL_REFERENCE_TICKET)
+    nominal_floor = (nominal_floor_cost(free_risk, cheapest_paid)
+                     if floor_ids else None)
+    return {mid: (draws[mid] if mid in draws else
+                  nominal_floor if mid in floor_ids else
+                  v if v > 0 else cheapest_paid)
+            for mid, v in costs.items()}
 
 
 def longest_prefix_match(mid: str, values: dict) -> tuple[str, object] | None:
@@ -1926,6 +2160,111 @@ def load_free_models(policy: dict) -> dict:
     return catalog
 
 
+# The three Allowance windows a plan entry must state caps for, in ledger
+# order: the rolling 5-hour window, the week, the month (GLOSSARY,
+# Allowance). The caps are dollar figures, so every one must be a positive
+# real number — a zero or a misspelling would let a batch run past the
+# plan's boundary unnoticed.
+PLAN_CAP_WINDOWS = ("five_hour", "weekly", "monthly")
+
+# The only fields a plans entry may state. An unknown key is a config error:
+# a stray `caps` window would silently invent an unauthorized boundary (the
+# crossing arithmetic iterates caps.items()), and a non-numeric one would
+# surface as a TypeError instead of status 4.
+PLAN_ENTRY_FIELDS = ("list_price", "caps", "exposure", "regions")
+
+
+def _is_finite_number(value) -> bool:
+    """A real JSON number: an int or a float, never a bool, never NaN/inf."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def load_plans(policy: dict) -> dict:
+    """Validate the plan catalog at the policy boundary.
+
+    The `plans` section is the single source the ledger and the Exposure
+    verdicts read a Plan route's facts from: its list price (the Draw's
+    basis), its three Allowance window caps, its training/retention class,
+    and an optional region opt-in. Each field could make a plan look safer
+    or its Allowance look bigger than the policy says, so each refuses the
+    load loudly, naming the entry — nothing half-loaded (ADR-0003,
+    ADR-0005). An unknown key is refused the same way: `caps` must state
+    exactly the three Allowance windows, because a stray window would
+    silently invent an unauthorized boundary in the crossing arithmetic,
+    and an entry may state only the known plan facts.
+
+    The section is its own catalog: an entry whose id the Route-kind seam
+    does not answer `plan` is refused here, while `free_models` keeps
+    refusing plan-kind entries in parallel — each catalog prices only the
+    servings it owns. A `list_price` of 0 is not bad: it is the zero-Draw,
+    free-in-plan serving whose pricing falls back to the pool-cheapest
+    basis (ADR-0006), so the price must be non-negative, not positive.
+    """
+    catalog = policy.get("plans", {})
+    if not isinstance(catalog, dict):
+        raise SystemExit("policy plans must be an object")
+    for mid, entry in catalog.items():
+        path = f"plans.{mid}"
+        if not isinstance(mid, str) or not mid.strip():
+            raise SystemExit(f"policy {path}: id must be a non-empty string")
+        if not isinstance(entry, dict):
+            raise SystemExit(f"policy {path} must be an object")
+        for key in entry:
+            if key not in PLAN_ENTRY_FIELDS:
+                raise SystemExit(
+                    f"policy {path}: unknown key '{key}' (expected "
+                    f"{', '.join(PLAN_ENTRY_FIELDS)})")
+        kind = classify_route(mid)
+        if kind != "plan":
+            raise SystemExit(
+                f"policy {path}: route kind '{kind or 'unknown'}' is not a "
+                f"Plan route (opencode-go/*); the plans catalog prices only "
+                f"Plan servings")
+        if "list_price" not in entry:
+            raise SystemExit(f"policy missing required key: {path}.list_price")
+        if not _is_finite_number(entry["list_price"]) \
+                or entry["list_price"] < 0:
+            raise SystemExit(
+                f"policy {path}.list_price must be a non-negative number")
+        if "caps" not in entry:
+            raise SystemExit(f"policy missing required key: {path}.caps")
+        caps = entry["caps"]
+        if not isinstance(caps, dict):
+            raise SystemExit(f"policy {path}.caps must be an object")
+        for window in PLAN_CAP_WINDOWS:
+            if window not in caps:
+                raise SystemExit(
+                    f"policy missing required key: {path}.caps.{window}")
+            if not _is_finite_number(caps[window]) or caps[window] <= 0:
+                raise SystemExit(
+                    f"policy {path}.caps.{window} must be a positive number")
+        for window in caps:
+            if window not in PLAN_CAP_WINDOWS:
+                raise SystemExit(
+                    f"policy {path}.caps: unknown window '{window}' "
+                    f"(expected {', '.join(PLAN_CAP_WINDOWS)})")
+        if "exposure" not in entry:
+            raise SystemExit(f"policy missing required key: {path}.exposure")
+        try:
+            known_exposure(mid, entry["exposure"])
+        except SystemExit as exc:
+            raise SystemExit(f"policy {path}.exposure: {exc}") from None
+        if (contradiction := exposure_contradiction(mid, entry["exposure"])):
+            raise SystemExit(f"policy {path}.exposure: {contradiction}")
+        regions = entry.get("regions")
+        if regions is not None and (
+                not isinstance(regions, list)
+                or any(not isinstance(region, str) or not region.strip()
+                       for region in regions)):
+            raise SystemExit(
+                f"policy {path}.regions must be a list of non-empty strings")
+    return catalog
+
+
 def load_exposure_overrides(policy: dict) -> dict:
     """Validate the policy's `exposure` override map at the policy boundary.
 
@@ -2069,6 +2408,76 @@ def local_candidate_ids(served: dict, free_models: dict) -> set[str]:
             and match[1].get("exposure") == "local"}
 
 
+def _plan_model_record(mid: str) -> dict:
+    """The minimal record a plan serving carries into the table and the gates.
+
+    A plan serving never resolves in OpenRouter's models list, so the plans
+    catalog supplies what the run consumes: the id and the $0 cash price one
+    ticket costs within its Allowance. The plan's list price is a Draw basis
+    (the cost seam's fact), never a per-1M market price, so no per-1M figure
+    is stated here -- the table shows the unknowable columns as `?`/`—`.
+    """
+    return {"id": mid,
+            "pricing": {"prompt": "0", "completion": "0",
+                        "input_cache_read": "0"}}
+
+
+def _family_board_share(share: dict, family: str, local: set[str]) -> float:
+    """The family's board share: the largest figure the board reports for its
+    full-quality servings.
+
+    Twin rows report one family's traffic, so their sum would count it twice;
+    the largest is the closest the board gets to the family's whole. A family
+    the board does not name has no share.
+    """
+    return max((s for mid, s in share.items()
+                if mid not in local and family_key(mid) == family
+                and classify_route(mid) in _FULL_QUALITY_KINDS), default=0.0)
+
+
+def merge_plan_candidates(share: dict, models: dict, plans: dict, *,
+                          local=()) -> tuple[dict, dict]:
+    """Join the validated plans catalog's servings to the candidate set.
+
+    The plan namespace is not an OpenRouter serving, so a plan id never
+    resolves in the models list; the catalog is its one surface. Each
+    cataloged plan serving joins with the minimal record the table and the
+    gates honestly consume (see _plan_model_record) -- no market models-list
+    row is invented.
+
+    Popularity is the family's: a family served twice -- its metered twin and
+    its plan serving -- divides its board share across both full-quality
+    rows, so the family's standing is counted once. A family with one
+    full-quality serving keeps its share whole: the plan row is the family
+    model at full quality, never a rate-limited surrogate, so no Free-route
+    inheritance discount applies. The local serving fact outranks the plan
+    shape: an id this machine serves joins as a local row
+    (merge_local_candidates), never here.
+    """
+    merged_share = dict(share)
+    merged_models = {mid: dict(model) for mid, model in models.items()}
+    local = set(local)
+    plan_ids = [mid for mid in plans
+                if is_plan_route(mid) and mid not in local]
+    if not plan_ids:
+        return merged_share, merged_models
+    for mid in plan_ids:
+        merged_share.setdefault(mid, 0.0)
+        merged_models.setdefault(mid, _plan_model_record(mid))
+    families = sorted({family for family in map(family_key, plan_ids)
+                       if family is not None})
+    for family in families:
+        rows = [mid for mid in merged_share
+                if mid not in local and family_key(mid) == family
+                and classify_route(mid) in _FULL_QUALITY_KINDS]
+        if not rows:
+            continue
+        family_share = _family_board_share(merged_share, family, local)
+        for mid in rows:
+            merged_share[mid] = family_share / len(rows)
+    return merged_share, merged_models
+
+
 def free_candidate_details(mid: str, policy: dict, *, local: bool = False
                            ) -> tuple[int, str] | None:
     """Return the curated window and Exposure for a Free route, if cataloged."""
@@ -2098,34 +2507,6 @@ def task_score(share: float, cost: float, alpha: float, beta: float) -> float:
     """share^alpha / cost^beta. cost must already be floored (see
     effective_costs) so Free routes cannot win on division alone."""
     return share ** alpha / cost ** beta
-
-
-def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
-    """A Free route's ticket cost: Free risk times the pool's cheapest paid
-    ticket. One derived Nominal floor applies uniformly across Free routes.
-    """
-    return free_risk * cheapest_paid_ticket
-
-
-def effective_costs(costs: dict, *, free_risk: float,
-                    free: set[str] | frozenset[str] = frozenset()) -> dict:
-    """The score's cost term for one pool: Free routes at derived Free risk,
-    every paid ticket at its own price.
-
-    `free` names the pool's Free routes — the price class the seam derives
-    (see free_route_ids), never inferred from a zero price. The Nominal floor
-    is Free risk times the cheapest priced paid ticket, or a $1 fallback
-    reference when the pool has
-    no priced paid ticket. A valid risk fraction makes the floor positive and,
-    when paid tickets exist, strictly below their cheapest ticket. A paid
-    ticket that priced at nothing keeps the pool's cheapest paid ticket.
-    """
-    paid = [v for mid, v in costs.items() if mid not in free and v > 0]
-    cheapest_paid = min(paid, default=NOMINAL_REFERENCE_TICKET)
-    has_free = any(mid in free for mid in costs)
-    nominal_floor = nominal_floor_cost(free_risk, cheapest_paid) if has_free else None
-    return {mid: (nominal_floor if mid in free else (v if v > 0 else cheapest_paid))
-            for mid, v in costs.items()}
 
 
 def fit_for(mid: str, fit_map: dict) -> float | None:
@@ -2229,17 +2610,21 @@ def facets_for_candidate(candidate: Candidate) -> dict | None:
 
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
-                     overrides: dict | None = None, local: bool = False) -> str:
+                     overrides: dict | None = None, local: bool = False,
+                     plans: dict | None = None) -> str:
     """One candidate's Exposure, by precedence:
 
     explicit policy override (prefix-keyed) > locally served > curated free
-    catalog entry > the default-exposure facet (a free-slug or harness
-    serving trains, a market or plan serving no-retention); an id outside
-    every kind keeps the default no-retention assumption.
+    catalog entry > the plans catalog entry > the default-exposure facet (a
+    free-slug or harness serving trains, a market or plan serving
+    no-retention); an id outside every kind keeps the default no-retention
+    assumption.
 
     The default is the no-retention assumption — the account's data policy
     already holds it. A free route the catalog does not carry is exposed until
-    the user says otherwise.
+    the user says otherwise. A Plan route's training/retention fact is a
+    curated one: it comes from the plans section, the same surface its list
+    price and caps come from.
 
     Localness is a serving fact, never a catalogue claim: a `local` label on
     a remote serving identity is void - the classifier decides, and it says
@@ -2258,11 +2643,12 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
         return value
     if local:
         return "local"
-    match = longest_prefix_match(mid, free_models or {})
-    entry = match[1] if match is not None else {}
-    if isinstance(entry, dict) and entry.get("exposure") \
-            and (value := stated(entry["exposure"])) is not None:
-        return value
+    for catalog in (free_models or {}, plans or {}):
+        match = longest_prefix_match(mid, catalog)
+        entry = match[1] if match is not None else {}
+        if isinstance(entry, dict) and entry.get("exposure") \
+                and (value := stated(entry["exposure"])) is not None:
+            return value
     facets = facets_for(mid, local=local)
     return facets["default_exposure"] if facets else "no-retention"
 
@@ -2281,10 +2667,11 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                   endpoints: list[dict] | None = None,
                   intent: str = "measured") -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
-    the policy's `exposure` override map and `free_models` catalog, plus its
-    Free price class (the seam's answer) and Footprint capacities."""
+    the policy's `exposure` override map, `free_models` and `plans` catalogs,
+    plus its Free price class (the seam's answer) and Footprint capacities."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
+    plan_match = longest_prefix_match(mid, policy.get("plans", {}))
     is_free = is_free_route(mid, local=local)
     facets = facets_for(mid, local=local)
     context_length = (catalog_entry.get("context_length")
@@ -2297,17 +2684,18 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
         completion_cap = catalog_entry.get("max_completion_tokens")
     # The catalog-entry facet: a harness or local serving is admitted only
     # through its own catalog entry; a free-slug serving may ride a family
-    # summary without one. The free catalog prices only Free servings (its
-    # load rule refuses every other kind), so a match there can satisfy the
-    # facet of a Free kind alone - plan has no catalog of its own yet, so a
-    # plan candidate is never cataloged, and the catalog gate refuses one
-    # whatever reaches it.
+    # summary without one; a plan serving needs its plans entry. Each
+    # catalog prices only the servings it owns (its load rule refuses every
+    # other kind), so the plan catalog satisfies the plan kind alone and the
+    # free catalog the Free kinds alone.
     needs_catalog_entry = (facets["needs_policy_catalog_entry"]
                            if facets else True)
+    is_plan = is_plan_route(mid, local=local)
     return Candidate(id=mid,
                       exposure=resolve_exposure(
                           mid, free_models=policy.get("free_models", {}),
-                          overrides=policy.get("exposure", {}), local=local),
+                          overrides=policy.get("exposure", {}), local=local,
+                          plans=policy.get("plans", {})),
                       is_free=is_free,
                       local=local,
                       context_length=context_length,
@@ -2316,7 +2704,8 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                                          else EFFORT_MULTIPLIERS[intent]),
                       cataloged=((not needs_catalog_entry
                                   or (is_free
-                                      and catalog_match is not None))
+                                      and catalog_match is not None)
+                                  or (is_plan and plan_match is not None))
                                  and (not is_free
                                       or _free_summary(catalog_entry,
                                                        policy.get("summaries",
@@ -2402,16 +2791,22 @@ def context_gate(shape: Shape, candidate: Candidate) -> Decision:
 
 
 def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """Only curated, summary-backed Free routes can enter the Deal, and the
-    plan kind is refused outright: the plan kind needs a policy catalog
-    entry, and no plan catalog exists yet (plan economics land later), so a
-    plan row that somehow forms is never admitted or dealt."""
+    """Only curated, summary-backed Free routes and plans-cataloged Plan
+    routes can enter the Deal.
+
+    The catalog-entry facet decides: a Free route needs its free catalog
+    entry (and its family summary where the entry rides one), and a Plan
+    route needs its plans entry — the one surface its list price, caps and
+    training/retention fact come from. A plan row the plans section does not
+    catalog stays visible and refused with this reason.
+    """
     if candidate.is_free and not candidate.cataloged:
         return Decision(False, "free route requires a catalog entry and "
                         "summary where applicable (summary resolution is required)")
-    if is_plan_route(candidate.id, local=candidate.local):
-        return Decision(False, "plan route requires a policy catalog entry "
-                               "(none exists yet)")
+    if (is_plan_route(candidate.id, local=candidate.local)
+            and not candidate.cataloged):
+        return Decision(False, "plan route requires a plans catalog entry "
+                               "(the plans section does not price this id)")
     return ADMITTED
 
 
@@ -2645,42 +3040,48 @@ def popularity_ranking(share: dict, models: dict) -> list[tuple[str, float]]:
 
 
 def paid_pool(share: dict, models: dict, free: set[str],
-              top_k: int, local=()) -> list[tuple[str, float]]:
+              top_k: int, local=(), plans=None) -> list[tuple[str, float]]:
     """The balance criterion's players: the top_k most popular paid models.
 
     Score mass judges the paid competition — the band was calibrated for a
     landscape in which Free routes were not scored at all, and Free's
     participation is answered by the Free share signal, not by a threshold.
     Free routes leave before the cut, so a pool that Free dominates wholly
-    still has a paid competition to judge. Plan ids leave too: plan is
-    inert until plan economics land, and no pool builder may fabricate a
-    plan row — the board may still name one, a share row is untouched.
+    still has a paid competition to judge. Plan rows the plans catalog
+    prices play: they are paid servings with a Draw. A plan id the catalog
+    does not price leaves — no pool builder may fabricate an uncataloged
+    plan row; a plan-shaped id this machine serves is a local row (the
+    seam's precedence).
     """
     local = set(local)
+    catalog = plans or {}
     return [entry for entry in popularity_ranking(share, models)
             if entry[0] not in free
-            and not is_plan_route(entry[0], local=entry[0] in local)][:top_k]
+            and (not is_plan_route(entry[0], local=entry[0] in local)
+                 or entry[0] in catalog)][:top_k]
 
 
 def eligibility_pool(share: dict, models: dict, aff: dict, top_k: int,
                      admitted: frozenset | None = None,
-                     local=()) -> list[tuple[str, float]]:
+                     local=(), plans=None) -> list[tuple[str, float]]:
     """The deal's players, computed once for every consumer.
 
     Eligibility stays popularity: the top_k selectable models, plus ranked
     models the user favors (weight > 1) below the cut — the admission seam's
     verdict applied first (``admitted``: the ids it admits; None admits all).
     An excluded player is never replaced by a lower-ranked one: popularity
-    orders, admission only removes. Plan ids leave here too: plan is inert
-    until plan economics land, and no pool builder may fabricate a plan row
-    — a plan-shaped id this machine serves is a local row (the seam's
-    precedence), and the board may still name one. Returns [(mid, share)]
-    in popularity order; the candidate table prices these same players.
+    orders, admission only removes. Plan rows the plans catalog prices play;
+    an uncataloged plan id leaves (a plan-shaped id this machine serves is a
+    local row — the seam's precedence — and the board may still name one).
+    Returns [(mid, share)] in popularity order; the candidate table prices
+    these same players.
     """
     local = set(local)
+    catalog = plans or {}
     ranked = [entry for entry in popularity_ranking(share, models)
               if (admitted is None or entry[0] in admitted)
-              and not is_plan_route(entry[0], local=entry[0] in local)]
+              and (not is_plan_route(entry[0], local=entry[0] in local)
+                   or entry[0] in catalog)]
     return ranked[:top_k] + [(mid, s) for mid, s in ranked[top_k:]
                              if weight_for(mid, aff) > 1.0]
 
@@ -2702,7 +3103,8 @@ def blend_bases(pool: list[tuple[str, float]],
 
 
 def plan_deal(share: dict, models: dict, aff: dict,
-              parameters: DealParameters, local=()) -> list[dict]:
+              parameters: DealParameters, local=(), plans=None,
+              ledger: AllowanceLedger | None = None) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility is popularity (eligibility_pool). The draw blends the task
@@ -2715,21 +3117,34 @@ def plan_deal(share: dict, models: dict, aff: dict,
     for the whole pool by the caller (blend_bases). Deterministic in seed.
     The pool is admission-filtered before the draw (parameters.admitted), so
     the deal and the ranked table agree about what may serve the shape.
-    Plan ids draw no ticket here either: plan is inert until plan economics
-    land, so the deal's own row list is plan-free whatever reaches it.
+    Plan rows the plans catalog prices draw here too; the second brace keeps
+    an uncataloged plan id out whatever reaches it.
+
+    The one-burst ledger draws each ticket down from the plan rows'
+    Allowances as the loop assigns it (`ledger`, built from the plans
+    catalog when the caller passes none): a row whose next ticket's Draw
+    would cross a window's cap leaves the draw for the tickets that remain,
+    and the ticket falls through to the next row that still fits, wrapping
+    to the start of the draw's order at the end -- the batch keeps
+    assigning. Rows that hold no Allowance -- metered, Free, an
+    uncataloged plan id -- keep drawing and never enter the ledger.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
     """
     blend_weight = parameters.blend_weight
     seed = parameters.seed
     tickets = parameters.tickets
-    pool = eligibility_pool(share, models, aff, parameters.top_k,
-                            parameters.admitted, local=local)
-    # The second brace on this function's own output: a plan id that reached
-    # the pool any other way is dropped before the draw.
     local = set(local)
+    catalog = plans or {}
+    ledger = ledger if ledger is not None else AllowanceLedger(
+        catalog, local=local)
+    pool = eligibility_pool(share, models, aff, parameters.top_k,
+                            parameters.admitted, local=local, plans=catalog)
+    # The second brace on this function's own output: an uncataloged plan id
+    # that reached the pool any other way is dropped before the draw.
     pool = [(mid, s) for mid, s in pool
-            if not is_plan_route(mid, local=mid in local)]
+            if not is_plan_route(mid, local=mid in local)
+            or mid in catalog]
     if not pool:
         return []
     bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
@@ -2740,16 +3155,40 @@ def plan_deal(share: dict, models: dict, aff: dict,
     dt = sum(draws) or 1.0
     draws = [d / dt for d in draws]
     counts = [0] * len(pool)
+    evicted = [False] * len(pool)
     cum, run = [], 0.0
     for d in draws:
         run += d
         cum.append(run)
+    # The ledger's draw loop: the batch is assumed to land in ONE 5-hour
+    # burst, so each ticket is booked against the 5-hour, weekly and monthly
+    # windows alike and judged as it is assigned -- a row whose next ticket
+    # would cross a window's cap leaves the draw for the tickets that
+    # remain, and the ticket falls through to the next row that still fits.
+    # The fall-through is circular, still the draw's own order: a ticket
+    # drawn past an at-cap last row wraps to the start and takes the first
+    # non-evicted row, so no ticket is abandoned while any row still fits
+    # (US6 -- the batch continues within the plan). Only when every row is
+    # evicted does a ticket go unassigned. The draw itself stays keyed as it
+    # was -- ticket i's number is still seed::i -- so an at-cap row changes
+    # who takes a ticket, never the seeded order they are offered in; no
+    # re-deal and no renormalization.
     for i in range(tickets):
         r = random.Random(f"{seed}::{i}").random() * run
-        for j, c in enumerate(cum):
-            if r <= c:
-                counts[j] += 1
-                break
+        start = next((j for j, c in enumerate(cum) if r <= c), None)
+        if start is None:
+            continue
+        for step in range(len(cum)):
+            j = (start + step) % len(cum)
+            if evicted[j]:
+                continue
+            mid = pool[j][0]
+            if ledger.crosses(mid):
+                evicted[j] = True
+                continue
+            counts[j] += 1
+            ledger.charge(mid)
+            break
     return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
              "tickets": n}
             for (mid, s), b, pr, d, n
@@ -3245,7 +3684,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         effective = effective_costs(
             costs,
             free_risk=config.free_risk,
-            free=free)
+            free=free,
+            plans=policy["plans"])
         scores = {mid: standing(share, effective[mid], None,
                                 config.alpha, config.beta)
                   for (mid, share) in pool}
@@ -3357,7 +3797,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         eff = effective_costs(
             costs,
             free_risk=config.free_risk,
-            free=free_route_ids(costs, policy, local=local_ids))
+            free=free_route_ids(costs, policy, local=local_ids),
+            plans=policy["plans"])
         masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
         t1, t2 = mass_balance(masses)
         ok = (thresholds["top1_min"] <= t1 <= thresholds["top1_max"]
@@ -3679,8 +4120,13 @@ def main() -> None:
     share, models = merge_local_candidates(
         share, models, served_local, policy["free_models"],
         inheritance=config.free_share_inheritance)
+    # The plans catalog is a plan serving's only way in: its id never resolves
+    # in the models list. A cataloged plan row joins here, at split family
+    # share; the local serving fact outranks it.
+    share, models = merge_plan_candidates(share, models, policy["plans"],
+                                          local=local_ids)
     for mid in share:
-        if is_free_route(mid) and mid in models:
+        if mid in models and (is_free_route(mid) or is_plan_route(mid)):
             matches[mid] = "catalog"
     shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
                   output_tokens=out_tok,
@@ -3803,8 +4249,12 @@ def main() -> None:
     # favored model below --top still scores at the same scale as the rows
     # above it.
     pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k,
-                             admitted, local=local_ids)
+                             admitted, local=local_ids, plans=policy["plans"])
             if args.deal else [])
+    # The run's allowance ledger: prospective and in-run, so it starts empty
+    # and nothing leaves this process. The pick asks it (one task) and the
+    # deal draws it down (the whole batch).
+    ledger = AllowanceLedger(policy["plans"], local=local_ids)
 
     if shape.sensitive:
         print("shape: sensitive — exposed candidates are excluded from the "
@@ -3833,12 +4283,14 @@ def main() -> None:
         priced[mid] = pr
         pers[mid] = pr[args.pricing_basis]
     # Free routes price at the Nominal floor in the score's cost term — the
-    # same floor for every Exposure — while the table's price columns keep
+    # same floor for every Exposure — and a plan route prices as risk of its
+    # list-priced Draw (ADR-0006) — while the table's price columns keep
     # showing what the route actually costs to run.
     eff_costs = effective_costs(
         pers,
         free_risk=config.free_risk,
-        free=free_route_ids(pers, policy, local=local_ids))
+        free=free_route_ids(pers, policy, local=local_ids),
+        plans=policy["plans"])
 
     rows_out = []
     for mid, s in ranked:
@@ -3854,28 +4306,42 @@ def main() -> None:
     pick = None
     cheapest = None
     floor_total = 0.0
+    at_cap_rows = []
     i = 0
     for mid, s, m, pr, sc, fit, adj in rows_out:
         i += 1
         per = pr[args.pricing_basis]
         delta = f"{per / base_per:.2f}x" if base_per else "—"
-        spread = "" if pr["n_eps"] <= 1 else \
-            f" ({pr['n_eps']} eps)" if pr["out_max"] / max(pr["out_min"], 1e-9) < 2 else \
-            f" ({pr['n_eps']} eps, wide)"
-        out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
-        if pr["n_eps"] == 0:
-            out_cell += " (no endpoint data)"
+        plan_row = is_plan_route(mid, local=mid in local_ids)
+        if plan_row:
+            # A plan serving states no per-1M market price and no endpoint
+            # spread: the plan catalog's list price is a Draw basis, not a
+            # per-token one. The cells say so; no figure is invented.
+            out_cell = "—"
+        else:
+            spread = "" if pr["n_eps"] <= 1 else \
+                f" ({pr['n_eps']} eps)" if pr["out_max"] / max(pr["out_min"], 1e-9) < 2 else \
+                f" ({pr['n_eps']} eps, wide)"
+            out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
+            if pr["n_eps"] == 0:
+                out_cell += " (no endpoint data)"
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else m.get("context_length")
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = (free_details[1] if free_details else
-                    candidate_for(mid, policy, model=m).exposure
-                    if is_free_route(mid, local=mid in local_ids)
-                    else "—")
-        ladder = effort_ladder(m)
-        rung = resolve_rung(ladder, args.effort)
-        if rung_collapsed(ladder, args.effort):
-            rung = f"{rung} (collapsed)"
+        if free_details:
+            exposure = free_details[1]
+        elif is_free_route(mid, local=mid in local_ids) or plan_row:
+            exposure = candidate_for(mid, policy, model=m).exposure
+        else:
+            exposure = "—"
+        if plan_row:
+            # The catalog states no effort ladder for a plan serving.
+            rung = "—"
+        else:
+            ladder = effort_ladder(m)
+            rung = resolve_rung(ladder, args.effort)
+            if rung_collapsed(ladder, args.effort):
+                rung = f"{rung} (collapsed)"
         fit_cell = ""
         if fit_map:
             shown = f"{fit:.1f}" if fit is not None else "—"
@@ -3888,11 +4354,24 @@ def main() -> None:
               f"{delta} | {ctx} | {exposure} | {rung} |{admit_cell}")
         if decisions[mid].admitted:
             if pick is None:
-                pick = (mid, per, pr)
-                floor_total = pr["best"] * args.tickets
+                # The pick is one task: it takes the top of the task order
+                # unless its Draw would cross a window's cap, in which case
+                # the next admitted row takes it (the ledger is the run's --
+                # nothing has been drawn yet at this point).
+                if ledger.crosses(mid):
+                    at_cap_rows.append(mid)
+                else:
+                    pick = (mid, per, pr)
+                    floor_total = pr["best"] * args.tickets
             if cheapest is None or per < cheapest[1]:
                 cheapest = (mid, per)
     excluded = sorted(mid for mid, d in decisions.items() if not d.admitted)
+    if pick is None and at_cap_rows:
+        # Every row that could have been picked is at its cap: the ledger's
+        # verdict rides the existing all-excluded stop -- the rows it kept
+        # out of the pick are named with them -- rather than inventing a
+        # failure of its own.
+        excluded = sorted(set(excluded) | set(at_cap_rows))
     for mid, s in sorted(((mid, s) for mid, s in ranked if mid not in priced),
                          key=lambda t: -t[1]):
         i += 1
@@ -3952,7 +4431,13 @@ def main() -> None:
             and not decisions[rows_out[0][0]].admitted:
         print(f"\nnote: top of task order {rows_out[0][0]} is excluded "
               f"({decisions[rows_out[0][0]].reason}) — not picked")
-    print(f"\ndefault pick (top of task order): {pick[0]}")
+    pick_line = f"\ndefault pick (top of task order): {pick[0]}"
+    pick_draw = ticket_draw(pick[0], policy["plans"],
+                            local=pick[0] in local_ids)
+    if pick_draw is not None:
+        pick_line += (f" (${pick[1]:.4f}/ticket; "
+                      f"Draw ${pick_draw:.2f}/ticket)")
+    print(pick_line)
     pr_pick = pick[2]
     if pr_pick.get("best_ep") and pr_pick.get("worst_ep") \
             and pr_pick["best_ep"] != pr_pick["worst_ep"]:
@@ -3978,7 +4463,8 @@ def main() -> None:
             admitted=admitted,
         )
         rows = plan_deal(share, models, aff, parameters=deal_parameters,
-                         local=local_ids)
+                         local=local_ids, plans=policy["plans"],
+                         ledger=ledger)
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
@@ -4000,6 +4486,16 @@ def main() -> None:
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
+        for row in rows:
+            mid = row["mid"]
+            readout = ledger.readout(mid)
+            if row["tickets"] == 0 or not readout:
+                continue
+            monthly, five_hour = readout["monthly"], readout["five_hour"]
+            print(f"allowance draw: {mid} ${monthly['drawn']:.2f} of "
+                  f"${monthly['cap']:.2f} "
+                  f"({monthly['drawn'] / monthly['cap']:.1%} of monthly; "
+                  f"{five_hour['drawn'] / five_hour['cap']:.1%} of 5h)")
         free_tickets, dealt_tickets = deal_free_share(
             rows, policy, local=local_ids)
         free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0

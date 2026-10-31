@@ -103,7 +103,9 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    (`scoring.free_risk`, default 0.35): that fraction of the pool's cheapest
    priced paid ticket, recomputed for each pool and shape. It is always above
    zero and below that paid ticket, so Free can win without winning by division
-   alone. Exposure does not move it; the Sensitive gate does.
+   alone. Exposure does not move it; the Sensitive gate does. A Plan route
+   prices as risk of its list-priced Draw by the same one rule (ADR-0006);
+   only where there is no Draw does the Nominal floor answer.
    The candidate set stays the popularity top; the score orders it.
    Rung rules: `glance`→floor, `measured`→default, `thorough`→above-default,
    `exhaustive`→ceiling; a rung the model lacks collapses to its nearest, and
@@ -143,7 +145,9 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    toward cheaper rows — never outside the popularity set. The deal reports
    its Free share — the fraction of tickets Free routes drew — reported,
    never capped and never floored: a shape may be dealt entirely to Free
-   routes.
+   routes. Plan tickets carry their budget facts: the deal prints an
+   `allowance draw:` line per plan model and the pick names the Draw beside
+   the cash price (see **Plan readout**).
    One invocation deals one ticket shape — a run's domain, effort, token
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
@@ -368,6 +372,18 @@ starts closed everywhere, so this is the interview's only opening move:
   curated policy facts. Probe results join the in-memory model catalog for that
   invocation only. A missing server has no effect on output.
 
+- **Plan catalog (`plans`)** — `policy.json`'s optional `plans` maps a Plan
+  route's id (`opencode-go/*`) to the facts the ledger and the Exposure
+  verdicts read: `list_price` (the Draw's basis — a non-negative number, where
+  `0` is the free-in-plan, zero-Draw serving), `caps` carrying a positive
+  `five_hour`, `weekly` and `monthly` dollar figure, `exposure` (`no-retention`
+  or `trains`; `local` contradicts the remote serving identity), and optional
+  `regions` (a list of non-empty strings). It is validated loud at both shared
+  loaders, exactly like `free_models`: an unknown shape, a bad number, a
+  misspelt Exposure or an id the Route kind does not answer `plan` stops the
+  run naming the entry (status 4), never a silent default. The section is its
+  own catalog — `free_models` keeps refusing plan-kind entries in parallel.
+
 - **What popularity is** — revealed preference of real traffic: request share
   per task tag, with token share as the long-form weighting. It is not
   quality. The boards carry only each tag's top models, so the long tail is
@@ -392,6 +408,15 @@ starts closed everywhere, so this is the interview's only opening move:
   uses it — price columns and projections still report what a route costs to
   run.
 
+- **Risk of Draw** — the one marginal-zero rule at the score (ADR-0006): a
+  marginal-zero ticket prices as risk of its Draw, never at $0. A Plan route
+  prices at `scoring.free_risk` times its own list-priced Draw, so a cheap-Draw
+  serving outscores a dear-Draw one at equal share and fit and scarce Allowance
+  flows to the workhorse. Where there is no Draw — a Free route, a zero-Draw
+  plan serving, a plan route the catalog does not price — the **Nominal floor**
+  answers (Free risk times the pool's cheapest paid ticket, or the $1 reference
+  when the pool has none). The Free case keeps its exact current numbers.
+
 - **Free quota** — OpenRouter's daily free-request counter
   (`free_model_daily_requests` on the key payload): one figure shared by every
   `:free` route, reset at UTC midnight, cached for a minute and never answered
@@ -408,6 +433,27 @@ starts closed everywhere, so this is the interview's only opening move:
   missing key reports `free quota: unavailable`, warns once, and leaves the
   pool unchanged; so does a payload that carries no counter, silently. No
   network failure blocks a run.
+
+- **Allowance & Draw** — a Plan route serves at $0 cash only while its
+  **Allowance** holds: the dollar budget the `plans` section states per model
+  across three windows — the rolling 5-hour window, the week and the month.
+  One ticket burns its own list price (its **Draw**) from all three windows at
+  once, because the batch is assumed to land in one 5-hour burst: a run on
+  course to cross a window is flagged by the run that would cross it, not
+  discovered after the monthly total is gone. The ledger is prospective,
+  in-run and stateless — it starts every run empty, reads no account state and
+  writes none, so two identical runs answer identically and a plan other
+  harnesses share is never planned against a local fiction. The caps are real
+  boundaries: no reserve is held back, no overflow flag exists, and a row
+  whose next ticket's Draw would cross any window leaves the pick and the deal
+  for the tickets that remain, the batch continuing with the rows that still
+  fit. Substitution to the row's **Metered route** is market resolution's
+  later work, never the ledger's. A plan row enters the pool at split family
+  share: a family served twice — its Metered twin and its plan serving —
+  divides its board share across both full-quality rows, so the family's
+  standing is counted once, while a family with one full-quality serving keeps
+  its share whole. A Plan route is not a Free route: the zone gate does not
+  refuse it and the free counter does not count it.
 
 - **Free-use zones** — `zones.json` at the machine's config root
   (`$XDG_CONFIG_HOME/modelbandit/zones.json`, else
@@ -500,6 +546,13 @@ starts closed everywhere, so this is the interview's only opening move:
   acts — the ranking itself is never reordered. Its Free share — the fraction
   of tickets Free routes drew — is a report, never a cap and never a floor:
   some tickets, all of them, or none, as the draw falls.
+
+- **Plan readout** — a deal that drew plan tickets prints, per plan row with
+  tickets, `allowance draw: <model> $X of $Y (Z% of monthly; W% of 5h)` — `$X`
+  the Draw this run allotted the model and `$Y` its monthly cap. When the pick
+  is a plan row its line names the Draw beside the cash price — `default pick
+  (top of task order): <model> ($X/ticket; Draw $Y/ticket)`. The projection
+  keeps its dollar total unchanged: plan-aware totals come later.
 
 - **Secrets gate** — the collect-demand check that makes a shape Sensitive,
   run as `scripts/modelbandit.py --check-secrets [--working-dir PATH]` with the

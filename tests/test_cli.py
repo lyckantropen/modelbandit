@@ -933,6 +933,45 @@ class CliTests(unittest.TestCase):
                              if ln.startswith("| ")
                              and ln.split("|")[1].strip().isdigit()), 12)
 
+    def test_plan_pick_and_deal_report_the_draw_against_fixture_caps(self):
+        plan = "opencode-go/plan-model"
+        policy = json.loads(json.dumps(POLICY))
+        policy["baseline"] = {"id": "z-ai/glm-5.3"}
+        policy["plans"] = {
+            plan: {
+                "list_price": 0.5,
+                "caps": {"five_hour": 2.5, "weekly": 5.0,
+                         "monthly": 10.0},
+                "exposure": "no-retention",
+            },
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+        world = {
+            "models": [make_model("z-ai/glm-5.3", "0.0000002",
+                                   "0.000001", "0")],
+            "classifications": {"as_of": "2026-10-17", "classifications": [
+                {"tag": "content_writing", "usage_share": 1.0,
+                 "models": [{"id": plan, "tag_usage_share": 1.0}]},
+            ]},
+            "rankings": {"data": []},
+            "endpoints": {},
+            "benchmarks": {"data": []},
+        }
+
+        out, err, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "allowance-readout", world=world)
+
+        self.assertIsNone(code, err)
+        self.assertIn("default pick (top of task order): "
+                      f"{plan} ($0.0000/ticket; Draw $0.50/ticket)", out)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("allowance draw: opencode-go/plan-model $2.50 of $10.00 "
+                      "(25.0% of monthly; 100.0% of 5h)", block)
+        self.assertEqual(block.count("allowance draw:"), 1)
+        self.assertIn("projection at 12 ticket(s): $0.00", out)
+
     # --- Sensitive shape: the admission seam in the output --------------
 
     def sensitive_policy(self, exposure):
@@ -1306,6 +1345,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("| 18.50 |", row)
         self.assertIn("$0.0000", row)
         self.assertIn("default pick (top of task order): vendor/model:free", out)
+        pick_line = next(line for line in out.splitlines()
+                         if line.startswith("default pick (top of task order):"))
+        self.assertEqual(pick_line,
+                         "default pick (top of task order): vendor/model:free")
 
     # --- free-use zones: main wires the regime into admission --------
 
