@@ -1733,6 +1733,14 @@ def nominal_floor_cost(free_risk: float, cheapest_paid_ticket: float) -> float:
     return free_risk * cheapest_paid_ticket
 
 
+# Allowance caps are decimal dollar figures and the drawn sums are binary
+# floats: an exactly-reaching decimal batch (0.2 + 0.1 against 0.3) lands a
+# few ulps past its cap. The one crossing answer carries this money-noise
+# tolerance so exactly-reaching never crosses, while any true crossing --
+# a cent or a tenth of a cent -- still does.
+CAP_MONEY_NOISE = 1e-9
+
+
 def at_cap_verdict(mid: str, plans: dict, drawn: dict,
                    *, local: bool = False) -> dict[str, bool]:
     """The at-cap answer, per window: whether one more ticket of this route
@@ -1745,13 +1753,22 @@ def at_cap_verdict(mid: str, plans: dict, drawn: dict,
     uncataloged plan route -- earns none at all. The allowance ledger
     tracks the drawn totals live, prospective and in-run with no state
     across runs, and consumes this answer per ticket; eviction itself is
-    the ledger's business, never the pricing's."""
+    the ledger's business, never the pricing's.
+
+    The comparison carries a small money-noise tolerance
+    (CAP_MONEY_NOISE): caps are decimal dollar figures, and the sums that
+    reach them are binary floats -- 0.2 + 0.1 lands just past 0.3 -- so an
+    exactly-reaching decimal batch must never read as crossing, while any
+    true crossing (far above the noise) still does. This is the one
+    crossing answer; the tolerance lives here, not in the score's
+    risk-of-Draw arithmetic.
+    """
     entry = plans.get(mid)
     caps = entry.get("caps") if isinstance(entry, dict) else None
     draw = ticket_draw(mid, plans, local=local)
     if not isinstance(caps, dict) or draw is None:
         return {}
-    return {window: drawn.get(window, 0.0) + draw > cap
+    return {window: drawn.get(window, 0.0) + draw > cap + CAP_MONEY_NOISE
             for window, cap in caps.items()}
 
 

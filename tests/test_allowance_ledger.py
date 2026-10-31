@@ -363,6 +363,34 @@ class EvictionFallThroughWrapsTests(unittest.TestCase):
         self.assertEqual(sum(row["tickets"] for row in rows), 12)
 
 
+class DecimalEvictionTests(unittest.TestCase):
+    """A decimal cap is a real boundary: a batch that reaches it exactly is
+    never evicted, while any true crossing still is — binary float noise is
+    not a boundary."""
+
+    SHARE = {PLAN: 0.6, OTHER: 0.4}
+    SCORES = {PLAN: 1.0, OTHER: 0.0}
+
+    def test_three_ten_cent_tickets_fit_a_thirty_cent_cap_exactly(self):
+        # In binary, 0.2 + 0.1 lands just past 0.3: the third ticket reaches
+        # the decimal cap exactly and must stay in the draw.
+        plans = {PLAN: plan_entry(0.10, five_hour=0.30)}
+        rows = deal(self.SHARE, plans, self.SCORES, tickets=3)
+        self.assertEqual(tickets_of(rows), {PLAN: 3, OTHER: 0})
+
+    def test_a_decimal_cap_below_the_sum_still_evicts_the_third(self):
+        plans = {PLAN: plan_entry(0.10, five_hour=0.29)}
+        rows = deal(self.SHARE, plans, self.SCORES, tickets=3)
+        self.assertEqual(tickets_of(rows), {PLAN: 2, OTHER: 1})
+
+    def test_a_decimal_cap_past_the_sum_evicts_the_next_ticket(self):
+        # 0.31 admits the three 0.10 tickets and stops the fourth: the
+        # tolerance never widens a window past its decimal boundary.
+        plans = {PLAN: plan_entry(0.10, five_hour=0.31)}
+        rows = deal(self.SHARE, plans, self.SCORES, tickets=4)
+        self.assertEqual(tickets_of(rows), {PLAN: 3, OTHER: 1})
+
+
 def market_model(mid=OTHER):
     return {"id": mid, "supported_parameters": ["reasoning_effort"],
             "pricing": {"prompt": "0.0000002", "completion": "0.000001",

@@ -272,5 +272,36 @@ class AtCapVerdictTests(unittest.TestCase):
                                        {}), {})
 
 
+class DecimalBoundaryTests(unittest.TestCase):
+    """Decimal caps are real boundaries in the one crossing answer: an
+    exactly-reaching decimal sum never crosses, a true crossing still does."""
+
+    def plans(self, price, cap):
+        return {PLAN_ID: {"list_price": price,
+                          "caps": {"five_hour": cap, "weekly": 100.0,
+                                   "monthly": 200.0},
+                          "exposure": "no-retention"}}
+
+    def test_an_exactly_reaching_decimal_sum_does_not_cross(self):
+        # 0.2 + 0.1 is 0.30000000000000004 in binary: the verdict must read
+        # the decimal boundary, not the float noise past it.
+        verdict = modelbandit.at_cap_verdict(
+            PLAN_ID, self.plans(0.10, 0.30), {"five_hour": 0.20})
+        self.assertFalse(verdict["five_hour"])
+
+    def test_a_true_crossing_past_the_boundary_still_crosses(self):
+        # A crossing of a tenth of a cent is far above money noise and must
+        # still evict: the tolerance is not a discount on the cap.
+        verdict = modelbandit.at_cap_verdict(
+            PLAN_ID, self.plans(0.10, 0.30), {"five_hour": 0.200001})
+        self.assertTrue(verdict["five_hour"])
+
+    def test_an_integer_cap_past_the_sum_still_crosses(self):
+        # The existing integer arithmetic keeps its answer.
+        verdict = modelbandit.at_cap_verdict(
+            PLAN_ID, plans_of(**{PLAN_ID: 2.0}), {"monthly": 197.0})
+        self.assertFalse(verdict["monthly"])
+
+
 if __name__ == "__main__":
     unittest.main()
