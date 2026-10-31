@@ -1535,6 +1535,18 @@ def endpoint_pricings(slug: str, refresh: bool) -> list[dict]:
     return payload.get("endpoints", []) or []
 
 
+def priced_endpoints(mid: str, *, local_ids, refresh: bool) -> list[dict]:
+    """Endpoint rows for the kinds Endpoint spread prices - the market kind
+    alone (the seam's facet) - and none for any other row: a Free route
+    prices from its zero record and a plan route from its own record when
+    plan economics land, so nothing else fetches the endpoints catalog.
+    ``local_ids`` are the ids this machine serves; the local serving fact
+    outranks the id shape."""
+    if not priced_by_endpoint_spread(mid, local=mid in local_ids):
+        return []
+    return endpoint_pricings(mid, refresh)
+
+
 def endpoint_completion_cap(endpoints: list[dict] | None) -> int | None:
     """Use the tightest reported endpoint completion cap, if any is known."""
     caps = [endpoint.get("max_completion_tokens") for endpoint in endpoints or ()
@@ -3217,9 +3229,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         costs = {}
         for mid, _ in pool:
             model = models[mid]
-            eps = ([] if not priced_by_endpoint_spread(mid,
-                                                       local=mid in local_ids)
-                   else endpoint_pricings(mid, False))
+            eps = priced_endpoints(mid, local_ids=local_ids, refresh=False)
             pricing = price_model(model, eps,
                                   in_tok, out_tok, cached, mult_for(model, intent))
             costs[mid] = pricing[basis]
@@ -3331,9 +3341,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         costs = {}
         for mid, s in pool:
             m_mult = mult_for(models[mid], intent)
-            eps = ([] if not priced_by_endpoint_spread(mid,
-                                                       local=mid in local_ids)
-                   else endpoint_pricings(mid, False))
+            eps = priced_endpoints(mid, local_ids=local_ids, refresh=False)
             pricing = price_model(models[mid], eps,
                                   in_tok, out_tok, cached, m_mult)
             costs[mid] = pricing[basis]
@@ -3767,9 +3775,8 @@ def main() -> None:
         mid for mid, _ in ranked
         if mid in models and not is_free_route(mid, local=mid in local_ids))
     for mid in completion_fact_ids:
-        endpoint_cache[mid] = (
-            [] if not priced_by_endpoint_spread(mid, local=mid in local_ids)
-            else endpoint_pricings(mid, args.refresh))
+        endpoint_cache[mid] = priced_endpoints(mid, local_ids=local_ids,
+                                               refresh=args.refresh)
 
     # The one admission decision: the table marks with it, the deal draws
     # from it. Excluded rows stay visible; only the pick and the pool shun
@@ -3808,10 +3815,8 @@ def main() -> None:
         if not m:
             continue
         if mid not in endpoint_cache:
-            endpoint_cache[mid] = (
-                [] if not priced_by_endpoint_spread(mid,
-                                                    local=mid in local_ids)
-                else endpoint_pricings(mid, args.refresh))
+            endpoint_cache[mid] = priced_endpoints(mid, local_ids=local_ids,
+                                                   refresh=args.refresh)
         eps = endpoint_cache[mid]
         pr = price_model(m, eps,
                          in_tok, out_tok, cached,
