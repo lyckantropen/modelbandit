@@ -3124,8 +3124,9 @@ def plan_deal(share: dict, models: dict, aff: dict,
     Allowances as the loop assigns it (`ledger`, built from the plans
     catalog when the caller passes none): a row whose next ticket's Draw
     would cross a window's cap leaves the draw for the tickets that remain,
-    and the ticket falls through to the next row that still fits -- the
-    batch keeps assigning. Rows that hold no Allowance -- metered, Free, an
+    and the ticket falls through to the next row that still fits, wrapping
+    to the start of the draw's order at the end -- the batch keeps
+    assigning. Rows that hold no Allowance -- metered, Free, an
     uncataloged plan id -- keep drawing and never enter the ledger.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
