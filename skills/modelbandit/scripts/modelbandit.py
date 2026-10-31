@@ -1755,6 +1755,84 @@ def at_cap_verdict(mid: str, plans: dict, drawn: dict,
             for window, cap in caps.items()}
 
 
+class AllowanceLedger:
+    """The prospective allowance ledger: three windows, one burst, in-run.
+
+    Every ticket the run assigns a Plan route draws that model's Allowance
+    down in all three windows at once -- the batch is assumed to land in ONE
+    5-hour burst, so a ticket counts against the rolling 5-hour window, the
+    week and the month alike. That is the conservative read: a batch on
+    course to cross a window is flagged by the run that would cross it, not
+    discovered after the monthly total is gone.
+
+    The ledger is prospective and in-run: it starts every run empty, reads
+    no account state and writes none, so two identical runs answer
+    identically and a plan other harnesses share is never planned against a
+    local fiction. The caps are real boundaries -- no reserve is held back
+    against usage this run cannot see, and no overflow flag exists: a row
+    whose next ticket would cross a window leaves the draw for the tickets
+    that remain, and the batch carries on with the rows that still fit.
+    Substitution to the route's metered twin is market resolution's business
+    (later work), never the ledger's.
+
+    The crossing arithmetic is the cost seam's (at_cap_verdict); the ledger
+    owns only the drawn totals it feeds that answer, and a route with no
+    Allowance -- a metered route, a Free route, a plan route the catalog
+    does not price -- keeps no totals at all.
+    """
+
+    def __init__(self, plans: dict | None = None, *, local=()):
+        self.plans = plans or {}
+        self.local = frozenset(local)
+        self._drawn: dict[str, dict[str, float]] = {}
+
+    def _caps(self, mid: str) -> dict:
+        """The window caps `mid` draws down, as its plans entry states them.
+        A route with no Allowance -- a metered route, a Free route, a plan
+        route the catalog does not price, a plan id this machine serves --
+        keeps none, so the windows it cannot draw are not stated."""
+        if ticket_draw(mid, self.plans, local=mid in self.local) is None:
+            return {}
+        entry = self.plans.get(mid)
+        caps = entry.get("caps") if isinstance(entry, dict) else None
+        return caps if isinstance(caps, dict) else {}
+
+    def drawn(self, mid: str) -> dict[str, float]:
+        """The Draw this run has allotted `mid` so far, per window -- zero
+        where nothing has been drawn yet. A route with no Allowance keeps no
+        windows and so answers nothing."""
+        totals = self._drawn.get(mid, {})
+        return {window: totals.get(window, 0.0) for window in self._caps(mid)}
+
+    def at_cap(self, mid: str) -> dict[str, bool]:
+        """Whether one more ticket of `mid` would cross each window's cap:
+        the seam's verdict over this ledger's own drawn totals."""
+        return at_cap_verdict(mid, self.plans, self._drawn.get(mid, {}),
+                              local=mid in self.local)
+
+    def crosses(self, mid: str) -> bool:
+        """Whether one more ticket of `mid` would cross any window's cap."""
+        return any(self.at_cap(mid).values())
+
+    def charge(self, mid: str) -> bool:
+        """Allot one ticket of `mid` to every window it draws down.
+
+        True when the route keeps an Allowance: the ticket's Draw is booked
+        against all three windows alike, the one-burst read. False when it
+        keeps none -- a metered route, a Free route, a plan route the
+        catalog does not price never enters the ledger. The verdict that
+        keeps a ticket out is the caller's ask (at_cap), never a refusal
+        here: the ledger records what the draw assigned.
+        """
+        draw = ticket_draw(mid, self.plans, local=mid in self.local)
+        if draw is None:
+            return False
+        totals = self._drawn.setdefault(mid, {})
+        for window in self._caps(mid):
+            totals[window] = totals.get(window, 0.0) + draw
+        return True
+
+
 def effective_costs(costs: dict, *, free_risk: float,
                     free: set[str] | frozenset[str] = frozenset(),
                     plans: dict | None = None) -> dict:
@@ -2979,7 +3057,8 @@ def blend_bases(pool: list[tuple[str, float]],
 
 
 def plan_deal(share: dict, models: dict, aff: dict,
-              parameters: DealParameters, local=(), plans=None) -> list[dict]:
+              parameters: DealParameters, local=(), plans=None,
+              ledger: AllowanceLedger | None = None) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility is popularity (eligibility_pool). The draw blends the task
@@ -2994,6 +3073,14 @@ def plan_deal(share: dict, models: dict, aff: dict,
     the deal and the ranked table agree about what may serve the shape.
     Plan rows the plans catalog prices draw here too; the second brace keeps
     an uncataloged plan id out whatever reaches it.
+
+    The one-burst ledger draws each ticket down from the plan rows'
+    Allowances as the loop assigns it (`ledger`, built from the plans
+    catalog when the caller passes none): a row whose next ticket's Draw
+    would cross a window's cap leaves the draw for the tickets that remain,
+    and the ticket falls through to the next row that still fits -- the
+    batch keeps assigning. Rows that hold no Allowance -- metered, Free, an
+    uncataloged plan id -- keep drawing and never enter the ledger.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
     """
@@ -3002,6 +3089,8 @@ def plan_deal(share: dict, models: dict, aff: dict,
     tickets = parameters.tickets
     local = set(local)
     catalog = plans or {}
+    ledger = ledger if ledger is not None else AllowanceLedger(
+        catalog, local=local)
     pool = eligibility_pool(share, models, aff, parameters.top_k,
                             parameters.admitted, local=local, plans=catalog)
     # The second brace on this function's own output: an uncataloged plan id
@@ -3019,15 +3108,29 @@ def plan_deal(share: dict, models: dict, aff: dict,
     dt = sum(draws) or 1.0
     draws = [d / dt for d in draws]
     counts = [0] * len(pool)
+    evicted = [False] * len(pool)
     cum, run = [], 0.0
     for d in draws:
         run += d
         cum.append(run)
+    # The ledger's draw loop: the batch is assumed to land in ONE 5-hour
+    # burst, so each ticket is booked against the 5-hour, weekly and monthly
+    # windows alike and judged as it is assigned -- a row whose next ticket
+    # would cross a window's cap leaves the draw for the tickets that
+    # remain, and the ticket falls through to the next row that still fits.
+    # The draw itself stays keyed as it was -- ticket i's number is still
+    # seed::i -- so an at-cap row changes who takes a ticket, never the
+    # seeded order they are offered in.
     for i in range(tickets):
         r = random.Random(f"{seed}::{i}").random() * run
         for j, c in enumerate(cum):
-            if r <= c:
+            if r <= c and not evicted[j]:
+                mid = pool[j][0]
+                if ledger.crosses(mid):
+                    evicted[j] = True
+                    continue
                 counts[j] += 1
+                ledger.charge(mid)
                 break
     return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
              "tickets": n}
@@ -4091,6 +4194,10 @@ def main() -> None:
     pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k,
                              admitted, local=local_ids, plans=policy["plans"])
             if args.deal else [])
+    # The run's allowance ledger: prospective and in-run, so it starts empty
+    # and nothing leaves this process. The pick asks it (one task) and the
+    # deal draws it down (the whole batch).
+    ledger = AllowanceLedger(policy["plans"], local=local_ids)
 
     if shape.sensitive:
         print("shape: sensitive — exposed candidates are excluded from the "
@@ -4142,6 +4249,7 @@ def main() -> None:
     pick = None
     cheapest = None
     floor_total = 0.0
+    at_cap_rows = []
     i = 0
     for mid, s, m, pr, sc, fit, adj in rows_out:
         i += 1
@@ -4189,11 +4297,24 @@ def main() -> None:
               f"{delta} | {ctx} | {exposure} | {rung} |{admit_cell}")
         if decisions[mid].admitted:
             if pick is None:
-                pick = (mid, per, pr)
-                floor_total = pr["best"] * args.tickets
+                # The pick is one task: it takes the top of the task order
+                # unless its Draw would cross a window's cap, in which case
+                # the next admitted row takes it (the ledger is the run's --
+                # nothing has been drawn yet at this point).
+                if ledger.crosses(mid):
+                    at_cap_rows.append(mid)
+                else:
+                    pick = (mid, per, pr)
+                    floor_total = pr["best"] * args.tickets
             if cheapest is None or per < cheapest[1]:
                 cheapest = (mid, per)
     excluded = sorted(mid for mid, d in decisions.items() if not d.admitted)
+    if pick is None and at_cap_rows:
+        # Every row that could have been picked is at its cap: the ledger's
+        # verdict rides the existing all-excluded stop -- the rows it kept
+        # out of the pick are named with them -- rather than inventing a
+        # failure of its own.
+        excluded = sorted(set(excluded) | set(at_cap_rows))
     for mid, s in sorted(((mid, s) for mid, s in ranked if mid not in priced),
                          key=lambda t: -t[1]):
         i += 1
@@ -4279,7 +4400,8 @@ def main() -> None:
             admitted=admitted,
         )
         rows = plan_deal(share, models, aff, parameters=deal_parameters,
-                         local=local_ids, plans=policy["plans"])
+                         local=local_ids, plans=policy["plans"],
+                         ledger=ledger)
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
