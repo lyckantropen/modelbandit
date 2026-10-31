@@ -1296,6 +1296,23 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
     return regime_prohibition(shape, candidate_for(model_id, policy))
 
 
+# The pre-flight's default-deny verdict: an id outside every Route kind names
+# no serving, so no zone, Exposure or policy label can speak for it.
+UNKNOWN_SERVING_NAMESPACE = "unknown serving namespace"
+
+
+def _print_preflight_posture(zone: Zone, *, plain: bool,
+                             restated: bool) -> None:
+    """The effective zone, then the shape the pre-flight judges the id as."""
+    print(f"zone: {zone_label(zone, sensitive=restated)}")
+    if plain:
+        print("shape: plain (via --plain)")
+    elif restated:
+        print("shape: sensitive (via --sensitive)")
+    else:
+        print("shape: sensitive (assumed)")
+
+
 def run_assert_allowed(*, model: str, working_dir: str | None = None,
                        policy_path: str | None = None,
                        plain: bool = False, restated: bool = False,
@@ -1313,12 +1330,16 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     Prints the effective posture (`zone: <path> (<regime>)`) and either the
     model as allowed (`allowed: <id>`) or a free-use zone block — both
     verdicts exit 0 and the lines say which (exit contract v2, ADR-0004:
-    launch only on `allowed`; the status says the tool ran). The zone is
-    named; the shape's content never is. No policy file, classification
-    fetch or network is needed, so an orchestrator can refuse to launch a
-    model the plan should not have produced before anything is fetched.
-    With `as_json`, one JSON object replaces the lines (mode, ok, allowed,
-    model, shape, zone, reason).
+    launch only on `allowed`; the status says the tool ran). An id outside
+    every Route kind is refused first and on its own terms
+    (`blocked: unknown serving namespace`, the model named): kind is decided
+    from the id alone, so an unclassifiable id is blocked in an open zone
+    exactly as in a closed one, and no policy prefix map grants it one. The
+    zone is named; the shape's content never is. No policy file,
+    classification fetch or network is needed, so an orchestrator can refuse
+    to launch a model the plan should not have produced before anything is
+    fetched. With `as_json`, one JSON object replaces the lines (mode, ok,
+    allowed, model, shape, zone, reason).
     """
     try:
         zone = effective_zone(working_dir)
@@ -1327,6 +1348,24 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         print(f"pre-flight: policy/config error ({exc.code})", file=sys.stderr)
         return RULES_CONFIG_ERROR
     model_id = norm_id(model)
+    if classify_route(model_id) is None:
+        # Route kind is decided from the id alone, before the zone regime: an
+        # id outside every kind has no serving fact, so the pre-flight refuses
+        # it in an open zone exactly as in a closed one. The block is a
+        # verdict, not a failure (ADR-0004): the lines carry it, the status
+        # only says the tool ran.
+        if as_json:
+            emit_json({"mode": "assert-allowed", "ok": True,
+                       "allowed": False,
+                       "model": model_id,
+                       "shape": "plain" if plain else "sensitive",
+                       "zone": zone_payload(zone),
+                       "reason": UNKNOWN_SERVING_NAMESPACE})
+            return 0
+        _print_preflight_posture(zone, plain=plain, restated=restated)
+        print(f"blocked: {UNKNOWN_SERVING_NAMESPACE}")
+        print(f"model: {model_id}")
+        return 0
     reason = zone_block(model_id, zone, policy=facts, sensitive=not plain)
     if as_json:
         emit_json({"mode": "assert-allowed", "ok": True,
@@ -1336,13 +1375,7 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
                    "zone": zone_payload(zone),
                    "reason": reason})
         return 0
-    print(f"zone: {zone_label(zone, sensitive=restated)}")
-    if plain:
-        print("shape: plain (via --plain)")
-    elif restated:
-        print("shape: sensitive (via --sensitive)")
-    else:
-        print("shape: sensitive (assumed)")
+    _print_preflight_posture(zone, plain=plain, restated=restated)
     if reason is not None:
         # A block is a verdict, not a failure: exit 0, the lines say blocked.
         print("blocked by the free-use zone")
