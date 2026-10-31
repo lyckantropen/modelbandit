@@ -1,23 +1,17 @@
-"""Plan is inert by construction: pool assembly never emits a plan candidate.
+"""A plan serving enters the pool through its plans catalog, and only there.
 
 The classifier knows the plan kind (`opencode-go/*`) and the facet table
-spells its column, but no plan economics exist yet - so no pool-assembly
-path may fabricate a plan candidate. Assembly builds its pools from three
-channels only - the OpenRouter market rows (models list and boards), the
-curated free catalog, and the local probe - and none of them can make an
-`opencode-go/*` id a candidate:
+spells its column. Plan economics now have one facts surface — the validated
+`plans` policy section — so a plan row the section catalogs is admitted:
 
-- the free catalog refuses plan-kind entries at load (pinned by
-  test_free_catalog_kinds.py), and the free merge drops a plan prefix even
-  when a raw, unvalidated dict tries to feed it one;
-- a board may name an `opencode-go/*` id - the traffic feed is OpenRouter's
-  and the plan namespace is not an OpenRouter serving, so the models list
-  carries no such model. An unresolved model never plays: it drops before
-  any pool or the deal is built. Even when a models list does carry the id
-  (a fixture can supply one; OpenRouter's own never will), the pool builders
-  drop the plan kind outright and the catalog gate refuses the plan row - no
-  plan catalog exists to satisfy its needs-catalog facet - so the id still
-  reaches no pool, no admission and no deal;
+- the assembly step joins a board-named plan id with the minimal record the
+  table and the gates consume (no market models-list row exists for it), and
+  the pools' plan filters release for cataloged rows;
+- the catalog gate's plan branch asks the plans section, so a plan id the
+  section does not catalog refuses with the catalog reason;
+- the free catalog still refuses plan-kind entries at load (pinned by
+  test_free_catalog_kinds.py), and the free merge still drops a plan prefix
+  even when a raw, unvalidated dict tries to feed it one;
 - a locally served id joins through its local serving fact, which the seam
   ranks above any id shape, so a plan-shaped id served on this machine
   assembles as a local candidate, never a plan one.
@@ -49,6 +43,14 @@ def market_model(mid=MARKET):
                         "input_cache_read": "0"}}
 
 
+def plan_entry(**overrides):
+    entry = {"list_price": 0.5,
+             "caps": {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0},
+             "exposure": "no-retention"}
+    entry.update(overrides)
+    return entry
+
+
 def board(*models):
     return {"as_of": "2026-10-17", "classifications": [
         {"tag": "content_writing", "usage_share": 1.0, "models": [
@@ -58,32 +60,40 @@ def board(*models):
 
 def deal_parameters(scores):
     return modelbandit.DealParameters(
-        blend_weight=0.6, top_k=5, seed="plan-inert", tickets=12,
+        blend_weight=0.6, top_k=5, seed="plan-pool", tickets=12,
         fit_adjusted_task_scores=scores,
         admitted=frozenset(scores))
 
 
-class PlanNeverEntersThePoolTests(unittest.TestCase):
-    """The pool builders' output: market, free-catalog and local rows only."""
+class PlanEntersThroughItsCatalogTests(unittest.TestCase):
+    """The pool builders' output: market, Free, local and cataloged plan rows."""
 
-    def test_a_board_named_plan_id_drops_before_the_pools_and_the_deal(self):
-        # The board names the plan id with the biggest share; the models list
-        # (OpenRouter's catalog of what it serves) carries no such model. The
-        # id stays visible as an unresolved board row, but no pool and no
-        # deal is built from it.
+    def test_a_board_named_plan_id_reaches_the_pools_and_the_deal(self):
+        # The board names the plan id with the biggest share; OpenRouter's
+        # models list carries no such model, so the assembly step joins the
+        # cataloged plan row itself. The pools and the deal play it, and the
+        # catalog gate admits it.
+        plans = {PLAN: plan_entry()}
         classif = board((PLAN, 0.6), (MARKET, 0.4))
         models = {MARKET: market_model()}
         share, _, _ = modelbandit.domain_candidates(classif, ["content_writing"],
                                             models, {})
         self.assertIn(PLAN, share)
+        share, models = modelbandit.merge_plan_candidates(share, models, plans)
+        self.assertIn(PLAN, models)
 
-        pool = modelbandit.eligibility_pool(share, models, {}, 5)
-        self.assertEqual([mid for mid, _ in pool], [MARKET])
-        paid = modelbandit.paid_pool(share, models, set(), 5)
-        self.assertEqual([mid for mid, _ in paid], [MARKET])
+        pool = modelbandit.eligibility_pool(share, models, {}, 5, plans=plans)
+        self.assertIn(PLAN, [mid for mid, _ in pool])
+        paid = modelbandit.paid_pool(share, models, set(), 5, plans=plans)
+        self.assertIn(PLAN, [mid for mid, _ in paid])
         rows = modelbandit.plan_deal(
-            share, models, {}, deal_parameters({MARKET: 1.0}))
-        self.assertEqual([row["mid"] for row in rows], [MARKET])
+            share, models, {}, deal_parameters({MARKET: 1.0, PLAN: 1.0}),
+            plans=plans)
+        self.assertIn(PLAN, [row["mid"] for row in rows])
+
+        facts = modelbandit.candidate_for(PLAN, {"plans": plans})
+        self.assertTrue(facts.cataloged)
+        self.assertTrue(modelbandit.admit(modelbandit.Shape(), facts).admitted)
 
     def test_the_plan_id_cannot_sneak_in_through_the_model_list(self):
         # The same assembly with the plan id absent from the board entirely:
@@ -94,14 +104,11 @@ class PlanNeverEntersThePoolTests(unittest.TestCase):
                                             models, {})
         self.assertNotIn(PLAN, share)
 
-    def test_a_plan_id_the_model_list_carries_never_pools_admits_or_deals(self):
+    def test_a_plan_id_the_model_list_carries_still_needs_its_plans_entry(self):
         # Belt and braces: even with the board AND the models list both
-        # carrying the plan id, it stays only a named, visible share row.
-        # The pool builders drop the plan kind (a plan-shaped id this
-        # machine serves is a local row - the seam's precedence), and the
-        # catalog gate refuses the plan row because no plan catalog exists
-        # to satisfy its needs-catalog facet: never in any pool, never
-        # admitted, never dealt.
+        # carrying the plan id, no plans entry means no play. The pool
+        # builders drop the plan kind, and the catalog gate refuses the plan
+        # row with the catalog reason.
         classif = board((PLAN, 0.6), (MARKET, 0.4))
         models = {MARKET: market_model(), PLAN: market_model(PLAN)}
         share, _, _ = modelbandit.domain_candidates(classif, ["content_writing"],
@@ -112,18 +119,17 @@ class PlanNeverEntersThePoolTests(unittest.TestCase):
         self.assertEqual([mid for mid, _ in pool], [MARKET])
         paid = modelbandit.paid_pool(share, models, set(), 5)
         self.assertEqual([mid for mid, _ in paid], [MARKET])
-        parameters = modelbandit.DealParameters(
-            blend_weight=0.6, top_k=5, seed="plan-inert", tickets=12,
-            fit_adjusted_task_scores={MARKET: 1.0, PLAN: 1.0},
-            admitted=frozenset({MARKET, PLAN}))
-        rows = modelbandit.plan_deal(share, models, {}, parameters)
+        rows = modelbandit.plan_deal(
+            share, models, {},
+            deal_parameters({MARKET: 1.0, PLAN: 1.0}))
         self.assertEqual([row["mid"] for row in rows], [MARKET])
 
         facts = modelbandit.candidate_for(PLAN, {})
         self.assertFalse(facts.cataloged)
         decision = modelbandit.admit(modelbandit.Shape(), facts)
         self.assertFalse(decision.admitted)
-        self.assertIn("requires a policy catalog entry", decision.reason)
+        self.assertIn("plan route requires a plans catalog entry",
+                      decision.reason)
 
     def test_a_raw_plan_catalog_prefix_cannot_enter_the_free_merge(self):
         # The load refuses a plan-kind entry (test_free_catalog_kinds.py);
@@ -140,7 +146,7 @@ class PlanNeverEntersThePoolTests(unittest.TestCase):
     def test_a_locally_served_plan_shaped_id_assembles_as_local(self):
         # The local serving fact outranks the id shape at the seam: a machine
         # that serves an `opencode-go/*`-shaped id offers a LOCAL candidate,
-        # never a plan one.
+        # never a plan one — even when a plans entry catalogues the id.
         served = {PLAN: {"id": PLAN, "context_length": 8192}}
         free_models = {PLAN: {"context_length": 8192, "exposure": "local",
                               "summary_ref": "s"}}
@@ -148,7 +154,9 @@ class PlanNeverEntersThePoolTests(unittest.TestCase):
             {}, {}, served, free_models)
         self.assertIn(PLAN, share)
         facts = modelbandit.candidate_for(
-            PLAN, {"free_models": free_models}, local=True)
+            PLAN, {"free_models": free_models, "summaries": {"s": "x"},
+                   "plans": {PLAN: plan_entry(exposure="trains")}},
+            local=True)
         self.assertTrue(facts.is_free)
         self.assertTrue(facts.local)
         self.assertEqual(facts.exposure, "local")
@@ -163,8 +171,8 @@ class PlanNeverEntersThePoolTests(unittest.TestCase):
         self.assertNotIn(PLAN, models)
 
 
-class PlanNeverReachesTheDealCliTests(unittest.TestCase):
-    """The deal output itself: no `opencode-go/*` row, whatever the board."""
+class PlanReachesTheDealCliTests(unittest.TestCase):
+    """The deal output itself: a cataloged `opencode-go/*` row is drawn."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -173,6 +181,7 @@ class PlanNeverReachesTheDealCliTests(unittest.TestCase):
             json.dump({
                 "baseline": {"id": "xiaomi/mimo-v2.6-pro"},
                 "summaries": {},
+                "plans": {PLAN: plan_entry()},
                 "domains": {"writing": ["content_writing"]},
                 "scoring": {"alpha": 1.0, "beta": 0.0,
                             "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
@@ -196,16 +205,12 @@ class PlanNeverReachesTheDealCliTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_the_deal_never_draws_a_board_named_plan_id(self):
+    def test_the_deal_draws_a_board_named_plan_id_its_plans_section_catalogs(self):
         world = {
             "models": [market_model()],
             "classifications": board((PLAN, 0.9), (MARKET, 0.1)),
             "rankings": {"data": []},
             "endpoints": {},
-            "benchmarks": {"meta": {"as_of": "2026-10-26T00:01:10.159Z",
-                                    "source": None, "citation": None,
-                                    "model_count": 1},
-                           "data": []},
         }
         calls = []
 
@@ -219,8 +224,6 @@ class PlanNeverReachesTheDealCliTests(unittest.TestCase):
                 return {"data": world["classifications"]}
             if cache_name == "rankings.json":
                 return world["rankings"]
-            if cache_name == "benchmarks.json":
-                return world["benchmarks"]
             if url.endswith("/endpoints"):
                 slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
                 return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
@@ -245,10 +248,10 @@ class PlanNeverReachesTheDealCliTests(unittest.TestCase):
                 self.assertIsNone(exc.code, err.getvalue())
         printed = out.getvalue()
         deal_block = printed[printed.index("deal (seed"):
-                            printed.index("projection at")]
-        self.assertNotIn(PLAN, deal_block)
+                             printed.index("projection at")]
+        self.assertIn(PLAN, deal_block)
         self.assertIn(MARKET, deal_block)
-        self.assertIn("default pick (top of task order): " + MARKET, printed)
+        self.assertIn("default pick (top of task order): " + PLAN, printed)
 
 
 if __name__ == "__main__":
