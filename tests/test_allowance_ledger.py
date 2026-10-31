@@ -391,6 +391,27 @@ class DecimalEvictionTests(unittest.TestCase):
         self.assertEqual(tickets_of(rows), {PLAN: 3, OTHER: 1})
 
 
+class LedgerReadoutTests(unittest.TestCase):
+    """The readout snapshot the CLI line formats: per window, what this run
+    has drawn and the cap it draws against."""
+
+    PLANS = {PLAN: plan_entry(2.0, five_hour=5.0, monthly=10.0)}
+
+    def test_the_readout_states_each_windows_drawn_and_cap(self):
+        led = ledger(self.PLANS)
+        led.charge(PLAN)
+        self.assertEqual(led.readout(PLAN), {
+            "five_hour": {"drawn": 2.0, "cap": 5.0},
+            "weekly": {"drawn": 2.0, "cap": 100.0},
+            "monthly": {"drawn": 2.0, "cap": 10.0}})
+
+    def test_a_route_without_an_allowance_has_no_readout(self):
+        # The CLI line is not printed for it: no Allowance, nothing to state.
+        led = ledger(self.PLANS)
+        self.assertEqual(led.readout(TWIN), {})
+        self.assertEqual(led.readout(GHOST), {})
+
+
 def market_model(mid=OTHER):
     return {"id": mid, "supported_parameters": ["reasoning_effort"],
             "pricing": {"prompt": "0.0000002", "completion": "0.000001",

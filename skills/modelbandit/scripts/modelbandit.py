@@ -1821,6 +1821,16 @@ class AllowanceLedger:
         totals = self._drawn.get(mid, {})
         return {window: totals.get(window, 0.0) for window in self._caps(mid)}
 
+    def readout(self, mid: str) -> dict[str, dict[str, float]]:
+        """The figures an `allowance draw:` line states for `mid`, per window:
+        what this run has drawn and the cap it draws against. `{}` for a
+        route with no Allowance (no line is printed for it). A readout, not a
+        verdict: the caller only formats these numbers."""
+        caps = self._caps(mid)
+        totals = self._drawn.get(mid, {})
+        return {window: {"drawn": totals.get(window, 0.0), "cap": cap}
+                for window, cap in caps.items()}
+
     def at_cap(self, mid: str) -> dict[str, bool]:
         """Whether one more ticket of `mid` would cross each window's cap:
         the seam's verdict over this ledger's own drawn totals."""
@@ -4477,17 +4487,14 @@ def main() -> None:
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
         for row in rows:
             mid = row["mid"]
-            if row["tickets"] == 0 or ticket_draw(
-                    mid, policy["plans"], local=mid in local_ids) is None:
+            readout = ledger.readout(mid)
+            if row["tickets"] == 0 or not readout:
                 continue
-            caps = policy["plans"][mid]["caps"]
-            drawn = ledger.drawn(mid)
-            monthly = drawn["monthly"]
-            five_hour = drawn["five_hour"]
-            print(f"allowance draw: {mid} ${monthly:.2f} of "
-                  f"${caps['monthly']:.2f} "
-                  f"({monthly / caps['monthly']:.1%} of monthly; "
-                  f"{five_hour / caps['five_hour']:.1%} of 5h)")
+            monthly, five_hour = readout["monthly"], readout["five_hour"]
+            print(f"allowance draw: {mid} ${monthly['drawn']:.2f} of "
+                  f"${monthly['cap']:.2f} "
+                  f"({monthly['drawn'] / monthly['cap']:.1%} of monthly; "
+                  f"{five_hour['drawn'] / five_hour['cap']:.1%} of 5h)")
         free_tickets, dealt_tickets = deal_free_share(
             rows, policy, local=local_ids)
         free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0
