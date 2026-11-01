@@ -14,10 +14,12 @@ a plan other harnesses share is never planned against a fiction.
 A row whose next ticket's Draw would cross a window's cap leaves the draw
 for the tickets that remain — the batch carries on with the rows that still
 fit — and a single-task pick at its cap is not picked: the next admitted row
-takes it. Caps are real boundaries: no reserve is held back, no overflow
-flag exists, no metered twin is substituted in (market resolution's later
-work). Metered and Free routes keep no totals at all, and the zero-Draw
-serving books nothing.
+takes it. A plan row whose declared family link resolves gets the deal's
+market adapter instead (TwinAbsorptionTests): its slot continues as the
+family's Metered Twin, so its windows are charged only for the tickets the
+plan row itself took. Caps are real boundaries: no reserve is held back and
+no overflow flag exists. Metered and Free routes keep no totals at all, and
+the zero-Draw serving books nothing.
 
 The crossing arithmetic is the cost seam's (at_cap_verdict); the ledger owns
 only the drawn totals it feeds that answer.
@@ -209,15 +211,19 @@ class StatelessnessTests(unittest.TestCase):
         self.assertEqual(one.at_cap(PLAN), two.at_cap(PLAN))
 
 
-def deal(share, plans, scores, tickets=12, seed="ledger", ledger=None):
-    """A deal over `share` with the plans catalog carrying the caps."""
+def deal(share, plans, scores, tickets=12, seed="ledger", ledger=None,
+         admitted=None):
+    """A deal over `share` with the plans catalog carrying the caps.
+
+    `admitted` narrows the pool exactly as the admission seam does; the
+    default admits every fixture row."""
     models = {mid: {} for mid in share}
     return modelbandit.plan_deal(
         share, models, {},
-        modelbandit.DealParameters(blend_weight=0.0, top_k=5, seed=seed,
-                                   tickets=tickets,
-                                   fit_adjusted_task_scores=scores,
-                                   admitted=frozenset(share)),
+        modelbandit.DealParameters(
+            blend_weight=0.0, top_k=5, seed=seed, tickets=tickets,
+            fit_adjusted_task_scores=scores,
+            admitted=frozenset(share) if admitted is None else admitted),
         plans=plans, ledger=ledger)
 
 
@@ -273,11 +279,14 @@ class DealEvictionTests(unittest.TestCase):
     def test_the_ticket_falls_to_the_next_row_that_still_fits(self):
         # Eviction is a fall-through in the draw's own order, never a
         # re-deal: the third-ranked row is not handed shares of the tickets
-        # the at-cap row gave up.
-        share = {PLAN: 0.5, OTHER: 0.3, TWIN: 0.2}
+        # the at-cap row gave up. The third row is a Metered id that is not
+        # the plan row's declared Twin (TwinAbsorptionTests covers the
+        # declared link); here nothing resolves, so the fall-through stands.
+        share = {PLAN: 0.5, OTHER: 0.3, "mistral/mistral-large": 0.2}
         rows = deal(share, self.plans(five_hour=2.5),
-                    {PLAN: 1.0, OTHER: 0.0, TWIN: 0.0})
-        self.assertEqual(tickets_of(rows), {PLAN: 2, OTHER: 10, TWIN: 0})
+                    {PLAN: 1.0, OTHER: 0.0, "mistral/mistral-large": 0.0})
+        self.assertEqual(tickets_of(rows),
+                         {PLAN: 2, OTHER: 10, "mistral/mistral-large": 0})
 
     def test_a_metered_row_never_enters_the_ledger(self):
         # Cash buys its tickets: the metered row keeps drawing, and the
@@ -362,6 +371,92 @@ class EvictionFallThroughWrapsTests(unittest.TestCase):
                     {PLAN: 1.0, OTHER: 0.1})
         self.assertEqual(tickets_of(rows), {OTHER: 10, PLAN: 2})
         self.assertEqual(sum(row["tickets"] for row in rows), 12)
+
+
+class TwinAbsorptionTests(unittest.TestCase):
+    """Market resolution in the deal (issue #65): an at-cap Plan row's ticket
+    lands on the family's Metered Twin — same model, same slot, the market
+    flipped plan → metered — and nothing is charged to the plan's windows for
+    it. The ticket re-enters the draw's circular fall-through only when the
+    declared family link resolves no eligible row."""
+
+    # The plan row takes the whole draw (base 1.0 against 0.0), so every
+    # ticket reaches it first: how many it keeps is the cap's arithmetic, and
+    # where the rest land is the market adapter's answer. The unrelated
+    # metered row ranks ahead of the Twin, so a plain fall-through would hand
+    # it the tickets the at-cap plan row gives up.
+    SHARE = {PLAN: 0.5, OTHER: 0.3, TWIN: 0.2}
+    SCORES = {PLAN: 1.0, OTHER: 0.0, TWIN: 0.0}
+
+    def plans(self, list_price=1.0, **windows):
+        return {PLAN: plan_entry(list_price, **windows)}
+
+    def test_an_at_cap_plan_ticket_lands_on_its_metered_twin(self):
+        rows = deal(self.SHARE, self.plans(five_hour=2.5), self.SCORES)
+        self.assertEqual(tickets_of(rows), {PLAN: 2, OTHER: 0, TWIN: 10})
+
+    def test_an_absorbed_ticket_draws_nothing_from_the_plan_windows(self):
+        # The readout states only what the plan rows actually charged: two
+        # tickets, never the ten the Twin absorbed.
+        led = modelbandit.AllowanceLedger(self.plans(five_hour=2.5))
+        rows = deal(self.SHARE, self.plans(five_hour=2.5), self.SCORES,
+                    ledger=led)
+        self.assertEqual(sum(row["tickets"] for row in rows), 12)
+        self.assertEqual(tickets_of(rows)[TWIN], 10)
+        self.assertEqual(led.drawn(PLAN), {"five_hour": 2.0, "weekly": 2.0,
+                                           "monthly": 2.0})
+        self.assertEqual(led.readout(TWIN), {})
+
+    def test_the_twin_keeps_the_at_cap_rows_slot(self):
+        # Identity preserved, market flipped: the tickets the plan's slot
+        # would have drawn are the Twin's, so the doubly-served family's
+        # presence is exactly what it was before the cap bound (US15), never
+        # re-dealt to unrelated rows and never counted twice.
+        wide = deal(self.SHARE, self.plans(), self.SCORES)
+        tight = deal(self.SHARE, self.plans(five_hour=2.5), self.SCORES)
+        self.assertEqual((tickets_of(wide)[PLAN], tickets_of(wide)[TWIN]),
+                         (12, 0))
+        self.assertEqual((tickets_of(tight)[PLAN], tickets_of(tight)[TWIN]),
+                         (2, 10))
+        self.assertEqual(tickets_of(tight)[PLAN] + tickets_of(tight)[TWIN], 12)
+        self.assertEqual(tickets_of(tight)[OTHER], 0)
+
+    def test_an_unresolved_family_link_still_falls_through(self):
+        # The declared link names a Metered id this run does not play: the
+        # ticket re-enters the draw's circular fall-through as before.
+        share = {PLAN: 0.5, OTHER: 0.5}
+        plans = {PLAN: dict(plan_entry(five_hour=2.5),
+                            family_ref="mistral/mistral-large")}
+        rows = deal(share, plans, {PLAN: 1.0, OTHER: 0.0})
+        self.assertEqual(tickets_of(rows), {PLAN: 2, OTHER: 10})
+
+    def test_an_ineligible_twin_is_no_twin(self):
+        # The link resolves a row admission excluded: no Twin may absorb.
+        rows = deal(self.SHARE, self.plans(five_hour=2.5), self.SCORES,
+                    admitted=frozenset({PLAN, OTHER}))
+        self.assertEqual(tickets_of(rows), {PLAN: 2, OTHER: 10})
+
+    def test_a_metered_rows_tickets_never_flip_to_the_plan(self):
+        # One direction only (ADR-0007): the draw reads the link from Plan
+        # rows and lands on Metered ones; a Metered row's tickets never
+        # return to the plan's Allowance.
+        rows = deal(self.SHARE, self.plans(), {PLAN: 0.0, OTHER: 0.0,
+                                               TWIN: 1.0})
+        self.assertEqual(tickets_of(rows), {PLAN: 0, OTHER: 0, TWIN: 12})
+
+    def test_the_seeded_draw_is_byte_identical_without_absorption(self):
+        # US14/US16: with caps nowhere near, no ticket is absorbed, and the
+        # deal's seeded draw is the one pinned before market resolution
+        # (seed "pin", 24 tickets, the shipped blend).
+        share = {PLAN: 0.6, TWIN: 0.3, OTHER: 0.2}
+        rows = modelbandit.plan_deal(
+            share, {mid: {} for mid in share}, {},
+            modelbandit.DealParameters(
+                blend_weight=0.6, top_k=5, seed="pin", tickets=24,
+                fit_adjusted_task_scores={PLAN: 2.0, TWIN: 1.5, OTHER: 1.0},
+                admitted=frozenset(share)),
+            plans={PLAN: plan_entry(0.5)})
+        self.assertEqual(tickets_of(rows), {PLAN: 10, TWIN: 7, OTHER: 7})
 
 
 class DecimalEvictionTests(unittest.TestCase):
