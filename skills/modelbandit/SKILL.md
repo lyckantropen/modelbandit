@@ -145,17 +145,31 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    toward cheaper rows — never outside the popularity set. The deal reports
    its Free share — the fraction of tickets Free routes drew — reported,
    never capped and never floored: a shape may be dealt entirely to Free
-   routes. Plan tickets carry their budget facts: the deal prints an
+   routes. Beside it the deal always prints `plan share: N/M tickets (P%)`
+   — the plan rows' tickets over the dealt tickets, a ticket a Twin absorbed
+   counted metered — so the market mix is visible at a glance. A plan row at
+   its cap hands its ticket to its family's **Twin** — the same model served
+   metered, resolved through the `plans` entry's declared `family_ref` — and
+   the flip is plan → metered only, never the reverse; only when no Twin
+   resolves does the ticket fall through to the next row that still fits.
+   The pick follows the same rule degenerately: an at-cap top pick names its
+   Twin. Plan tickets carry their budget facts: the deal prints an
    `allowance draw:` line per plan model and the pick names the Draw beside
    the cash price (see **Plan readout**).
    One invocation deals one ticket shape — a run's domain, effort, token
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
    are made once for the run and every ticket the deal draws inherits them.
-    A run of a different shape is a different invocation. Before assigning a
-    dealt Free slug, verify it resolves in the harness's model catalog (for
-    example, with `opencode models`); if it does not, substitute the nearest
-    cataloged sibling of the same family.
+    A run of a different shape is a different invocation. Every dealt and
+    picked id is provider-qualified in the form a model config dispatches —
+    `openrouter/<slug>` for an OpenRouter serving (a `:free` slug included),
+    and `opencode/*`, `opencode-go/*` or a local id unchanged — so no slug
+    archaeology stands between the deal and the run. That qualification never
+    vouches for the harness's catalog: before assigning a dealt id, verify it
+    resolves there, checking the market each row names (for example,
+    `opencode models` for a harness id); if it does not, substitute the
+    nearest cataloged sibling of the same family. The script never shells out
+    to a harness — this residual check is yours.
    Done when: a single task names one pick (score and fit both shown), or a
    batch names its deal with per-model ticket counts and a combined projection.
 
@@ -450,10 +464,16 @@ starts closed everywhere, so this is the interview's only opening move:
   writes none, so two identical runs answer identically and a plan other
   harnesses share is never planned against a local fiction. The caps are real
   boundaries: no reserve is held back, no overflow flag exists, and a row
-  whose next ticket's Draw would cross any window leaves the pick and the deal
-  for the tickets that remain, the batch continuing with the rows that still
-  fit. Substitution to the row's **Metered route** is market resolution's
-  later work, never the ledger's. A plan row enters the pool at split family
+  whose next ticket's Draw would cross any window hands its ticket to its
+  **Twin** — the family's Metered serving the `family_ref` declaration
+  names: same model, identity preserved, market flipped plan → metered, one
+  direction only, the reverse never (ADR-0007). The Twin's tickets charge
+  cash, not Allowance, and count metered on the `plan share:` line; only a
+  row whose declared link resolves no eligible Twin leaves the pick and the
+  deal for the tickets that remain, the batch continuing with the rows that
+  still fit. The ledger itself never substitutes — resolution is the deal's
+  market adapter (and the pick's degenerate form of it), never the ledger's.
+  A plan row enters the pool at split family
   share: a family served twice — its Metered twin and its plan serving —
   divides its board share across both full-quality rows, so the family's
   standing is counted once, while a family with one full-quality serving keeps
@@ -548,9 +568,13 @@ starts closed everywhere, so this is the interview's only opening move:
   hint's fit for the domain and its evidence map through `affinity.factors`
   (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
   avoid/suspected ×0.5). Longest prefix wins. The deal is the only place taste
-  acts — the ranking itself is never reordered. Its Free share — the fraction
+  acts — the ranking itself is never reordered. Every dealt row is named by
+  its provider-qualified id (see **Pick line**), so a row is a dispatch,
+  not an interpretation. Its Free share — the fraction
   of tickets Free routes drew — is a report, never a cap and never a floor:
-  some tickets, all of them, or none, as the draw falls.
+  some tickets, all of them, or none, as the draw falls. Beside it, the deal
+  always prints `plan share: N/M tickets (P%)` — plan tickets over dealt
+  tickets, an absorbed ticket counted metered.
 
 - **Plan readout** — a deal that drew plan tickets prints, per plan row with
   tickets, `allowance draw: <model> $X of $Y (Z% of monthly; W% of 5h)` — `$X`
@@ -563,9 +587,10 @@ starts closed everywhere, so this is the interview's only opening move:
   unchanged: plan-aware totals come later.
 
 - **Pick line** — the pick names its market as the provider-qualified id a
-  model config dispatches: `openrouter/<slug>` for an OpenRouter serving (a
-  `:free` slug included), and `opencode/*`, `opencode-go/*` or a local id
-  unchanged.
+  model config dispatches (`<provider>/<model>`): `openrouter/<slug>` for an
+  OpenRouter serving (a `:free` slug included), and `opencode/*`,
+  `opencode-go/*` or a local id unchanged. The deal's model column uses the
+  same form; a pick that lands on a Twin names the Twin's qualified id.
 
 - **Secrets gate** — the collect-demand check that makes a shape Sensitive,
   run as `scripts/modelbandit.py --check-secrets [--working-dir PATH]` with the
