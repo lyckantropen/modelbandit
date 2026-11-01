@@ -4602,11 +4602,7 @@ def main() -> None:
             per = pr[args.pricing_basis]
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
-            out_mid = row["mid"]
-            if not (out_mid.startswith("opencode-go/")
-                    or out_mid.startswith("opencode/")
-                    or out_mid in local_ids):
-                out_mid = f"openrouter/{out_mid}"
+            out_mid = qualified_id(row["mid"], local=row["mid"] in local_ids)
             print(f"| {i} | {out_mid} | {row['share']:.2%} | "
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
