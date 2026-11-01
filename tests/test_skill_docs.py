@@ -210,6 +210,16 @@ class PlanEconomicsWordingTests(unittest.TestCase):
         self.assertIn("**Risk of Draw**", body)
         self.assertIn("ADR-0006", body)
 
+    def test_reference_names_the_declared_family_link(self):
+        # Issue #61: each plans entry declares its Twin; the link is the
+        # declaration (never a slug derivation), and a link that names no
+        # Metered route refuses the load.
+        body = section("Reference")
+        self.assertIn("`family_ref`", body)
+        self.assertIn("the Twin's Metered serving id", body)
+        self.assertIn("nothing derives a Twin from an id's shape", body)
+        self.assertIn("a `family_ref` that names no Metered route", body)
+
     def test_reference_carries_the_readout_shapes(self):
         body = section("Reference")
         self.assertIn("**Plan readout**", body)

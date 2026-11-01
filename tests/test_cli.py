@@ -943,6 +943,7 @@ class CliTests(unittest.TestCase):
                 "caps": {"five_hour": 2.5, "weekly": 5.0,
                          "monthly": 10.0},
                 "exposure": "no-retention",
+                "family_ref": "deepseek/deepseek-v4-pro",
             },
         }
         with open(self.policy_path, "w") as f:
