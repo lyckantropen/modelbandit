@@ -354,7 +354,7 @@ class PlanRowCliTests(unittest.TestCase):
         deal_block = printed[printed.index("deal (seed"):
                              printed.index("projection at")]
         self.assertNotIn(GHOST, deal_block)
-        self.assertIn(f"default pick (top of task order): {OTHER}", printed)
+        self.assertIn(f"default pick (top of task order): openrouter/{OTHER}", printed)
 
 
 if __name__ == "__main__":

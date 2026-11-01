@@ -13,10 +13,11 @@ a plan other harnesses share is never planned against a fiction.
 
 A row whose next ticket's Draw would cross a window's cap leaves the draw
 for the tickets that remain — the batch carries on with the rows that still
-fit — and a single-task pick at its cap is not picked: the next admitted row
-takes it. A plan row whose declared family link resolves gets the deal's
-market adapter instead (TwinAbsorptionTests): its slot continues as the
-family's Metered Twin, so its windows are charged only for the tickets the
+fit — and a single-task pick whose plan row is at cap hands the pick to the
+family's Metered Twin when the declared link resolves one; otherwise the next
+admitted row takes it, as before. A plan row whose declared family link
+resolves gets the market adapter (TwinAbsorptionTests): its slot continues as
+the family's Metered Twin, so its windows are charged only for the tickets the
 plan row itself took. Caps are real boundaries: no reserve is held back and
 no overflow flag exists. Metered and Free routes keep no totals at all, and
 the zero-Draw serving books nothing.
@@ -586,7 +587,8 @@ class PickEvictionCliTests(unittest.TestCase):
         printed, err = self.run_main(self.world(
             [market_model()], [(PLAN, 0.6), (OTHER, 0.4)]))
         self.assertIn("| 1 | " + PLAN, printed)
-        self.assertIn(f"default pick (top of task order): {OTHER}", printed)
+        self.assertIn(f"default pick (top of task order): openrouter/{OTHER}",
+                      printed)
         self.assertNotIn(f"default pick (top of task order): {PLAN}", printed)
         self.assertEqual(self.deal_tickets(printed), {PLAN: "0", OTHER: "12"})
 

@@ -556,8 +556,16 @@ starts closed everywhere, so this is the interview's only opening move:
   tickets, `allowance draw: <model> $X of $Y (Z% of monthly; W% of 5h)` — `$X`
   the Draw this run allotted the model and `$Y` its monthly cap. When the pick
   is a plan row its line names the Draw beside the cash price — `default pick
-  (top of task order): <model> ($X/ticket; Draw $Y/ticket)`. The projection
-  keeps its dollar total unchanged: plan-aware totals come later.
+  (top of task order): <model> ($X/ticket; Draw $Y/ticket)`. A pick whose plan
+  row is at cap names the family's Metered Twin instead — same model, metered
+  market — with its own cash price and no Draw: `default pick (top of task
+  order): <model> ($X/ticket)`. The projection keeps its dollar total
+  unchanged: plan-aware totals come later.
+
+- **Pick line** — the pick names its market as the provider-qualified id a
+  model config dispatches: `openrouter/<slug>` for an OpenRouter serving (a
+  `:free` slug included), and `opencode/*`, `opencode-go/*` or a local id
+  unchanged.
 
 - **Secrets gate** — the collect-demand check that makes a shape Sensitive,
   run as `scripts/modelbandit.py --check-secrets [--working-dir PATH]` with the
