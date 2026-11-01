@@ -224,7 +224,7 @@ summaries (task-fit context; never taste):
   deepseek/deepseek-v4-pro-0813: eol sibling summary
   deepseek/deepseek-v4-pro: eol summary
 
-default pick (top of task order): deepseek/deepseek-v4-pro-0813
+default pick (top of task order): openrouter/deepseek/deepseek-v4-pro-0813
 route to floor: pin provider 'Baidu' via body.provider.order (allow_fallbacks: false) — unpinned worst endpoint is 'Relace' at $0.0984/ticket
 cheapest shown: deepseek/deepseek-v4-pro at $0.0077/ticket (budget pressure moves within the ranking, by price)
 projection at 1 ticket(s): $0.10 (floor $0.01) | baseline anchor: $0.02
@@ -1007,11 +1007,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("top of task order deepseek/deepseek-v4-pro is excluded",
                       out)
         self.assertIn("default pick (top of task order): "
-                      "deepseek/deepseek-v4-flash", out)
+                      "openrouter/deepseek/deepseek-v4-flash", out)
         # the same run without the flag picks the top row, as today
         out, _, _, _ = self.run_cli("--domain", "writing")
         self.assertIn("default pick (top of task order): "
-                      "deepseek/deepseek-v4-pro", out)
+                      "openrouter/deepseek/deepseek-v4-pro", out)
 
     def test_ordinary_shape_prints_no_admission_column(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
@@ -1133,14 +1133,14 @@ class CliTests(unittest.TestCase):
         out, _, _, _ = self.run_cli("--domain", "writing")
         body = out[out.index("| # |") :]
         # v4-pro is ~13x cheaper per ticket than the share leader -> tops the order
-        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro\n", out)
+        self.assertIn("default pick (top of task order): openrouter/deepseek/deepseek-v4-pro\n", out)
         self.assertLess(body.index("deepseek/deepseek-v4-pro |"),
                         body.index("deepseek/deepseek-v4-pro-0813 |"))
 
     def test_fit_composes_and_reorders(self):
         out, _, _, _ = self.run_cli("--domain", "writing",
                                     "--fit", "deepseek/deepseek-v4-pro-0813=0")
-        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro\n", out)
+        self.assertIn("default pick (top of task order): openrouter/deepseek/deepseek-v4-pro\n", out)
         self.assertIn("| fit | adj |", out)
 
     def test_score_balance_section_and_retune_verdict(self):
@@ -1345,11 +1345,12 @@ class CliTests(unittest.TestCase):
                    if ln.startswith("|") and "vendor/model:free |" in ln)
         self.assertIn("| 18.50 |", row)
         self.assertIn("$0.0000", row)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): openrouter/vendor/model:free", out)
         pick_line = next(line for line in out.splitlines()
                          if line.startswith("default pick (top of task order):"))
         self.assertEqual(pick_line,
-                         "default pick (top of task order): vendor/model:free")
+                         "default pick (top of task order): "
+                         "openrouter/vendor/model:free")
 
     # --- free-use zones: main wires the regime into admission --------
 
@@ -1363,7 +1364,7 @@ class CliTests(unittest.TestCase):
         open_run, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name, world=world)
         self.assertIsNone(code)
-        self.assertIn("default pick (top of task order): vendor/model:free",
+        self.assertIn("default pick (top of task order): openrouter/vendor/model:free",
                       open_run)
 
         closed, _, code, _ = self.run_cli(
@@ -2166,7 +2167,7 @@ class CliTests(unittest.TestCase):
 
     def test_default_pick_and_route_to_floor(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
-        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro-0813", out)
+        self.assertIn("default pick (top of task order): openrouter/deepseek/deepseek-v4-pro-0813", out)
         self.assertIn("route to floor: pin provider 'Baidu'", out)
         self.assertIn("'Relace'", out)
 
@@ -2333,7 +2334,8 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         self.assertIn("free quota: 12/50 used (38 left)", out)
         self.assertNotIn("free quota", err)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): "
+                      "openrouter/vendor/model:free", out)
 
     def test_plan_size_does_not_gate_when_reserve_is_available(self):
         # Plan size is not known Free demand before drawing: at the reserve
@@ -2349,7 +2351,8 @@ class CliTests(unittest.TestCase):
         free_row = next(ln for ln in out.splitlines()
                         if ln.startswith("|") and "vendor/model:free |" in ln)
         self.assertNotIn("free quota", free_row)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): "
+                      "openrouter/vendor/model:free", out)
 
     def test_quota_below_reserve_excludes_openrouter_free_routes(self):
         self.free_only_policy(reserve=10)
@@ -2378,7 +2381,8 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("stay in the pool", err)
         self.assertIn("free quota: unavailable | :free routes stay in the pool",
                       out)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): "
+                      "openrouter/vendor/model:free", out)
 
     def test_check_policy_plans_no_tickets_and_reads_no_counter(self):
         _, err, code, calls = self.run_cli("--check-policy")

@@ -311,6 +311,28 @@ def family_key(mid: str) -> str | None:
     return name or None
 
 
+# The kinds OpenRouter serves: their ids dispatch through the `openrouter/`
+# namespace a model config consumes. A `:free` slug is an OpenRouter serving
+# too -- the same route's rate-limited variant, not another provider's.
+_OPENROUTER_KINDS = frozenset({"market", "free-slug"})
+
+
+def qualified_id(mid: str, *, local: bool = False) -> str:
+    """The provider-qualified id a model config consumes: `<provider>/<model>`.
+
+    The deal and the pick name a market, so an OpenRouter serving is
+    re-prefixed with the namespace its configs dispatch through --
+    `openrouter/` plus the normalized slug (norm_id) -- and every id already
+    carrying its provider namespace (`opencode/*`, `opencode-go/*`) or a model
+    this machine serves passes through unchanged. The Route kind is the
+    classifier's answer, never the id's spelling; an id no kind classifies is
+    left as written, since nothing in the run can dispatch it.
+    """
+    if classify_route(mid, local=local) in _OPENROUTER_KINDS:
+        return "openrouter/" + norm_id(mid)
+    return mid
+
+
 def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
     """Whether Endpoint spread prices this serving - the market kind's trait
     alone (the facet contract's `priced_by_endpoint_spread`). Non-market
@@ -4377,8 +4399,14 @@ def main() -> None:
         rows_out.append((mid, s, models[mid], pr, sc, fit,
                          adjusted_score(sc, fit)))
     rows_out.sort(key=lambda r: -r[6])
+    # The pick's eligible set: the run's priced, displayed rows that passed
+    # admission -- the degenerate form of the deal's pool, so the Twin rule
+    # reads the same declarations against the same gates.
+    pick_rows = {row[0]: row for row in rows_out}
+    pick_pool = [(mid, s) for mid, s, *_ in rows_out if decisions[mid].admitted]
 
     pick = None
+    pick_twin = False
     cheapest = None
     floor_total = 0.0
     at_cap_rows = []
@@ -4431,10 +4459,22 @@ def main() -> None:
             if pick is None:
                 # The pick is one task: it takes the top of the task order
                 # unless its Draw would cross a window's cap, in which case
-                # the next admitted row takes it (the ledger is the run's --
-                # nothing has been drawn yet at this point).
+                # the family's Metered Twin takes it -- same model, market
+                # flipped plan to metered, its own cash price and no Draw --
+                # and only a link that resolves no eligible row falls through
+                # to the next admitted row, as before (the ledger is the
+                # run's; nothing has been drawn yet at this point).
                 if ledger.crosses(mid):
-                    at_cap_rows.append(mid)
+                    k = _twin_index(mid, pick_pool, policy["plans"],
+                                    local=local_ids)
+                    if k is None:
+                        at_cap_rows.append(mid)
+                    else:
+                        twin = pick_pool[k][0]
+                        twin_pr = pick_rows[twin][3]
+                        pick = (twin, twin_pr[args.pricing_basis], twin_pr)
+                        pick_twin = True
+                        floor_total = twin_pr["best"] * args.tickets
                 else:
                     pick = (mid, per, pr)
                     floor_total = pr["best"] * args.tickets
@@ -4506,12 +4546,17 @@ def main() -> None:
             and not decisions[rows_out[0][0]].admitted:
         print(f"\nnote: top of task order {rows_out[0][0]} is excluded "
               f"({decisions[rows_out[0][0]].reason}) — not picked")
-    pick_line = f"\ndefault pick (top of task order): {pick[0]}"
+    pick_line = (f"\ndefault pick (top of task order): "
+                 f"{qualified_id(pick[0], local=pick[0] in local_ids)}")
     pick_draw = ticket_draw(pick[0], policy["plans"],
                             local=pick[0] in local_ids)
     if pick_draw is not None:
         pick_line += (f" (${pick[1]:.4f}/ticket; "
                       f"Draw ${pick_draw:.2f}/ticket)")
+    elif pick_twin:
+        # A Metered Twin has no Allowance to state: the pick line names what
+        # the task costs in cash, with no Draw beside it.
+        pick_line += f" (${pick[1]:.4f}/ticket)"
     print(pick_line)
     pr_pick = pick[2]
     if pr_pick.get("best_ep") and pr_pick.get("worst_ep") \
