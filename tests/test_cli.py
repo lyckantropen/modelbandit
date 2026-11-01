@@ -224,7 +224,7 @@ summaries (task-fit context; never taste):
   deepseek/deepseek-v4-pro-0813: eol sibling summary
   deepseek/deepseek-v4-pro: eol summary
 
-default pick (top of task order): deepseek/deepseek-v4-pro-0813
+default pick (top of task order): openrouter/deepseek/deepseek-v4-pro-0813
 route to floor: pin provider 'Baidu' via body.provider.order (allow_fallbacks: false) — unpinned worst endpoint is 'Relace' at $0.0984/ticket
 cheapest shown: deepseek/deepseek-v4-pro at $0.0077/ticket (budget pressure moves within the ranking, by price)
 projection at 1 ticket(s): $0.10 (floor $0.01) | baseline anchor: $0.02
@@ -943,6 +943,7 @@ class CliTests(unittest.TestCase):
                 "caps": {"five_hour": 2.5, "weekly": 5.0,
                          "monthly": 10.0},
                 "exposure": "no-retention",
+                "family_ref": "deepseek/deepseek-v4-pro",
             },
         }
         with open(self.policy_path, "w") as f:
@@ -971,6 +972,67 @@ class CliTests(unittest.TestCase):
                       "(25.0% of monthly; 100.0% of 5h)", block)
         self.assertEqual(block.count("allowance draw:"), 1)
         self.assertIn("projection at 12 ticket(s): $0.00", out)
+
+    def test_deal_emits_provider_qualified_ids(self):
+        # Every dealt row id is the provider-qualified form a model config
+        # consumes: `openrouter/` re-added to the normalized OpenRouter slug
+        # (issue #63). Namespaced ids are already qualified.
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
+                                       "--deal", "--seed", "proj")
+        self.assertIsNone(code)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("openrouter/deepseek/deepseek-v4-pro", block)
+        self.assertIn("openrouter/deepseek/deepseek-v4-flash", block)
+        self.assertNotIn("| deepseek/deepseek-v4-pro ", block)
+        self.assertNotIn("| deepseek/deepseek-v4-flash ", block)
+
+    def test_deal_prints_the_plan_share_line_unconditionally(self):
+        # The market mix is always visible: the plan share line joins the
+        # free share line even when no plan tickets drew (issue #63).
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
+                                       "--deal", "--seed", "proj")
+        self.assertIsNone(code)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("free share: 0/12 tickets (0%)", block)
+        self.assertIn("plan share: 0/12 tickets (0%)", block)
+
+    def test_deal_plan_share_counts_only_plan_tickets(self):
+        # The plan row takes the whole draw within its Allowance: the readout
+        # names the plan tickets against the total dealt (issue #63).
+        plan = "opencode-go/plan-model"
+        policy = json.loads(json.dumps(POLICY))
+        policy["baseline"] = {"id": "z-ai/glm-5.3"}
+        policy["plans"] = {
+            plan: {
+                "list_price": 0.5,
+                "caps": {"five_hour": 6.0, "weekly": 12.0,
+                         "monthly": 12.0},
+                "exposure": "no-retention",
+                "family_ref": "deepseek/deepseek-v4-pro",
+            },
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+        world = {
+            "models": [make_model("z-ai/glm-5.3", "0.0000002",
+                                   "0.000001", "0")],
+            "classifications": {"as_of": "2026-10-17", "classifications": [
+                {"tag": "content_writing", "usage_share": 1.0,
+                 "models": [{"id": plan, "tag_usage_share": 1.0}]},
+            ]},
+            "rankings": {"data": []},
+            "endpoints": {},
+            "benchmarks": {"data": []},
+        }
+
+        out, err, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "allowance-readout", world=world)
+
+        self.assertIsNone(code, err)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("plan share: 12/12 tickets (100%)", block)
+        self.assertIn("free share: 0/12 tickets (0%)", block)
 
     # --- Sensitive shape: the admission seam in the output --------------
 
@@ -1006,11 +1068,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("top of task order deepseek/deepseek-v4-pro is excluded",
                       out)
         self.assertIn("default pick (top of task order): "
-                      "deepseek/deepseek-v4-flash", out)
+                      "openrouter/deepseek/deepseek-v4-flash", out)
         # the same run without the flag picks the top row, as today
         out, _, _, _ = self.run_cli("--domain", "writing")
         self.assertIn("default pick (top of task order): "
-                      "deepseek/deepseek-v4-pro", out)
+                      "openrouter/deepseek/deepseek-v4-pro", out)
 
     def test_ordinary_shape_prints_no_admission_column(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
@@ -1132,14 +1194,14 @@ class CliTests(unittest.TestCase):
         out, _, _, _ = self.run_cli("--domain", "writing")
         body = out[out.index("| # |") :]
         # v4-pro is ~13x cheaper per ticket than the share leader -> tops the order
-        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro\n", out)
+        self.assertIn("default pick (top of task order): openrouter/deepseek/deepseek-v4-pro\n", out)
         self.assertLess(body.index("deepseek/deepseek-v4-pro |"),
                         body.index("deepseek/deepseek-v4-pro-0813 |"))
 
     def test_fit_composes_and_reorders(self):
         out, _, _, _ = self.run_cli("--domain", "writing",
                                     "--fit", "deepseek/deepseek-v4-pro-0813=0")
-        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro\n", out)
+        self.assertIn("default pick (top of task order): openrouter/deepseek/deepseek-v4-pro\n", out)
         self.assertIn("| fit | adj |", out)
 
     def test_score_balance_section_and_retune_verdict(self):
@@ -1344,11 +1406,12 @@ class CliTests(unittest.TestCase):
                    if ln.startswith("|") and "vendor/model:free |" in ln)
         self.assertIn("| 18.50 |", row)
         self.assertIn("$0.0000", row)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): openrouter/vendor/model:free", out)
         pick_line = next(line for line in out.splitlines()
                          if line.startswith("default pick (top of task order):"))
         self.assertEqual(pick_line,
-                         "default pick (top of task order): vendor/model:free")
+                         "default pick (top of task order): "
+                         "openrouter/vendor/model:free")
 
     # --- free-use zones: main wires the regime into admission --------
 
@@ -1362,7 +1425,7 @@ class CliTests(unittest.TestCase):
         open_run, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name, world=world)
         self.assertIsNone(code)
-        self.assertIn("default pick (top of task order): vendor/model:free",
+        self.assertIn("default pick (top of task order): openrouter/vendor/model:free",
                       open_run)
 
         closed, _, code, _ = self.run_cli(
@@ -2165,7 +2228,7 @@ class CliTests(unittest.TestCase):
 
     def test_default_pick_and_route_to_floor(self):
         out, _, _, _ = self.run_cli("--domain", "writing")
-        self.assertIn("default pick (top of task order): deepseek/deepseek-v4-pro-0813", out)
+        self.assertIn("default pick (top of task order): openrouter/deepseek/deepseek-v4-pro-0813", out)
         self.assertIn("route to floor: pin provider 'Baidu'", out)
         self.assertIn("'Relace'", out)
 
@@ -2332,7 +2395,8 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         self.assertIn("free quota: 12/50 used (38 left)", out)
         self.assertNotIn("free quota", err)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): "
+                      "openrouter/vendor/model:free", out)
 
     def test_plan_size_does_not_gate_when_reserve_is_available(self):
         # Plan size is not known Free demand before drawing: at the reserve
@@ -2348,7 +2412,8 @@ class CliTests(unittest.TestCase):
         free_row = next(ln for ln in out.splitlines()
                         if ln.startswith("|") and "vendor/model:free |" in ln)
         self.assertNotIn("free quota", free_row)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): "
+                      "openrouter/vendor/model:free", out)
 
     def test_quota_below_reserve_excludes_openrouter_free_routes(self):
         self.free_only_policy(reserve=10)
@@ -2377,7 +2442,8 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("stay in the pool", err)
         self.assertIn("free quota: unavailable | :free routes stay in the pool",
                       out)
-        self.assertIn("default pick (top of task order): vendor/model:free", out)
+        self.assertIn("default pick (top of task order): "
+                      "openrouter/vendor/model:free", out)
 
     def test_check_policy_plans_no_tickets_and_reads_no_counter(self):
         _, err, code, calls = self.run_cli("--check-policy")

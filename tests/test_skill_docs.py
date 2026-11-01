@@ -210,6 +210,16 @@ class PlanEconomicsWordingTests(unittest.TestCase):
         self.assertIn("**Risk of Draw**", body)
         self.assertIn("ADR-0006", body)
 
+    def test_reference_names_the_declared_family_link(self):
+        # Issue #61: each plans entry declares its Twin; the link is the
+        # declaration (never a slug derivation), and a link that names no
+        # Metered route refuses the load.
+        body = section("Reference")
+        self.assertIn("`family_ref`", body)
+        self.assertIn("the Twin's Metered serving id", body)
+        self.assertIn("nothing derives a Twin from an id's shape", body)
+        self.assertIn("a `family_ref` that names no Metered route", body)
+
     def test_reference_carries_the_readout_shapes(self):
         body = section("Reference")
         self.assertIn("**Plan readout**", body)
@@ -222,6 +232,58 @@ class PlanEconomicsWordingTests(unittest.TestCase):
                       step(5, "Pick — or deal."))
         self.assertIn("risk of its list-priced Draw",
                       step(3, "Order by task score."))
+
+
+class MarketResolutionWordingTests(unittest.TestCase):
+    """Issue #64: the skill tells the market-resolution truth the wave made
+    real — provider-qualified ids in the deal and the pick, the Twin at cap
+    (plan → metered, one direction), the plan-share line, and the catalog
+    check as the residual, market-named and agent-side. Every claim pinned
+    here is honoured by the code on this branch."""
+
+    def test_the_deal_step_names_qualified_ids_for_deal_and_pick(self):
+        body = step(5, "Pick — or deal.")
+        self.assertIn("provider-qualified", body)
+        self.assertIn("`openrouter/<slug>`", body)
+        self.assertIn("no slug archaeology", body)
+
+    def test_the_deal_step_states_the_plan_share_line_beside_free_share(self):
+        body = step(5, "Pick — or deal.")
+        self.assertIn("plan share: N/M tickets (P%)", body)
+        self.assertIn("Beside it", body)
+        # Absorbed tickets are metered: the plan share never counts them.
+        self.assertIn("absorbed counted metered", body)
+
+    def test_the_deal_step_states_the_twin_rule_one_direction_only(self):
+        body = step(5, "Pick — or deal.")
+        self.assertIn("**Twin**", body)
+        self.assertIn("same model served metered", body)
+        self.assertIn("plan → metered only, never the reverse", body)
+        self.assertIn("no Twin resolves", body)
+
+    def test_the_residual_check_is_market_named_and_agent_side(self):
+        body = step(5, "Pick — or deal.")
+        self.assertIn("market each row names", body)
+        self.assertIn("`opencode models`", body)
+        self.assertIn("never shells out to a harness", body)
+
+    def test_the_allowance_reference_brings_twin_substitution_present_tense(self):
+        body = section("Reference")
+        self.assertNotIn("market resolution's later work", body)
+        self.assertIn("hands its ticket to its **Twin**", body)
+        self.assertIn("never the ledger's", body)
+
+    def test_the_deal_reference_names_the_plan_share_readout(self):
+        body = section("Reference")
+        self.assertIn("plan share: N/M tickets (P%)", body)
+        self.assertIn("Every dealt row is named by its provider-qualified id",
+                      body)
+
+    def test_no_plan_first_billing_or_reverse_flip_is_claimed(self):
+        # The adapter forces one direction; billing-layer semantics stay out.
+        self.assertNotIn("plan-first", TEXT)
+        self.assertNotIn("metered → plan", TEXT)
+        self.assertNotIn("metered to plan", TEXT)
 
 
 if __name__ == "__main__":

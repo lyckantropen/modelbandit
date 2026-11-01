@@ -311,6 +311,28 @@ def family_key(mid: str) -> str | None:
     return name or None
 
 
+# The kinds OpenRouter serves: their ids dispatch through the `openrouter/`
+# namespace a model config consumes. A `:free` slug is an OpenRouter serving
+# too -- the same route's rate-limited variant, not another provider's.
+_OPENROUTER_KINDS = frozenset({"market", "free-slug"})
+
+
+def qualified_id(mid: str, *, local: bool = False) -> str:
+    """The provider-qualified id a model config consumes: `<provider>/<model>`.
+
+    The deal and the pick name a market, so an OpenRouter serving is
+    re-prefixed with the namespace its configs dispatch through --
+    `openrouter/` plus the normalized slug (norm_id) -- and every id already
+    carrying its provider namespace (`opencode/*`, `opencode-go/*`) or a model
+    this machine serves passes through unchanged. The Route kind is the
+    classifier's answer, never the id's spelling; an id no kind classifies is
+    left as written, since nothing in the run can dispatch it.
+    """
+    if classify_route(mid, local=local) in _OPENROUTER_KINDS:
+        return "openrouter/" + norm_id(mid)
+    return mid
+
+
 def priced_by_endpoint_spread(mid: str, *, local: bool = False) -> bool:
     """Whether Endpoint spread prices this serving - the market kind's trait
     alone (the facet contract's `priced_by_endpoint_spread`). Non-market
@@ -1789,8 +1811,8 @@ class AllowanceLedger:
     against usage this run cannot see, and no overflow flag exists: a row
     whose next ticket would cross a window leaves the draw for the tickets
     that remain, and the batch carries on with the rows that still fit.
-    Substitution to the route's metered twin is market resolution's business
-    (later work), never the ledger's.
+    Substitution to the route's Metered Twin is the deal's market adapter
+    (plan_deal), never the ledger's.
 
     The crossing arithmetic is the cost seam's (at_cap_verdict); the ledger
     owns only the drawn totals it feeds that answer, and a route with no
@@ -2171,7 +2193,8 @@ PLAN_CAP_WINDOWS = ("five_hour", "weekly", "monthly")
 # a stray `caps` window would silently invent an unauthorized boundary (the
 # crossing arithmetic iterates caps.items()), and a non-numeric one would
 # surface as a TypeError instead of status 4.
-PLAN_ENTRY_FIELDS = ("list_price", "caps", "exposure", "regions")
+PLAN_ENTRY_FIELDS = ("list_price", "caps", "exposure", "regions",
+                     "family_ref")
 
 
 def _is_finite_number(value) -> bool:
@@ -2203,6 +2226,15 @@ def load_plans(policy: dict) -> dict:
     servings it owns. A `list_price` of 0 is not bad: it is the zero-Draw,
     free-in-plan serving whose pricing falls back to the pool-cheapest
     basis (ADR-0006), so the price must be non-negative, not positive.
+
+    Every entry also declares its family link: `family_ref`, the Twin's
+    Metered serving id. Twins find each other through that declaration
+    alone -- vendor prefixes differ per family, so no id shape derives one
+    (the declaration is authoritative, never a slug heuristic). The link
+    resolves when the Route-kind seam answers `market` for it -- a plan,
+    harness, `:free` or unclassifiable id names no Metered row and is
+    refused here, naming the entry, so a broken link never half-loads a
+    catalog and never reaches resolution as a silent default.
     """
     catalog = policy.get("plans", {})
     if not isinstance(catalog, dict):
@@ -2262,6 +2294,19 @@ def load_plans(policy: dict) -> dict:
                        for region in regions)):
             raise SystemExit(
                 f"policy {path}.regions must be a list of non-empty strings")
+        if "family_ref" not in entry:
+            raise SystemExit(
+                f"policy missing required key: {path}.family_ref")
+        family_ref = entry["family_ref"]
+        if not isinstance(family_ref, str) or not family_ref.strip():
+            raise SystemExit(
+                f"policy {path}.family_ref must be a non-empty string")
+        twin_kind = classify_route(family_ref)
+        if twin_kind != "market":
+            raise SystemExit(
+                f"policy {path}.family_ref '{family_ref}': route kind "
+                f"'{twin_kind or 'unknown'}' is not a Metered route "
+                f"(market); the family link names the Twin's Metered serving")
     return catalog
 
 
@@ -2727,6 +2772,13 @@ def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, i
     return sum(row["tickets"] for row in rows if row["mid"] in free), total
 
 
+def share_line(label: str, tickets: int, dealt: int) -> str:
+    """The deal's share readout: `<label>: N/M tickets (P%)`, a zero
+    denominator reading 0% rather than dividing by nothing."""
+    share = tickets / dealt if dealt else 0.0
+    return f"{label}: {tickets}/{dealt} tickets ({share:.0%})"
+
+
 @dataclasses.dataclass(frozen=True)
 class Decision:
     """An admission verdict: admitted, or excluded with a visible reason.
@@ -3102,6 +3154,35 @@ def blend_bases(pool: list[tuple[str, float]],
     return [scores[mid] for mid, _ in pool]
 
 
+def _twin_index(mid: str, pool: list[tuple[str, float]], plans: dict,
+                *, local=frozenset()) -> int | None:
+    """The pool row that absorbs an at-cap Plan route's ticket: the family's
+    Twin, resolved through the plans entry's declared `family_ref` alone.
+
+    The market adapter is internal to the deal (issue #65): a Plan row at cap
+    hands its ticket to the same model's Metered serving -- identity
+    preserved, market flipped -- so the batch keeps the model and pays
+    metered instead of falling through to a different one. Resolution reads
+    the declaration, never an id shape: `family_key` is the split family
+    share's heuristic, and vendor prefixes differ per family, so no slug
+    derives a Twin. A row answers only when the declaration names a Metered
+    serving this run actually plays: an absent, uncataloged, admission-
+    excluded or non-metered link (a plan-shaped or served-here id) resolves
+    nothing, and the caller's circular fall-through stands. One direction
+    only -- the link is read from a Plan row and lands on its Metered Twin,
+    never the reverse (ADR-0007).
+    """
+    if not is_plan_route(mid, local=mid in local):
+        return None
+    entry = plans.get(mid)
+    ref = entry.get("family_ref") if isinstance(entry, dict) else None
+    if not isinstance(ref, str) or not ref.strip():
+        return None
+    if classify_route(ref, local=ref in local) != "market":
+        return None
+    return next((j for j, (row, _) in enumerate(pool) if row == ref), None)
+
+
 def plan_deal(share: dict, models: dict, aff: dict,
               parameters: DealParameters, local=(), plans=None,
               ledger: AllowanceLedger | None = None) -> list[dict]:
@@ -3122,11 +3203,16 @@ def plan_deal(share: dict, models: dict, aff: dict,
 
     The one-burst ledger draws each ticket down from the plan rows'
     Allowances as the loop assigns it (`ledger`, built from the plans
-    catalog when the caller passes none): a row whose next ticket's Draw
-    would cross a window's cap leaves the draw for the tickets that remain,
-    and the ticket falls through to the next row that still fits, wrapping
-    to the start of the draw's order at the end -- the batch keeps
-    assigning. Rows that hold no Allowance -- metered, Free, an
+    catalog when the caller passes none). A plan row whose next ticket's
+    Draw would cross a window's cap hands its slot to its family's Twin --
+    the pool row its `family_ref` declares: same model, market flipped plan
+    to metered, no Draw charged to the exhausted windows -- so the family's
+    drawn share stays whole while the batch pays cash for what the Allowance
+    can no longer carry (the market adapter, issue #65). Only a row whose
+    declared link resolves no eligible pool row leaves the draw for the
+    tickets that remain; its ticket falls through to the next row that still
+    fits, wrapping to the start of the draw's order at the end -- the batch
+    keeps assigning. Rows that hold no Allowance -- metered, Free, an
     uncataloged plan id -- keep drawing and never enter the ledger.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
@@ -3156,6 +3242,12 @@ def plan_deal(share: dict, models: dict, aff: dict,
     draws = [d / dt for d in draws]
     counts = [0] * len(pool)
     evicted = [False] * len(pool)
+    # A plan row that crosses a cap has its slot continue as its Metered
+    # Twin: the ticket it would have taken lands on the Twin, and so does
+    # every later ticket the same slot draws -- identity preserved, market
+    # flipped, the family's drawn share unchanged (issue #65). -1 is "no
+    # Twin resolved"; such a row leaves the draw as before.
+    twins = [-1] * len(pool)
     cum, run = [], 0.0
     for d in draws:
         run += d
@@ -3163,16 +3255,17 @@ def plan_deal(share: dict, models: dict, aff: dict,
     # The ledger's draw loop: the batch is assumed to land in ONE 5-hour
     # burst, so each ticket is booked against the 5-hour, weekly and monthly
     # windows alike and judged as it is assigned -- a row whose next ticket
-    # would cross a window's cap leaves the draw for the tickets that
-    # remain, and the ticket falls through to the next row that still fits.
-    # The fall-through is circular, still the draw's own order: a ticket
-    # drawn past an at-cap last row wraps to the start and takes the first
-    # non-evicted row, so no ticket is abandoned while any row still fits
-    # (US6 -- the batch continues within the plan). Only when every row is
-    # evicted does a ticket go unassigned. The draw itself stays keyed as it
-    # was -- ticket i's number is still seed::i -- so an at-cap row changes
-    # who takes a ticket, never the seeded order they are offered in; no
-    # re-deal and no renormalization.
+    # would cross a window's cap hands its slot to its family's Twin, and
+    # only a row whose declared link resolves no eligible Twin leaves the
+    # draw for the tickets that remain, the ticket falling through to the
+    # next row that still fits. The fall-through is circular, still the
+    # draw's own order: a ticket drawn past an at-cap last row wraps to the
+    # start and takes the first non-evicted row, so no ticket is abandoned
+    # while any row still fits (US6 -- the batch continues within the plan).
+    # Only when every row is evicted does a ticket go unassigned. The draw
+    # itself stays keyed as it was -- ticket i's number is still seed::i --
+    # so an at-cap row changes who takes a ticket, never the seeded order
+    # they are offered in; no re-deal and no renormalization.
     for i in range(tickets):
         r = random.Random(f"{seed}::{i}").random() * run
         start = next((j for j, c in enumerate(cum) if r <= c), None)
@@ -3182,8 +3275,19 @@ def plan_deal(share: dict, models: dict, aff: dict,
             j = (start + step) % len(cum)
             if evicted[j]:
                 continue
+            if twins[j] >= 0:
+                k = twins[j]
+                counts[k] += 1
+                ledger.charge(pool[k][0])
+                break
             mid = pool[j][0]
             if ledger.crosses(mid):
+                k = _twin_index(mid, pool, catalog, local=local)
+                if k is not None and k != j:
+                    twins[j] = k
+                    counts[k] += 1
+                    ledger.charge(pool[k][0])
+                    break
                 evicted[j] = True
                 continue
             counts[j] += 1
@@ -4302,6 +4406,11 @@ def main() -> None:
         rows_out.append((mid, s, models[mid], pr, sc, fit,
                          adjusted_score(sc, fit)))
     rows_out.sort(key=lambda r: -r[6])
+    # The pick's eligible set: the run's priced, displayed rows that passed
+    # admission -- the degenerate form of the deal's pool, so the Twin rule
+    # reads the same declarations against the same gates.
+    pick_rows = {row[0]: row for row in rows_out}
+    pick_pool = [(mid, s) for mid, s, *_ in rows_out if decisions[mid].admitted]
 
     pick = None
     cheapest = None
@@ -4356,10 +4465,22 @@ def main() -> None:
             if pick is None:
                 # The pick is one task: it takes the top of the task order
                 # unless its Draw would cross a window's cap, in which case
-                # the next admitted row takes it (the ledger is the run's --
-                # nothing has been drawn yet at this point).
+                # the family's Metered Twin takes it -- same model, market
+                # flipped plan to metered, named by its qualified id alone
+                # (the id names the market: no price, no Draw) --
+                # and only a link that resolves no eligible row falls through
+                # to the next admitted row, as before (the ledger is the
+                # run's; nothing has been drawn yet at this point).
                 if ledger.crosses(mid):
-                    at_cap_rows.append(mid)
+                    k = _twin_index(mid, pick_pool, policy["plans"],
+                                    local=local_ids)
+                    if k is None:
+                        at_cap_rows.append(mid)
+                    else:
+                        twin = pick_pool[k][0]
+                        twin_pr = pick_rows[twin][3]
+                        pick = (twin, twin_pr[args.pricing_basis], twin_pr)
+                        floor_total = twin_pr["best"] * args.tickets
                 else:
                     pick = (mid, per, pr)
                     floor_total = pr["best"] * args.tickets
@@ -4431,7 +4552,8 @@ def main() -> None:
             and not decisions[rows_out[0][0]].admitted:
         print(f"\nnote: top of task order {rows_out[0][0]} is excluded "
               f"({decisions[rows_out[0][0]].reason}) — not picked")
-    pick_line = f"\ndefault pick (top of task order): {pick[0]}"
+    pick_line = (f"\ndefault pick (top of task order): "
+                 f"{qualified_id(pick[0], local=pick[0] in local_ids)}")
     pick_draw = ticket_draw(pick[0], policy["plans"],
                             local=pick[0] in local_ids)
     if pick_draw is not None:
@@ -4482,7 +4604,8 @@ def main() -> None:
             per = pr[args.pricing_basis]
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
-            print(f"| {i} | {row['mid']} | {row['share']:.2%} | "
+            out_mid = qualified_id(row["mid"], local=row["mid"] in local_ids)
+            print(f"| {i} | {out_mid} | {row['share']:.2%} | "
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
@@ -4498,9 +4621,11 @@ def main() -> None:
                   f"{five_hour['drawn'] / five_hour['cap']:.1%} of 5h)")
         free_tickets, dealt_tickets = deal_free_share(
             rows, policy, local=local_ids)
-        free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0
-        print(f"free share: {free_tickets}/{dealt_tickets} tickets "
-              f"({free_share:.0%})")
+        print(share_line("free share", free_tickets, dealt_tickets))
+        plan_tickets = sum(row["tickets"] for row in rows
+                           if is_plan_route(row["mid"],
+                                            local=row["mid"] in local_ids))
+        print(share_line("plan share", plan_tickets, dealt_tickets))
     else:
         total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "

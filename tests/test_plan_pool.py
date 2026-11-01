@@ -53,7 +53,7 @@ def plan_entry(**overrides):
     the training/retention fact and an optional region opt-in."""
     entry = {"list_price": 0.5,
              "caps": {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0},
-             "exposure": "no-retention"}
+             "exposure": "no-retention", "family_ref": TWIN}
     entry.update(overrides)
     return entry
 
@@ -354,7 +354,7 @@ class PlanRowCliTests(unittest.TestCase):
         deal_block = printed[printed.index("deal (seed"):
                              printed.index("projection at")]
         self.assertNotIn(GHOST, deal_block)
-        self.assertIn(f"default pick (top of task order): {OTHER}", printed)
+        self.assertIn(f"default pick (top of task order): openrouter/{OTHER}", printed)
 
 
 if __name__ == "__main__":
