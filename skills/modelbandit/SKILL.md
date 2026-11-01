@@ -582,9 +582,10 @@ starts closed everywhere, so this is the interview's only opening move:
   is a plan row its line names the Draw beside the cash price — `default pick
   (top of task order): <model> ($X/ticket; Draw $Y/ticket)`. A pick whose plan
   row is at cap names the family's Metered Twin instead — same model, metered
-  market — with its own cash price and no Draw: `default pick (top of task
-  order): <model> ($X/ticket)`. The projection keeps its dollar total
-  unchanged: plan-aware totals come later.
+  market — and the pick line names the Twin's qualified id: the id shows the
+  market, so a metered pick states no price and no Draw — `default pick (top of
+  task order): <model>`. The projection keeps its dollar total unchanged:
+  plan-aware totals come later.
 
 - **Pick line** — the pick names its market as the provider-qualified id a
   model config dispatches (`<provider>/<model>`): `openrouter/<slug>` for an

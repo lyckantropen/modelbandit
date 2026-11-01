@@ -13,8 +13,8 @@ exactly as before.
 
 The pick line emits the provider-qualified id a model config consumes
 (`openrouter/<slug>`, or the id's own namespace unchanged), and a metered
-pick carries no Draw beside its price: only a Plan route has an Allowance to
-draw down.
+pick carries no price and no Draw beside it: only a Plan route has an
+Allowance to draw down, and the qualified id itself names the market.
 
 The fixtures rank the Twin last behind a third metered row, so a pick that
 lands on the Twin proves the declared link was followed rather than the order
@@ -122,14 +122,18 @@ class PickTwinCliTests(unittest.TestCase):
     def test_an_at_cap_plan_row_names_its_twin_on_the_pick_line(self):
         # The plan row tops the task order, but one ticket's Draw ($0.01)
         # crosses its 5-hour window ($0.005): the pick is the family's
-        # Metered Twin -- same model, its own metered price, no Draw stated.
+        # Metered Twin -- the pick line names its qualified id and nothing
+        # else: the id names the market, so a metered pick states no price
+        # and no Draw.
         self.with_policy({PLAN: plan_entry(five_hour=0.005)})
         printed, _ = self.run_pick(self.twin_world())
         self.assertIn(f"| 1 | {PLAN}", printed)
         self.assertIn(f"| 3 | {TWIN}", printed)
-        self.assertIn("default pick (top of task order): "
-                      f"openrouter/{TWIN} ($0.0144/ticket)", printed)
-        self.assertNotIn("Draw $", printed)
+        pick_line = next(line for line in printed.splitlines()
+                         if line.startswith("default pick (top of task order):"))
+        self.assertEqual(f"default pick (top of task order): openrouter/{TWIN}",
+                         pick_line)
+        self.assertNotIn("$", pick_line)
 
     def test_a_plan_row_within_its_allowance_still_picks_itself(self):
         # The same order without the cap: the plan row is the pick, named in
