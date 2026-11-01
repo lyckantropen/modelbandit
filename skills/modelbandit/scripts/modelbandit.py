@@ -2772,6 +2772,13 @@ def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, i
     return sum(row["tickets"] for row in rows if row["mid"] in free), total
 
 
+def share_line(label: str, tickets: int, dealt: int) -> str:
+    """The deal's share readout: `<label>: N/M tickets (P%)`, a zero
+    denominator reading 0% rather than dividing by nothing."""
+    share = tickets / dealt if dealt else 0.0
+    return f"{label}: {tickets}/{dealt} tickets ({share:.0%})"
+
+
 @dataclasses.dataclass(frozen=True)
 class Decision:
     """An admission verdict: admitted, or excluded with a visible reason.
@@ -4406,7 +4413,6 @@ def main() -> None:
     pick_pool = [(mid, s) for mid, s, *_ in rows_out if decisions[mid].admitted]
 
     pick = None
-    pick_twin = False
     cheapest = None
     floor_total = 0.0
     at_cap_rows = []
@@ -4460,7 +4466,8 @@ def main() -> None:
                 # The pick is one task: it takes the top of the task order
                 # unless its Draw would cross a window's cap, in which case
                 # the family's Metered Twin takes it -- same model, market
-                # flipped plan to metered, its own cash price and no Draw --
+                # flipped plan to metered, named by its qualified id alone
+                # (the id names the market: no price, no Draw) --
                 # and only a link that resolves no eligible row falls through
                 # to the next admitted row, as before (the ledger is the
                 # run's; nothing has been drawn yet at this point).
@@ -4473,7 +4480,6 @@ def main() -> None:
                         twin = pick_pool[k][0]
                         twin_pr = pick_rows[twin][3]
                         pick = (twin, twin_pr[args.pricing_basis], twin_pr)
-                        pick_twin = True
                         floor_total = twin_pr["best"] * args.tickets
                 else:
                     pick = (mid, per, pr)
@@ -4553,10 +4559,6 @@ def main() -> None:
     if pick_draw is not None:
         pick_line += (f" (${pick[1]:.4f}/ticket; "
                       f"Draw ${pick_draw:.2f}/ticket)")
-    elif pick_twin:
-        # A Metered Twin has no Allowance to state: the pick line names what
-        # the task costs in cash, with no Draw beside it.
-        pick_line += f" (${pick[1]:.4f}/ticket)"
     print(pick_line)
     pr_pick = pick[2]
     if pr_pick.get("best_ep") and pr_pick.get("worst_ep") \
@@ -4619,15 +4621,11 @@ def main() -> None:
                   f"{five_hour['drawn'] / five_hour['cap']:.1%} of 5h)")
         free_tickets, dealt_tickets = deal_free_share(
             rows, policy, local=local_ids)
-        free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0
-        print(f"free share: {free_tickets}/{dealt_tickets} tickets "
-              f"({free_share:.0%})")
+        print(share_line("free share", free_tickets, dealt_tickets))
         plan_tickets = sum(row["tickets"] for row in rows
                            if is_plan_route(row["mid"],
                                             local=row["mid"] in local_ids))
-        plan_share = plan_tickets / dealt_tickets if dealt_tickets else 0.0
-        print(f"plan share: {plan_tickets}/{dealt_tickets} tickets "
-              f"({plan_share:.0%})")
+        print(share_line("plan share", plan_tickets, dealt_tickets))
     else:
         total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "
