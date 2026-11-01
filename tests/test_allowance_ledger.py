@@ -612,6 +612,27 @@ class PickEvictionCliTests(unittest.TestCase):
         self.assertIn("no candidate admitted", err)
         self.assertIn(PLAN, err)
 
+    def test_plan_share_counts_absorbed_tickets_metered(self):
+        # The plan row takes 2 tickets (cap 2.0, list price 1.0), the third
+        # crosses, and the Twin absorbs the rest: the readout counts the
+        # Twin's tickets as metered, never plan (issue #63).
+        self.with_policy({PLAN: plan_entry(1.0, five_hour=2.0)})
+        printed, err = self.run_main(self.world(
+            [market_model(), market_model(TWIN)],
+            [(PLAN, 0.4), (TWIN, 0.3), (OTHER, 0.3)]))
+        self.assertIn("plan share: 2/12 tickets (17%)", printed)
+        self.assertIn("free share: 0/12 tickets (0%)", printed)
+
+    def test_plan_share_prints_zero_when_no_plan_tickets_drew(self):
+        # The all-zero case: a plan row at cap with no Twin resolved draws
+        # nothing, and the readout still names the market mix unconditionally
+        # (issue #63).
+        self.with_policy({PLAN: plan_entry(2.0, five_hour=1.0)})
+        printed, err = self.run_main(self.world(
+            [market_model()], [(PLAN, 0.6), (OTHER, 0.4)]))
+        self.assertIn("plan share: 0/12 tickets (0%)", printed)
+        self.assertIn("free share: 0/12 tickets (0%)", printed)
+
 
 if __name__ == "__main__":
     unittest.main()

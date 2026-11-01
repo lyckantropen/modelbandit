@@ -973,6 +973,67 @@ class CliTests(unittest.TestCase):
         self.assertEqual(block.count("allowance draw:"), 1)
         self.assertIn("projection at 12 ticket(s): $0.00", out)
 
+    def test_deal_emits_provider_qualified_ids(self):
+        # Every dealt row id is the provider-qualified form a model config
+        # consumes: `openrouter/` re-added to the normalized OpenRouter slug
+        # (issue #63). Namespaced ids are already qualified.
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
+                                       "--deal", "--seed", "proj")
+        self.assertIsNone(code)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("openrouter/deepseek/deepseek-v4-pro", block)
+        self.assertIn("openrouter/deepseek/deepseek-v4-flash", block)
+        self.assertNotIn("| deepseek/deepseek-v4-pro ", block)
+        self.assertNotIn("| deepseek/deepseek-v4-flash ", block)
+
+    def test_deal_prints_the_plan_share_line_unconditionally(self):
+        # The market mix is always visible: the plan share line joins the
+        # free share line even when no plan tickets drew (issue #63).
+        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
+                                       "--deal", "--seed", "proj")
+        self.assertIsNone(code)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("free share: 0/12 tickets (0%)", block)
+        self.assertIn("plan share: 0/12 tickets (0%)", block)
+
+    def test_deal_plan_share_counts_only_plan_tickets(self):
+        # The plan row takes the whole draw within its Allowance: the readout
+        # names the plan tickets against the total dealt (issue #63).
+        plan = "opencode-go/plan-model"
+        policy = json.loads(json.dumps(POLICY))
+        policy["baseline"] = {"id": "z-ai/glm-5.3"}
+        policy["plans"] = {
+            plan: {
+                "list_price": 0.5,
+                "caps": {"five_hour": 6.0, "weekly": 12.0,
+                         "monthly": 12.0},
+                "exposure": "no-retention",
+                "family_ref": "deepseek/deepseek-v4-pro",
+            },
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+        world = {
+            "models": [make_model("z-ai/glm-5.3", "0.0000002",
+                                   "0.000001", "0")],
+            "classifications": {"as_of": "2026-10-17", "classifications": [
+                {"tag": "content_writing", "usage_share": 1.0,
+                 "models": [{"id": plan, "tag_usage_share": 1.0}]},
+            ]},
+            "rankings": {"data": []},
+            "endpoints": {},
+            "benchmarks": {"data": []},
+        }
+
+        out, err, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "allowance-readout", world=world)
+
+        self.assertIsNone(code, err)
+        block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn("plan share: 12/12 tickets (100%)", block)
+        self.assertIn("free share: 0/12 tickets (0%)", block)
+
     # --- Sensitive shape: the admission seam in the output --------------
 
     def sensitive_policy(self, exposure):
