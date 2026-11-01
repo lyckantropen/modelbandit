@@ -4602,7 +4602,12 @@ def main() -> None:
             per = pr[args.pricing_basis]
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
-            print(f"| {i} | {row['mid']} | {row['share']:.2%} | "
+            out_mid = row["mid"]
+            if not (out_mid.startswith("opencode-go/")
+                    or out_mid.startswith("opencode/")
+                    or out_mid in local_ids):
+                out_mid = f"openrouter/{out_mid}"
+            print(f"| {i} | {out_mid} | {row['share']:.2%} | "
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
                   f"${per:.4f} | ${per * row['tickets']:.4f} |")
@@ -4621,6 +4626,12 @@ def main() -> None:
         free_share = free_tickets / dealt_tickets if dealt_tickets else 0.0
         print(f"free share: {free_tickets}/{dealt_tickets} tickets "
               f"({free_share:.0%})")
+        plan_tickets = sum(row["tickets"] for row in rows
+                           if is_plan_route(row["mid"],
+                                            local=row["mid"] in local_ids))
+        plan_share = plan_tickets / dealt_tickets if dealt_tickets else 0.0
+        print(f"plan share: {plan_tickets}/{dealt_tickets} tickets "
+              f"({plan_share:.0%})")
     else:
         total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "
