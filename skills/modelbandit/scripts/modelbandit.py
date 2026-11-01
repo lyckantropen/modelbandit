@@ -3444,13 +3444,42 @@ def domain_rankings(classif: dict, domains: dict, models: dict,
     return share_by_domain, ranked_by_domain, all_ranked
 
 
-def drift_keys(all_ranked: set, summaries: dict, signals: dict):
+def drift_keys(all_ranked: set, summaries: dict, signals: dict,
+               free_models: dict | None = None):
     """The check's gap/stale derivation, shared by the scope report and the
     anchors scope: ranked mids without a summary; summary and signal keys
-    with no current rank among the top-cut mids."""
-    gaps = sorted(mid for mid in all_ranked if not hint_for(mid, summaries))
+    with no current rank among the top-cut mids.
+
+    A cataloged Free route's ``summary_ref`` is how its family summary
+    reaches it everywhere else in this file — the catalog gate
+    (``_free_summary``) and the table's summary column
+    (``summary_for_candidate``) both resolve it — and an ``opencode/*`` or
+    local id can never prefix-match the family key. So the ref counts here
+    too: a gap is a summary the route does not have, not one spelled in
+    another namespace. Symmetrically, a summary key a ranked route
+    references is not stale — it is still serving. An unresolvable ref
+    silences neither side."""
+    free_models = free_models or {}
+
+    def catalog_ref(mid: str) -> str | None:
+        """The resolvable family summary a ranked cataloged route stands on,
+        gated the way ``summary_for_candidate`` gates it: a paid mid sharing
+        the entry's prefix does not borrow the ref."""
+        match = longest_prefix_match(mid, free_models)
+        if match is None:
+            return None
+        if not (is_free_route(mid) or match[1].get("exposure") == "local"):
+            return None
+        ref = match[1].get("summary_ref")
+        return ref if isinstance(ref, str) and summaries.get(ref) else None
+
+    referenced = {ref for mid in all_ranked
+                  if (ref := catalog_ref(mid)) is not None}
+    gaps = sorted(mid for mid in all_ranked
+                  if not hint_for(mid, summaries) and catalog_ref(mid) is None)
     stale = sorted(k for k in summaries
-                   if not any(mid.startswith(k) for mid in all_ranked))
+                   if k not in referenced
+                   and not any(mid.startswith(k) for mid in all_ranked))
     stale_signals = sorted(k for k in signals
                            if not any(mid.startswith(k) for mid in all_ranked))
     return gaps, stale, stale_signals
@@ -3598,7 +3627,8 @@ def anchor_scope(explicit: list, models: dict, by_canon: dict, classif: dict,
     _, _, all_ranked = domain_rankings(
         classif, domains, models, by_canon, top, config, policy,
         local_ids=(), regime=regime, intent="measured")
-    gaps, stale, stale_signals = drift_keys(all_ranked, summaries, signals)
+    gaps, stale, stale_signals = drift_keys(
+        all_ranked, summaries, signals, policy.get("free_models", {}))
     out, seen = [], set()
     for mid in (*gaps, *stale, *stale_signals):
         if mid not in seen:
@@ -3730,7 +3760,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                         eligibility_pool(share_by_domain[name], models,
                                          table, pool_k, local=local_ids))
 
-    gaps, stale, stale_signals = drift_keys(all_ranked, summaries, signals)
+    gaps, stale, stale_signals = drift_keys(
+        all_ranked, summaries, signals, policy.get("free_models", {}))
 
     # The --scope report also prints two fact lines under each gap/stale
     # bullet — where the model still ranks, and its catalog row with daily

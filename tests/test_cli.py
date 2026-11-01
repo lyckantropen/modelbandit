@@ -345,6 +345,65 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("ghost/unknown-20260101", gaps)  # outside eligibility
         self.assertIn("research cycle due: yes", out)
 
+    def test_a_catalog_summary_ref_closes_its_gap(self):
+        # An opencode/* id can never prefix-match its family summary key,
+        # but it resolves one through summary_ref everywhere else in the
+        # file (catalog gate, table column) — so the drift set counts it
+        # as having a summary too. The route must actually rank for the
+        # assertion to mean anything, hence the ranking run first.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {
+            "opencode/deepseek-v4-pro-free": {
+                "context_length": 65_536, "exposure": "no-retention",
+                "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        ranked, _, rank_code, _ = self.run_cli("--domain", "writing")
+        self.assertIsNone(rank_code)
+        self.assertIn("opencode/deepseek-v4-pro-free", ranked)
+
+        out, _, code, _ = self.run_cli("--check-policy")
+        self.assertIsNone(code)
+        gaps = out[out.index("Research gaps"):out.index("Stale summaries")]
+        self.assertNotIn("opencode/deepseek-v4-pro-free", gaps)
+
+    def test_a_summary_a_ranked_route_references_is_not_stale(self):
+        # Stale is the mirror of the gap: without the summary_ref seam,
+        # "stale/model" would retire here even though a ranked cataloged
+        # route still serves it — the ref is how the family summary
+        # reaches an opencode/* id.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {
+            "opencode/stale-model-free": {
+                "context_length": 65_536, "exposure": "no-retention",
+                "summary_ref": "stale/model"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        out, _, code, _ = self.run_cli("--check-policy")
+        self.assertIsNone(code)
+        stale = out[out.index("Stale summaries"):out.index("Stale signals")]
+        self.assertNotIn("stale/model", stale)
+
+    def test_an_unresolvable_summary_ref_does_not_close_the_gap(self):
+        # Only a ref that resolves silences the drift: this ranked :free
+        # board row's entry points at a summaries key that does not exist.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {
+            "vendor/model": {"context_length": 65_536,
+                             "exposure": "no-retention",
+                             "summary_ref": "missing/family"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        out, _, code, _ = self.run_cli("--check-policy",
+                                       world=self.free_world(("vendor/model:free",
+                                                              0.5)))
+        self.assertIsNone(code)
+        gaps = out[out.index("Research gaps"):out.index("Stale summaries")]
+        self.assertIn("vendor/model:free", gaps)
+
     def test_check_policy_reports_zero_free_share_for_an_eligible_safe_shape(self):
         pol = json.loads(json.dumps(POLICY))
         pol["domains"] = {"writing": ["content_writing"]}
@@ -415,11 +474,20 @@ class CliTests(unittest.TestCase):
                                         local_models=local)
         second, _, code2, _ = self.run_cli("--check-policy", world=world,
                                            local_models=local)
+        table, _, table_code, _ = self.run_cli("--domain", "writing",
+                                               world=world, local_models=local)
 
         self.assertIsNone(code)
         self.assertIsNone(code2)
-        self.assertIn("local-coder", first)
-        self.assertIn("opencode/free-coder", first)
+        self.assertIsNone(table_code)
+        # Both routes resolve their family summary through summary_ref, so
+        # the drift set no longer names them as gaps; the ranking's summary
+        # block names them with that same resolved summary — one ref, one
+        # answer on both surfaces.
+        self.assertIn("local-coder: family summary", table)
+        self.assertIn("opencode/free-coder: family summary", table)
+        self.assertNotIn("local-coder", first[first.index("Research gaps"):
+                                              first.index("Stale summaries")])
         self.assertIn("no history", first)
         self.assertIn("free share 0 for 2 consecutive checks", second)
 
