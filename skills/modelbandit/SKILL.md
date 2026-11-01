@@ -377,12 +377,17 @@ starts closed everywhere, so this is the interview's only opening move:
   verdicts read: `list_price` (the Draw's basis — a non-negative number, where
   `0` is the free-in-plan, zero-Draw serving), `caps` carrying a positive
   `five_hour`, `weekly` and `monthly` dollar figure, `exposure` (`no-retention`
-  or `trains`; `local` contradicts the remote serving identity), and optional
-  `regions` (a list of non-empty strings). It is validated loud at both shared
-  loaders, exactly like `free_models`: an unknown shape, a bad number, a
-  misspelt Exposure or an id the Route kind does not answer `plan` stops the
-  run naming the entry (status 4), never a silent default. The section is its
-  own catalog — `free_models` keeps refusing plan-kind entries in parallel.
+  or `trains`; `local` contradicts the remote serving identity), `family_ref`
+  (the family link: the Twin's Metered serving id, e.g.
+  `deepseek/deepseek-v4-pro` for its `opencode-go/*` plan serving), and
+  optional `regions` (a list of non-empty strings). It is validated loud at
+  both shared loaders, exactly like `free_models`: an unknown shape, a bad
+  number, a misspelt Exposure, an id the Route kind does not answer `plan`, or
+  a `family_ref` that names no Metered route stops the run naming the entry
+  (status 4), never a silent default. Twins are found through that declaration
+  alone — vendor prefixes differ per family, so nothing derives a Twin from an
+  id's shape. The section is its own catalog — `free_models` keeps refusing
+  plan-kind entries in parallel.
 
 - **What popularity is** — revealed preference of real traffic: request share
   per task tag, with token share as the long-form weighting. It is not

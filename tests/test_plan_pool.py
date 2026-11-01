@@ -53,7 +53,7 @@ def plan_entry(**overrides):
     the training/retention fact and an optional region opt-in."""
     entry = {"list_price": 0.5,
              "caps": {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0},
-             "exposure": "no-retention"}
+             "exposure": "no-retention", "family_ref": TWIN}
     entry.update(overrides)
     return entry
 

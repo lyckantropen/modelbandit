@@ -2171,7 +2171,8 @@ PLAN_CAP_WINDOWS = ("five_hour", "weekly", "monthly")
 # a stray `caps` window would silently invent an unauthorized boundary (the
 # crossing arithmetic iterates caps.items()), and a non-numeric one would
 # surface as a TypeError instead of status 4.
-PLAN_ENTRY_FIELDS = ("list_price", "caps", "exposure", "regions")
+PLAN_ENTRY_FIELDS = ("list_price", "caps", "exposure", "regions",
+                     "family_ref")
 
 
 def _is_finite_number(value) -> bool:
@@ -2203,6 +2204,15 @@ def load_plans(policy: dict) -> dict:
     servings it owns. A `list_price` of 0 is not bad: it is the zero-Draw,
     free-in-plan serving whose pricing falls back to the pool-cheapest
     basis (ADR-0006), so the price must be non-negative, not positive.
+
+    Every entry also declares its family link: `family_ref`, the Twin's
+    Metered serving id. Twins find each other through that declaration
+    alone -- vendor prefixes differ per family, so no id shape derives one
+    (the declaration is authoritative, never a slug heuristic). The link
+    resolves when the Route-kind seam answers `market` for it -- a plan,
+    harness, `:free` or unclassifiable id names no Metered row and is
+    refused here, naming the entry, so a broken link never half-loads a
+    catalog and never reaches resolution as a silent default.
     """
     catalog = policy.get("plans", {})
     if not isinstance(catalog, dict):
@@ -2262,6 +2272,19 @@ def load_plans(policy: dict) -> dict:
                        for region in regions)):
             raise SystemExit(
                 f"policy {path}.regions must be a list of non-empty strings")
+        if "family_ref" not in entry:
+            raise SystemExit(
+                f"policy missing required key: {path}.family_ref")
+        family_ref = entry["family_ref"]
+        if not isinstance(family_ref, str) or not family_ref.strip():
+            raise SystemExit(
+                f"policy {path}.family_ref must be a non-empty string")
+        twin_kind = classify_route(family_ref)
+        if twin_kind != "market":
+            raise SystemExit(
+                f"policy {path}.family_ref '{family_ref}': route kind "
+                f"'{twin_kind or 'unknown'}' is not a Metered route "
+                f"(market); the family link names the Twin's Metered serving")
     return catalog
 
 

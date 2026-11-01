@@ -37,14 +37,17 @@ import test_cli  # noqa: E402
 
 
 PLAN_ID = "opencode-go/plan-model"
+TWIN = "deepseek/deepseek-v4-pro"
 
 
 def plan_entry(**overrides):
-    """One plan entry's facts: list price, the three window caps, Exposure."""
+    """One plan entry's facts: list price, the three window caps, Exposure,
+    and the declared family link to the Twin's Metered serving."""
     entry = {
         "list_price": 1.25,
         "caps": {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0},
         "exposure": "no-retention",
+        "family_ref": TWIN,
     }
     entry.update(overrides)
     return entry
@@ -377,6 +380,113 @@ class UnknownPlansKeyStatus4Tests(unittest.TestCase):
         self.matrix.with_plans({PLAN_ID: plan_entry(budget=10.0)})
         self.matrix.assert_status_4_everywhere(
             f"plans.{PLAN_ID}: unknown key 'budget'")
+
+
+class FamilyLinkTests(unittest.TestCase):
+    """load_plans: every entry declares its Twin — the family link is the
+    declaration, never derived, and a link that does not resolve refuses the
+    load naming the entry (status 4), so no half-loaded catalog ships."""
+
+    def load(self, plans):
+        return modelbandit.load_plans({"plans": plans})
+
+    def test_a_declared_family_link_loads_and_stays_available_downstream(self):
+        # Load acceptance only: the loader validates without rewriting the
+        # declared link, so downstream resolution reads the declaration.
+        catalog = {PLAN_ID: plan_entry()}
+        self.assertEqual(self.load(catalog)[PLAN_ID]["family_ref"], TWIN)
+
+    def test_a_missing_family_link_is_refused_naming_the_entry(self):
+        entry = plan_entry()
+        del entry["family_ref"]
+        with self.assertRaisesRegex(
+                SystemExit,
+                rf"policy missing required key: plans\."
+                rf"{re.escape(PLAN_ID)}\.family_ref"):
+            self.load({PLAN_ID: entry})
+
+    def test_a_family_link_must_be_a_non_empty_string(self):
+        # A link is an id, exactly as `summary_ref` is a key: anything else
+        # would resolve to nothing at run time.
+        for ref in ("", "   ", 42, None, [TWIN], {"id": TWIN}):
+            with self.subTest(ref=ref), self.assertRaisesRegex(
+                    SystemExit,
+                    rf"plans\.{re.escape(PLAN_ID)}\.family_ref must be "
+                    rf"a non-empty string"):
+                self.load({PLAN_ID: plan_entry(family_ref=ref)})
+
+    def test_a_family_link_that_is_not_a_metered_route_is_refused_naming_the_entry(self):
+        # The Twin is the family's Metered serving. A plan id, a harness
+        # model, a :free slug or an unclassifiable namespace names no
+        # metered row, so the link cannot resolve: the load stops.
+        for ref in ("opencode-go/other-plan", "opencode/flash",
+                    "vendor/model:free", "vendor/team/model", "nope"):
+            with self.subTest(ref=ref), self.assertRaisesRegex(
+                    SystemExit,
+                    rf"policy plans\.{re.escape(PLAN_ID)}\.family_ref "
+                    rf"'{re.escape(ref)}': route kind '.+' is not a "
+                    rf"Metered route"):
+                self.load({PLAN_ID: plan_entry(family_ref=ref)})
+
+    def test_the_link_is_the_declaration_never_a_slug_derivation(self):
+        # The declared Twin shares no slug with the plan id and is not the
+        # family the plan's own shape would suggest: vendor prefixes differ
+        # per family, so only the declaration may say where the Twin is.
+        plan = "opencode-go/vendor-suite"
+        catalog = {plan: plan_entry(family_ref=TWIN)}
+        self.assertEqual(self.load(catalog)[plan]["family_ref"], TWIN)
+
+    def test_a_refused_link_leaves_nothing_half_loaded(self):
+        catalog = {PLAN_ID: plan_entry(),
+                   "opencode-go/other-plan": plan_entry(family_ref="nope")}
+        with self.assertRaises(SystemExit):
+            self.load(catalog)
+
+
+class FamilyLinkSurfaceTests(unittest.TestCase):
+    """Both shared loaders surface the declared link: one validated catalog."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.policy_path = os.path.join(self._tmp.name, "policy.json")
+        self.catalog = {PLAN_ID: plan_entry(family_ref=TWIN)}
+        policy = json.loads(json.dumps(test_cli.POLICY))
+        policy["plans"] = self.catalog
+        with open(self.policy_path, "w", encoding="utf-8") as f:
+            json.dump(policy, f)
+
+    def test_policy_facts_and_load_policy_bundle_both_surface_the_link(self):
+        facts = modelbandit.policy_facts(self.policy_path)
+        bundle = modelbandit.load_policy_bundle(self.policy_path)
+        for loaded in (facts, bundle):
+            self.assertEqual(loaded["plans"][PLAN_ID]["family_ref"], TWIN)
+
+
+class FamilyLinkStatus4Tests(unittest.TestCase):
+    """A link that does not resolve stops all four entry points with status 4.
+
+    Reuses PlansStatus4MatrixTests' harness and entry-point matrix: the link
+    validates on the shared loaders, so no entry point half-loads a catalog.
+    """
+
+    def setUp(self):
+        self.matrix = PlansStatus4MatrixTests()
+        self.matrix.setUp()
+        self.addCleanup(self.matrix.tearDown)
+
+    def test_an_unresolvable_family_link_stops_every_entry_point_with_status_4(self):
+        self.matrix.with_plans({PLAN_ID: plan_entry(family_ref="opencode-go/other")})
+        self.matrix.assert_status_4_everywhere(
+            f"plans.{PLAN_ID}.family_ref 'opencode-go/other': route kind "
+            f"'plan' is not a Metered route")
+
+    def test_a_missing_family_link_stops_every_entry_point_with_status_4(self):
+        entry = plan_entry()
+        del entry["family_ref"]
+        self.matrix.with_plans({PLAN_ID: entry})
+        self.matrix.assert_status_4_everywhere(
+            f"missing required key: plans.{PLAN_ID}.family_ref")
 
 
 if __name__ == "__main__":

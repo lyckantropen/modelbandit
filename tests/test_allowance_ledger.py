@@ -58,7 +58,7 @@ def plan_entry(list_price=1.0, **windows):
     caps = {"five_hour": 20.0, "weekly": 100.0, "monthly": 200.0}
     caps.update(windows)
     return {"list_price": list_price, "caps": caps,
-            "exposure": "no-retention"}
+            "exposure": "no-retention", "family_ref": TWIN}
 
 
 def ledger(plans, **kw):
