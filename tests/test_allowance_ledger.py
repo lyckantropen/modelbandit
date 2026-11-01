@@ -588,7 +588,8 @@ class PickEvictionCliTests(unittest.TestCase):
         self.assertIn("| 1 | " + PLAN, printed)
         self.assertIn(f"default pick (top of task order): {OTHER}", printed)
         self.assertNotIn(f"default pick (top of task order): {PLAN}", printed)
-        self.assertEqual(self.deal_tickets(printed), {PLAN: "0", OTHER: "12"})
+        self.assertEqual(self.deal_tickets(printed),
+                         {PLAN: "0", "openrouter/" + OTHER: "12"})
 
     def test_a_pick_within_its_allowance_is_still_picked(self):
         # The row is not shunned for being a plan row: within its Allowance
