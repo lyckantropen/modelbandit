@@ -1,16 +1,15 @@
 # modelbandit
 
 Pick OpenRouter models by **domain popularity** and price them **live, per
-endpoint**. An agent skill (`skills/modelbandit/SKILL.md`) whose mechanism is one stdlib-only
-Python script (`skills/modelbandit/scripts/modelbandit.py`) that also runs fine as a plain CLI.
+endpoint**. It is an agent skill (`skills/modelbandit/SKILL.md`) built on one
+stdlib-only Python script (`skills/modelbandit/scripts/modelbandit.py`) that
+also runs as a plain CLI.
 
-The name: a bandit is the CS problem of choosing among options by observed payoff rather than benchmarks — which is this repo's thesis.
-
-Selection is revealed preference — what real traffic actually runs in a domain
-(the OpenRouter Data API task-classification leaderboards and daily token
-rankings) — never benchmarks or taste. Prices are per endpoint because the same
-model can span 20x on output across providers (`deepseek-v4-pro-0813`: $0.40–8.00
-per 1M out). User verdicts annotate the ranking and never reorder it.
+Selection is revealed preference — what real traffic actually runs in a
+domain, never benchmarks or taste. Prices are per endpoint, because the same
+model can span 20x on output across providers (`deepseek-v4-pro-0813`:
+$0.40–8.00 per 1M out). User verdicts annotate the ranking and never reorder
+it.
 
 ## Install
 
@@ -29,8 +28,8 @@ Consumer notes:
 - The installer sends anonymous telemetry; opt out with `DISABLE_TELEMETRY=1`
   or `DO_NOT_TRACK=1`.
 
-Or, from your own checkout — clone anywhere, link from the checkout: a
-location-independent symlink from the skill subtree into your skills directory:
+Or, from your own checkout — a location-independent symlink from the skill
+subtree into your skills directory:
 
 ```bash
 ln -s /path/to/modelbandit/skills/modelbandit ~/.agents/skills/modelbandit
@@ -39,62 +38,58 @@ ln -s /path/to/modelbandit/skills/modelbandit ~/.agents/skills/modelbandit
 Existing installs: re-point the symlink at the new `skills/modelbandit`
 subtree.
 
+Arriving from this project's earlier names (`modelrouter`, `modelbind`,
+`bind.py`)? Every old name has a new one, and old paths and invocations have
+no compatibility fallback — [migrate.md](skills/modelbandit/migrate.md) lists
+what each became and what silently breaks if a step is skipped.
+
 ## Quick start
 
-One command ranks a domain (run it from the repo checkout — `--help` is the
-full reference):
+The natural interface is a prompt. Once the skill is installed, it fires on
+model-choice questions — naming it is enough (in OpenCode, invoke it as
+`@modelbandit`; in other harnesses, say "use the modelbandit skill"):
+
+> I need to write a .md research note on <topic>, roughly 1500 words. Using
+> the modelbandit skill: pick the model for this, weigh the hints and
+> summaries against the ranking, and tell me what the run will cost before
+> starting.
+
+The agent resolves the domain (here: `writing`), orders the candidates by what
+traffic actually runs there, judges task fit from the research summaries, and
+projects the run — `"$0.036 worst / $0.003 floor"` — before you spend
+anything.
+
+Prefer the raw CLI? One command ranks a domain (live data needs an
+[API key](#api-key)):
 
 ```bash
 python3 skills/modelbandit/scripts/modelbandit.py --domain writing
 ```
 
-Live ranking needs an OpenRouter API key — [API key](#api-key) if you don't
-have one yet. Before [Setup](#setup), the header of a first run reads:
+A first run opens with a header — the zone that governed it, the token
+profile, the age of `policy.json`, where the ranking data comes from — then
+the ranking table: share, score, price, context window, Exposure. Every line
+of that first-run output, annotated:
+[docs/cli.md](docs/cli.md#first-run-annotated). `--help` is the full
+reference.
 
-```text
-# Popularity ranking: writing
-
-zone: undeclared (closed)
-zones file: absent (~/.config/modelbandit/zones.json) — undeclared paths are closed
-profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=worst | policy: 0d old | source: OpenRouter (openrouter.ai/rankings), as of 2026-10-26
-
-free quota: unavailable | :free routes excluded by the closed zone
-```
-
-Every line of that output, in order (the blank lines are only spacing):
-
-- `# Popularity ranking: writing` — the subject of the run: this domain's
-  popularity ranking.
-- `zone: undeclared (closed)` — the free-use zone that governed the run. No
-  declared path matched, so the default applied, and the default is
-  **closed**: every remote free route was already out of this run, removed at
-  source rather than listed below with a mark. [Setup](#setup) turns this line
-  into the declaring path and its regime — `zone: <path> (open)`.
-- `zones file: absent (~/.config/modelbandit/zones.json) — undeclared paths are closed`
-  — printed only while the zones file doesn't exist: the exact path to create,
-  and what its absence means ([zones.json](#zonesjson)).
-- `profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=worst | policy: 0d old | source: …`
-  — the run's coordinates: the token profile for the domain (authoring work is
-  output-heavy), the effort rung, the pricing basis, the age of `policy.json`
-  (a fresh checkout reads `0d old`; past about one rankings window the run
-  offers a refresh), and where the ranking data comes from and as of when.
-- `free quota: unavailable | :free routes excluded by the closed zone` — the
-  day's free-request counter, which no run waits on: here it was not reported
-  (the key endpoint did not answer, or the payload carried no counter). The
-  clause after `|` is the zone's doing — with the effective zone `closed`,
-  every remote free route was excluded before this ranking began. With a
-  reachable counter the same line carries the day's figures instead
-  (`used`/`limit`, left, protected reserve).
-
-The table that follows is the ranking itself — share, score, price, context
-window, Exposure. No remote free route appears in it until a path is
-declared: **free routes wait for [Setup](#setup)**.
+One thing surprises a first run: **free routes wait for [Setup](#setup)**.
+Until you declare where free models may run, remote free routes (`:free`,
+`opencode/*`) are excluded at source — visibly, never silently. Paid routes
+work from the first run.
 
 ## Setup
 
 Three things decide what this tool does on your machine: a key to read the
 data, a zones file that says where free models may run, and — per project —
 a secrets file the gate reads.
+
+Check where you stand at any point — offline, read-only, never prints file
+contents:
+
+```bash
+python3 skills/modelbandit/scripts/modelbandit.py --status
+```
 
 ### API key
 
@@ -104,16 +99,15 @@ pricing, the free-request counter — needs one: create it at
 its own, from the `OPENROUTER_API_KEY` environment variable or from an OpenCode
 `auth.json` carrying an `openrouter` entry; there is no flag to pass. Without
 one, the live fetches stop (`OpenRouter Data API needs a key: …`) while the
-offline modes — `--list-domains`, `--assert-allowed`, `--check-secrets` — keep
-working without it.
+offline modes — `--list-domains`, `--assert-allowed`, `--check-secrets`,
+`--status` — keep working. Details: [docs/setup.md](docs/setup.md#api-key).
 
 ### zones.json
 
-Free routes can retain what you send, so where they may run is opt-in, path
-by path. The file lives at the machine's config root —
-`$XDG_CONFIG_HOME/modelbandit/zones.json`, defaulting to
-`~/.config/modelbandit/zones.json` — and a complete, general-purpose one looks
-like this:
+Free routes can retain what you send, so where they may run is opt-in, path by
+path. The file lives at `$XDG_CONFIG_HOME/modelbandit/zones.json`, defaulting
+to `~/.config/modelbandit/zones.json`, and a complete, general-purpose one
+looks like this:
 
 ```json
 {
@@ -126,35 +120,18 @@ like this:
 }
 ```
 
-Read it as: free models may run under `~/work`, except that a route which may
-retain what it sees (`trains`) is excluded on content under `~/work/acme`, and
-no remote free route may run under `~/work/acme/payroll` at all (models served
-on this machine never leave it and stay in). The rules behind the example:
+Read it as: free models may run under `~/work`, except where a route may
+retain what it sees, and never under `~/work/acme/payroll`. The rules in one
+breath: the three regimes order `open < sensitive < closed` and a stricter
+regime dominates every milder one; **anything undeclared is `closed`** — the
+whole file absent included; the longest covering prefix wins; and the regime a
+run works under is the stricter of its working folder's and its origin
+repository's. Full rules, worktrees, and the loud validation:
+[docs/setup.md](docs/setup.md#free-use-zones).
 
-- The three regimes order **`open` < `sensitive` < `closed`**, and a stricter
-  regime dominates every milder one in every dimension — `closed` implies
-  `sensitive`.
-- **Anything undeclared is `closed`** — including the whole file being absent.
-  The longest covering prefix wins, so a nested path can only be stricter than
-  what covers it, and a path the file never names never opens. That is why
-  `"default": "closed"` is spelled out: the file opens what it names, and only
-  that.
-- The regime a run works under is the **stricter of two**: the zone of its
-  working folder and the zone of the repository that folder came from (the
-  parent of `git rev-parse --git-common-dir`). An undeclared worktree root
-  therefore stays closed however open its repository is — declare the
-  worktrees directory to let the origin repository decide.
-- Validation is loud: an unknown key or an unknown regime stops the run naming
-  the offending key or entry, and two entries spelling the same place are
-  refused.
-
-**Paid models are unaffected by this default** — the posture governs where
-free routes may run, not where you may work: zones only ever remove remote
-free routes at source, and paid routes work from the first run. **Free routes
-wait for setup**: until a path is declared, remote free routes are excluded —
-visibly, never silently downgraded. (What a route's own Exposure does to a
-Sensitive shape is the next section's question, not the zone's.) Why the
-default is `closed` rather than an opening one is a recorded decision:
+**Paid models are unaffected by this default** — zones only ever remove remote
+free routes at source; paid routes work from the first run. Why the default is
+`closed` rather than an opening one is a recorded decision:
 [ADR-0003, Fail closed by default](docs/adr/0003-fail-closed-by-default.md).
 
 Rather not hand-write JSON? The skill's **"Set up the free-use zones"**
@@ -163,11 +140,6 @@ send — run on content here?"*, writes the file through `--write-zones`, and
 has you review the result:
 [Set up the free-use zones](skills/modelbandit/SKILL.md#set-up-the-free-use-zones).
 
-Arriving from this project's earlier names? Every old name has a new one, and
-old paths and old invocations have no compatibility fallback —
-[migrate.md](skills/modelbandit/migrate.md) lists what each became and what
-silently breaks if a step is skipped.
-
 ### Secrets file
 
 The Secrets gate reads the project's **`modelbandit.secrets.json`** — at the
@@ -175,151 +147,94 @@ folder's git root when it is in a repository — for project-specific phrases
 and patterns. The file is optional: while it is missing, the built-in
 credential rules alone decide, and the project's own rules are never applied
 until it exists. To create or extend one, run the skill's interview:
-[Set up the secrets file](skills/modelbandit/SKILL.md#set-up-the-secrets-file)
-— it proposes candidate identifiers, records your include/exclude decisions,
-and writes the file through `--write-secrets`.
+[Set up the secrets file](skills/modelbandit/SKILL.md#set-up-the-secrets-file).
+Details: [docs/setup.md](docs/setup.md#secrets-file).
 
 ## Keeping your data safe with free models
 
 Free routes can retain what you send — an unknown free route defaults to
-`trains` — so what happens to your material is decided by five links, in
-order, each pointing at where its rule lives:
+`trains` — so five links decide what happens to your material, in order, each
+pointing at where its rule lives:
 
 1. **Secrets gate — what the material is.** Before any model is chosen, the
    shape's material goes through `--check-secrets` and comes back **safe**,
    **sensitive** or **not certified** — decided once, at collection, never
-   mid-run. The verdict comes from the project's `modelbandit.secrets.json`
-   plus this machine's own facts and the built-in credential rules
-   ([setup interview](skills/modelbandit/SKILL.md#set-up-the-secrets-file)).
-2. **Zones — where free may run.** `zones.json` marks paths `open`,
-   `sensitive` or `closed`; undeclared is `closed`, and a run takes the
-   stricter of its working folder's zone and its origin repository's
-   ([Setup](#setup)).
+   mid-run ([interview](skills/modelbandit/SKILL.md#set-up-the-secrets-file)).
+2. **Zones — where free may run.** `zones.json` marks paths `open`, `sensitive`
+   or `closed`; undeclared is `closed`, and a run takes the stricter of its
+   working folder's zone and its origin repository's ([Setup](#setup)).
 3. **Exposure marks — which routes retain.** Every candidate carries its
    serving route's Exposure — `no-retention`, `trains` or `local` — a property
    of the route, never inferred from price. On a Sensitive shape a `trains`
    route is marked in the table (`exposed (trains)`) and never picked or
    dealt: marked, never hidden
    ([SKILL.md reference](skills/modelbandit/SKILL.md#reference)).
-4. **`--assert-allowed` pre-flight — before launch.** An orchestrator holding
-   a model id — from a plan, another agent, a previous run — asks the zone
-   first: launch only when the pre-flight says `allowed`. An error, a
-   missing field, a malformed response — anything else means do not launch.
-   No policy file, no classification
-   fetch, no network, and it fails closed: with no shape stated it assumes
-   Sensitive and says so ([command](#directly)).
-5. **Closed-zone protocol — what the agent does when a zone blocks.** The
-   rules live in the skill and are deliberately not copied into this README:
+4. **`--assert-allowed` pre-flight — before launch.** An orchestrator holding a
+   model id — from a plan, another agent, a previous run — asks the zone first:
+   launch only when the pre-flight says `allowed`. An error, a missing field, a
+   malformed response — anything else means do not launch. No policy file, no
+   classification fetch, no network, and it fails closed
+   ([command](#directly)).
+5. **Closed-zone protocol — what the agent does when a zone blocks.** The rules
+   live in the skill and are deliberately not copied into this README:
    [Closed-zone protocol](skills/modelbandit/SKILL.md#closed-zone-protocol).
 
 ## Usage
 
-The skill fires on model-choice questions; naming it is enough (it is
-model-invoked). In OpenCode, invoke it as `@modelbandit`; in other
-harnesses, just say "use the modelbandit skill". The natural
-interface is a prompt — two shapes cover most use.
-
-**Single task** — one piece of work, picked and costed before spending:
-
-> I need to write a .md research note on <topic>, roughly 1500 words. Using
-> the modelbandit skill: pick the model for this, weigh the hints and
-> summaries against the ranking, and tell me what the run will cost before
-> starting.
-
-The agent resolves the domain (here: writing), orders candidates by task score
-(popularity priced at effort), judges task fit from the research summaries
-(context window, rung coverage, domain guidance), projects the run ("$0.036
-worst / $0.003 floor") — stepping down the order if the project already runs
-the pick — and flags whether `policy.json` is due for a research refresh.
-
-**A set of tickets** — one binding per domain, whole-run budget:
+Quick start showed the single-task prompt; a whole batch is the other shape
+that covers most use — one binding per domain, whole-run budget:
 
 > Work through the tickets in <directory>. Before starting, use
 > the modelbandit skill to plan model spend: group the tickets by domain
 > (research, writing, coding, orchestration, ops), deal each group's tickets
-> across the popular models (preference-tilted), project the total against a $5
-> budget, and stop and tell me if the projection goes over.
+> across the popular models (preference-tilted), project the total against a
+> $5 budget, and stop and tell me if the projection goes over.
 
-The agent ranks candidates per group, deals the tickets (`--deal`), and reports
-a projection like "30 tickets: $1.08 worst / $0.10 floor" before any spend —
-moving down the ranking or the rung if the budget binds. The deal spreads a
-batch across the popular candidates instead of running one model for
+The agent ranks candidates per group, deals the tickets (`--deal`), and
+reports a projection like "30 tickets: $1.08 worst / $0.10 floor" before any
+spend — moving down the ranking or the rung if the budget binds. The deal
+spreads a batch across the popular candidates instead of running one model for
 everything: eligibility stays popularity, the deal tilts by preference
 (`policy.json` `affinity`), and the seed makes the plan reproducible. One
-`modelbandit.py --deal` invocation deals one ticket shape — a run's domain, effort,
-token profile, `--fit` and `--sensitive` combination — so tickets of the same
-shape share one task-fit assessment: the judgments are made once for the run
-and every ticket the deal draws inherits them. Groups that differ in any of
-the five are separate shapes, each dealt by its own invocation. A Sensitive
-shape (its material trips the Secrets gate — SKILL.md step 1) is dealt with
-`--sensitive`: exposed candidates are excluded from its pick and deal,
-marked in the table, never hidden.
+`modelbandit.py --deal` invocation deals one ticket shape — a run's domain,
+effort, token profile, `--fit` and `--sensitive` combination — so tickets of
+the same shape share one task-fit assessment. A Sensitive shape is dealt with
+`--sensitive`: exposed candidates are excluded from its pick and deal, marked
+in the table, never hidden. Mechanics:
+[SKILL.md](skills/modelbandit/SKILL.md#reference).
+
+One task? See [Quick start](#quick-start).
 
 ## Reference
 
 ### Directly
 
-The mechanism is one stdlib script; `--help` is the full reference.
-
-What domains exist and which leaderboard tags they map to:
+The mechanism is one stdlib script; `--help` is the full reference. The moves
+people reach for daily:
 
 ```bash
+# What domains exist and which leaderboard tags they map to
 python3 skills/modelbandit/scripts/modelbandit.py --list-domains
-```
 
-Rank candidates for a domain, project 30 tickets against a budget:
-
-```bash
+# Rank a domain, project 30 tickets against a $2 budget
 python3 skills/modelbandit/scripts/modelbandit.py --domain writing --tickets 30 --budget 2
-```
 
-Effort intent binds to a rung on the picked model's ladder:
-
-```bash
-python3 skills/modelbandit/scripts/modelbandit.py --domain research --effort thorough
-```
-
-Multi-ticket runs deal the tickets across the popular pool, preference-tilted
-and reproducible per project seed:
-
-```bash
+# Deal 12 tickets across the popular pool, reproducible per project seed
 python3 skills/modelbandit/scripts/modelbandit.py --domain writing --tickets 12 --deal --seed my-project
-```
 
-The agent's task-fit judgments (0-5) compose as score * fit/5:
-
-```bash
-python3 skills/modelbandit/scripts/modelbandit.py --domain writing --fit "z-ai/glm-5.3=4.5,openai/gpt-6-luna=1"
-```
-
-Price at the floor instead of the budget-safe worst endpoint:
-
-```bash
-python3 skills/modelbandit/scripts/modelbandit.py --domain coding --pricing-basis best
-```
-
-Summary drift and policy age:
-
-```bash
-python3 skills/modelbandit/scripts/modelbandit.py --check-policy
-```
-
-Pre-flight a model against the machine's free-use zones
-(`$XDG_CONFIG_HOME/modelbandit/zones.json`) before launching it — the output
-says `allowed: <id>` or `blocked by the free-use zone`, and either verdict
-exits 0, so read the verdict, not the status; no policy file, classification
-or network needed:
-
-```bash
+# Pre-flight a model against the machine's free-use zones before launching it
 python3 skills/modelbandit/scripts/modelbandit.py --assert-allowed --model z-ai/glm-5.4:free --working-dir .
 ```
 
-Policy: [`skills/modelbandit/SKILL.md`](skills/modelbandit/SKILL.md).
+The pre-flight's output says `allowed: <id>` or `blocked by the free-use
+zone` — either verdict exits 0, so read the verdict, not the status. The full
+gallery — effort rungs, `--fit` scores, `--pricing-basis`, `--check-policy` —
+is [in docs/cli.md](docs/cli.md#command-gallery).
 
 ### Data
 
-These endpoints need an OpenRouter API key (`OPENROUTER_API_KEY`, or an OpenCode
-`auth.json` with an `openrouter` entry is picked up automatically):
+These endpoints need an OpenRouter API key (`OPENROUTER_API_KEY`, or an
+OpenCode `auth.json` with an `openrouter` entry is picked up automatically):
 
 - `/api/v1/classifications/task` — task-tag leaderboards with per-tag model shares
 - `/api/v1/datasets/rankings-daily` — daily token usage per model
@@ -327,11 +242,13 @@ These endpoints need an OpenRouter API key (`OPENROUTER_API_KEY`, or an OpenCode
 - per-model `/api/v1/models/{slug}/endpoints` — provider pricing and capacity
 
 `/api/v1/models` is keyless. The model catalogue, leaderboards and endpoint
-details are cached for 24h in `~/.cache/modelbandit/`; the key payload is cached
-for 60 seconds and is never served stale. `--refresh` bypasses either cache.
+details are cached for 24h in `~/.cache/modelbandit/`; the key payload is
+cached for 60 seconds and is never served stale. `--refresh` bypasses either
+cache.
 
-Rankings data is licensed **CC BY 4.0**. When quoting figures outside the tool's
-own output, carry: `Source: OpenRouter (openrouter.ai/rankings), as of <as_of>`.
+Rankings data is licensed **CC BY 4.0**. When quoting figures outside the
+tool's own output, carry: `Source: OpenRouter (openrouter.ai/rankings), as of
+<as_of>`.
 
 ### policy.json
 
@@ -351,3 +268,22 @@ python3 tests/live_smoke.py                  # manual, hits the real API
 ```
 
 CI runs the unit suite only.
+
+## Documentation
+
+Where everything else lives:
+
+- [`skills/modelbandit/SKILL.md`](skills/modelbandit/SKILL.md) — the skill's
+  full policy: the seven steps, the closed-zone protocol, the reference.
+- [`docs/setup.md`](docs/setup.md) — setup in detail: the full zone rules,
+  the secrets file, the `--status` mode.
+- [`docs/cli.md`](docs/cli.md) — the annotated first run and the command
+  gallery.
+- [`GLOSSARY.md`](GLOSSARY.md) and [`docs/adr/`](docs/adr/) — vocabulary and
+  recorded decisions.
+- [`research/README.md`](research/README.md) — how `policy.json`'s summaries
+  are produced and refreshed.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
