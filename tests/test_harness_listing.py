@@ -114,7 +114,7 @@ class HarnessEndpointTests(unittest.TestCase):
 class LoopbackEndpointTests(unittest.TestCase):
     """`local` Exposure's loopback rule: on this machine, or not at all."""
 
-    def test_loopback_endpoints(self):
+    def test_the_loopback_rule_accepts_loopback_endpoints(self):
         for url in ("http://127.0.0.1:1234/v1",
                     "http://localhost:1234/v1",
                     "http://LOCALHOST:1234/v1",
@@ -124,7 +124,7 @@ class LoopbackEndpointTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertTrue(modelbandit.loopback_endpoint(url))
 
-    def test_non_loopback_endpoints(self):
+    def test_the_loopback_rule_rejects_non_loopback_endpoints(self):
         for url in ("http://desktop-rme135a.tail409f29.ts.net:1234/v1",
                     "http://192.168.1.10:1234/v1",
                     "http://10.0.0.5:1234/v1",

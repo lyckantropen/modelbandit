@@ -202,6 +202,21 @@ def probe_local_models(fetcher=None, *, url: str = LOCAL_MODELS_URL
 # narrow facts about an already-listed candidate, never identity.
 
 
+def is_harness_local_id(mid) -> bool:
+    """Whether `mid` is exactly a harness-local id: the harness's own local
+    namespace followed by a non-empty model path — no empty segment, no
+    bare namespace.
+
+    The one spelling of the namespace rule every consumer answers to: the
+    --local-listing filter (what may seed a local candidate), the route
+    classifier (what classifies `local`) and the Local roster loader (what
+    keys an entry). A malformed namespace fails closed everywhere — it is
+    never local, whatever asks."""
+    return isinstance(mid, str) \
+        and mid.startswith(HARNESS_LOCAL_NAMESPACE) \
+        and all(mid[len(HARNESS_LOCAL_NAMESPACE):].split("/"))
+
+
 def parse_local_listing(values) -> set[str] | None:
     """The local universe the harness passed in, or None when it did not.
 
@@ -220,10 +235,7 @@ def parse_local_listing(values) -> set[str] | None:
     for chunk in values:
         for mid in str(chunk).split(","):
             mid = mid.strip()
-            if not mid.startswith(HARNESS_LOCAL_NAMESPACE):
-                continue
-            rest = mid[len(HARNESS_LOCAL_NAMESPACE):]
-            if all(rest.split("/")):
+            if is_harness_local_id(mid):
                 ids.add(mid)
     return ids
 
@@ -393,10 +405,10 @@ def classify_route(mid: str, *, local: bool = False) -> str | None:
     # is a serving fact, so `lmstudio/*` classifies without the serving flag
     # and without any catalogue consulted — checked before norm_id so an
     # `openrouter/lmstudio/*` market slug stays the remote serving it is.
-    # A malformed namespace (no model path, an empty segment) fails closed.
+    # A malformed namespace (no model path, an empty segment) fails closed
+    # — is_harness_local_id is the one spelling of that rule.
     if mid.startswith(HARNESS_LOCAL_NAMESPACE):
-        rest = mid[len(HARNESS_LOCAL_NAMESPACE):]
-        return "local" if all(rest.split("/")) else None
+        return "local" if is_harness_local_id(mid) else None
 
     mid = norm_id(mid)
     if mid.startswith("opencode-go/"):
@@ -1324,7 +1336,7 @@ def load_local_roster(*, path: str | None = None, environ=None) -> dict:
     if not isinstance(entries, dict):
         raise SystemExit("local roster entries must be an object")
     for mid in entries:
-        if not isinstance(mid, str) or classify_route(mid) != "local":
+        if not is_harness_local_id(mid):
             raise SystemExit(
                 f"local roster entries.{mid}: key must be a harness model "
                 f"id ({HARNESS_LOCAL_NAMESPACE}<model>), exactly as the "
@@ -3034,22 +3046,24 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     here, until the policy's exposure-override map — the one source allowed
     to declare `local` outright — states it.
     """
-    def declared(value) -> str | None:
+    def overridden(value) -> str | None:
         # The override map may name `local` itself: the operator's explicit
-        # statement about a serving, the escape hatch for a non-loopback one.
+        # statement about a serving, the escape hatch for a non-loopback one
+        # — still void on an identity whose local label is void.
         if value == "local" and local_label_is_void(mid):
             return None
         return known_exposure(mid, value)
 
-    def stated(value) -> str | None:
-        # Every other source earns `local` only from the serving being
-        # loopback on this machine.
+    def catalog_stated(value) -> str | None:
+        # Every other source — the free and plans catalogs alike — earns
+        # `local` only from the serving being loopback on this machine;
+        # what survives then answers under the override rule.
         if value == "local" and not loopback:
             return None
-        return declared(value)
+        return overridden(value)
 
     match = longest_prefix_match(mid, overrides or {})
-    if match is not None and (value := declared(match[1])) is not None:
+    if match is not None and (value := overridden(match[1])) is not None:
         return value
     if local and loopback:
         return "local"
@@ -3057,7 +3071,7 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
         match = longest_prefix_match(mid, catalog)
         entry = match[1] if match is not None else {}
         if isinstance(entry, dict) and entry.get("exposure") \
-                and (value := stated(entry["exposure"])) is not None:
+                and (value := catalog_stated(entry["exposure"])) is not None:
             return value
     facets = facets_for(mid, local=local)
     default = facets["default_exposure"] if facets else "no-retention"
@@ -3075,6 +3089,17 @@ def known_exposure(mid: str, value: str) -> str:
         raise SystemExit(f"unknown exposure '{value}' for {mid}; "
                          f"known: {', '.join(EXPOSURES)}")
     return value
+
+
+def row_exposure(mid: str, policy: dict, *, local_ids, loopback: bool) -> str:
+    """One ranked table row's Exposure cell: the same precedence admission
+    judged — override map, local serving, catalogs and the loopback fact
+    included — so the column can never disagree with the gate."""
+    return resolve_exposure(mid, free_models=policy["free_models"],
+                            overrides=policy.get("exposure", {}),
+                            local=mid in local_ids,
+                            plans=policy["plans"],
+                            loopback=loopback)
 
 
 def candidate_for(mid: str, policy: dict, *, local: bool = False,
@@ -3363,13 +3388,21 @@ def zone_prohibition(shape: Shape, candidate: Candidate) -> str | None:
 
 
 def filter_zone_candidates(share: dict, models: dict, policy: dict, *,
-                           local_ids, regime: str, intent: str) -> dict:
-    """Drop routes prohibited by this free-use regime before ranking or scoring."""
+                           local_ids, regime: str, intent: str,
+                           loopback: bool = True) -> dict:
+    """Drop routes prohibited by this free-use regime before ranking or scoring.
+
+    The candidate built here carries the run's serving facts — the loopback
+    fact among them — rather than defaulting a local row to loopback: a
+    default that assumes the serving is this machine's fails open against
+    what the run actually observed (ADR-0003, fail closed by default), and
+    the row must read here exactly as the admission that judges it later
+    reads it."""
     zone_shape = Shape(regime=regime)
     return {mid: value for mid, value in share.items()
             if zone_prohibition(zone_shape, candidate_for(
                 mid, policy, local=mid in local_ids, model=models.get(mid),
-                intent=intent)) is None}
+                intent=intent, loopback=loopback)) is None}
 
 
 def zone_gate(shape: Shape, candidate: Candidate) -> Decision:
@@ -4162,11 +4195,12 @@ SOURCE_COLUMNS = {
 def domain_rankings(classif: dict, domains: dict, models: dict,
                     by_canon: dict, top: int, config: PolicyConfig,
                     policy: dict, local_ids=(), regime: str = "open",
-                    intent: str = "measured"):
+                    intent: str = "measured", loopback: bool = True):
     """Per-domain share boards (free candidates merged, zone-filtered — the
     same source the check and a ranking run judge), their top-cut ranked mids
     and the union of ranked mids. The shared input for the check's drift
-    derivation, the --scope facts and the --anchors scope."""
+    derivation, the --scope facts and the --anchors scope. The loopback fact
+    reaches the zone filter so the candidates it builds read as the run's."""
     summaries = policy.get("summaries", {})
     local_ids = set(local_ids)
     share_by_domain: dict[str, dict] = {}
@@ -4182,7 +4216,7 @@ def domain_rankings(classif: dict, domains: dict, models: dict,
                 share.setdefault(mid, 0.0)
         share = filter_zone_candidates(
             share, models, policy, local_ids=local_ids,
-            regime=regime, intent=intent)
+            regime=regime, intent=intent, loopback=loopback)
         share_by_domain[name] = share
         ranked_by_domain[name] = [mid for mid, _ in
                                   sorted(share.items(), key=lambda kv: -kv[1])[:top]]
@@ -4485,7 +4519,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      zone: Zone | None = None,
                      sensitive: bool = False,
                      ranks=None, local_listing=None,
-                     roster=None) -> None:
+                     roster=None, loopback: bool = True) -> None:
     zone = zone if zone is not None else Zone(path=None, regime=regime)
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
@@ -4496,7 +4530,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     # serve and no Free-share signal is claimed for routes that cannot draw.
     share_by_domain, ranked_by_domain, all_ranked = domain_rankings(
         classif, domains, models, by_canon, top, config, policy,
-        local_ids=local_ids, regime=regime, intent=intent)
+        local_ids=local_ids, regime=regime, intent=intent,
+        loopback=loopback)
     # The deal's players: the eligibility top-K of each domain, plus ranked
     # models the user favors (weight > 1) below the cut — the same pool
     # plan_deal admits. Coverage is judged only for those.
@@ -4549,7 +4584,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
             mid for mid in share_by_domain[name]
             if admit(shape, candidate_for(
                 mid, policy, local=mid in local_ids,
-                model=models.get(mid), roster=roster)).admitted)
+                model=models.get(mid), roster=roster,
+                loopback=loopback)).admitted)
         pool = eligibility_pool(share_by_domain[name], models, aff, pool_k,
                                 admitted, local=local_ids)
         free = free_route_ids((mid for mid, _ in pool), policy,
@@ -4630,6 +4666,24 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     print("\n## Signal coverage gaps (opinion elsewhere, silent here)")
     for line in sorted(coverage) or ["— none"]:
         print(f"- {line}")
+
+    # Spec #66 US8's second half: seeded bands the operator has not
+    # confirmed are exporter-stamped `suspected` evidence, and the
+    # diagnostic surface is where the operator meets them. Ids and a count
+    # only — the prose is the roster's own, and this report never restates
+    # it. Reporting changes nothing: a suspected band still binds exactly
+    # like a confirmed one (ADR-0009), it just says so.
+    print("\n## Roster bands awaiting confirmation")
+    unconfirmed = sorted(
+        mid for mid, entry in (roster or {}).items()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("provenance"), dict)
+        and entry["provenance"].get("evidence") == "suspected")
+    if unconfirmed:
+        print(f"- {len(unconfirmed)} suspected (exporter-stamped, "
+              f"unconfirmed): {', '.join(unconfirmed)}")
+    else:
+        print("- — none")
 
     # Rostered ahead of the harness: a local entry no listing id reaches is
     # reported here, never dealt — existence comes from the listing alone,
@@ -5059,8 +5113,9 @@ def main() -> None:
         share, models = merge_free_candidates(
             {}, models, policy["free_models"], policy.get("summaries", {}),
             inheritance=config.free_share_inheritance)
-        # Check-policy sees this invocation's same local candidates as a domain
-        # run, but still performs no persistent policy update.
+        # Check-policy sees this invocation's same local candidates and
+        # serving facts (the loopback condition included) as a domain run,
+        # but still performs no persistent policy update.
         _, models = merge_local_candidates(
             share, models, listed, served_local, policy["free_models"],
             inheritance=config.free_share_inheritance)
@@ -5069,7 +5124,8 @@ def main() -> None:
                          args.effort, args.pricing_basis,
                          config, local_ids=local_ids, regime=regime, zone=zone,
                          sensitive=args.sensitive, ranks=ranks,
-                         local_listing=local_listing, roster=roster)
+                         local_listing=local_listing, roster=roster,
+                         loopback=loopback)
         return
 
     tags = domains[args.domain]
@@ -5111,10 +5167,11 @@ def main() -> None:
     # never enters the candidate set — not ranked, not scored, not dealt, not
     # listed, and its endpoints never priced. The header states the zone that
     # made it absent. Shape-level exclusions (Exposure, Footprint, quota,
-    # catalog) still mark, never hide.
+    # catalog) still mark, never hide. The loopback fact travels with the
+    # candidate so the row the table later marks is the row admission judged.
     share = filter_zone_candidates(
         share, models, policy, local_ids=local_ids,
-        regime=regime, intent=args.effort)
+        regime=regime, intent=args.effort, loopback=loopback)
     missing = set(tags) - known_tags
     if missing:
         print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
@@ -5313,11 +5370,8 @@ def main() -> None:
             # through the same precedence, loopback fact included — a
             # cataloged `local` the endpoint cannot back reads as the
             # exposed fallback it was refused as.
-            exposure = resolve_exposure(mid, free_models=policy["free_models"],
-                                        overrides=policy.get("exposure", {}),
-                                        local=mid in local_ids,
-                                        plans=policy["plans"],
-                                        loopback=loopback)
+            exposure = row_exposure(mid, policy, local_ids=local_ids,
+                                    loopback=loopback)
         else:
             exposure = "—"
         if plan_row:
@@ -5379,11 +5433,8 @@ def main() -> None:
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else None
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = (resolve_exposure(mid, free_models=policy["free_models"],
-                                     overrides=policy.get("exposure", {}),
-                                     local=mid in local_ids,
-                                     plans=policy["plans"],
-                                     loopback=loopback)
+        exposure = (row_exposure(mid, policy, local_ids=local_ids,
+                                 loopback=loopback)
                     if free_details or is_free_route(mid, local=mid in local_ids)
                     else "—")
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "

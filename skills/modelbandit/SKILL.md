@@ -653,7 +653,12 @@ starts closed everywhere, so this is the interview's only opening move:
   exit 0: terminal for Sensitive (the local-only fence is never re-gated),
   a non-sensitive run failing only after the no-load failover preference
   has had its pick. Blocked and substituted outcomes exit 0; a target
-  outside the re-derived deal is a usage error (2).
+  outside the re-derived deal is a usage error (2). The record is the
+  audit trail: modelbandit deliberately stores no substitution state
+  (the draw is seed-deterministic and re-derivable), so the harness
+  records each substitution record the invocation prints in its own run
+  log — substitution, reason, takeover and fence together — and that
+  record is what makes every takeover auditable.
 
 - **Concurrency lane** — the deal's statement of mutual exclusion: one
   strict lane of the local-dealt ticket ids, no two local runs concurrent,

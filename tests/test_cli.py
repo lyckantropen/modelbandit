@@ -1939,6 +1939,61 @@ class CliTests(unittest.TestCase):
         self.assertIn("not in the harness listing; never dealt", section)
         self.assertNotIn(mid, section)
 
+    def test_check_policy_names_unconfirmed_roster_bands(self):
+        # US8's second half: exporter-stamped `suspected` bands are visible
+        # to the operator on the diagnostic surface — a count and the ids
+        # only, never a prose dump — while admission stays untouched (a
+        # suspected band binds exactly like a confirmed one, ADR-0009).
+        mid = self.listed_local_policy()
+        seeded = "lmstudio/qwen/bench-only-30b"
+        stamp = {"source": "local-llm-bench", "dossier": "qwen", "evidence":
+                 "suspected", "seeded": True, "date": "2026-11-15"}
+        self.roster_file({
+            mid: {**self.band_entry(["writing", "coding"], "Servable today."),
+                  "provenance": dict(stamp, dossier="qwen")},
+            seeded: {**self.band_entry(["writing"], "Seeded, unconfirmed."),
+                     "provenance": dict(stamp, dossier="bench-only")},
+        })
+
+        out, _, code, _ = self.run_cli(
+            "--check-policy", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        section = out[out.index("## Roster bands awaiting confirmation"):
+                      out.index("## Local models the harness cannot run")]
+        self.assertIn("2 suspected", section)
+        self.assertIn(mid, section)
+        self.assertIn(seeded, section)
+        # Ids and the count only: the roster's prose never rides along.
+        self.assertNotIn("Servable", section)
+        self.assertNotIn("unconfirmed.", section)
+
+    def test_check_policy_says_none_when_every_band_is_confirmed(self):
+        # The other half of the seam: a roster whose entries the exporter
+        # never stamped (hand-authored, or edited to evidence validated)
+        # reports zero unconfirmed bands rather than a section that reads
+        # as if something were pending.
+        mid = self.listed_local_policy()
+        self.roster_file({
+            mid: self.band_entry(["writing", "coding"], "Hand-confirmed."),
+            **{"lmstudio/qwen/other-30b": {
+                **self.band_entry(["writing"], "Edited after seeding."),
+                "provenance": {"source": "local-llm-bench",
+                               "evidence": "validated", "seeded": True,
+                               "date": "2026-11-15"}}},
+        })
+
+        out, _, code, _ = self.run_cli(
+            "--check-policy", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        section = out[out.index("## Roster bands awaiting confirmation"):
+                      out.index("## Local models the harness cannot run")]
+        self.assertIn("- — none", section)
+        self.assertNotIn("suspected", section)
+
     def test_a_malformed_roster_stops_the_run_with_status_4(self):
         # Loud validation reaches the CLI: a band the loader cannot trust
         # stops the run at the rules/config status with a message naming
@@ -2182,6 +2237,55 @@ class CliTests(unittest.TestCase):
         self.assertIn("exposed (trains)", sensitive_row)
         self.assertNotIn(f"default pick (top of task order): {mid}", sensitive)
         self.assertIn("blocked: no eligible local candidate", sensitive)
+
+    def test_one_loopback_fact_agrees_across_both_surfaces(self):
+        # One serving fact, one answer, whichever surface asks (ADR-0003,
+        # ADR-0008): with the serving off this machine and a Sensitive or
+        # closed regime, `local` Exposure resolves nowhere. The ranking
+        # run marks the row exposed and never serves it; --check-policy
+        # admits it into its diagnostic deal neither — the free-share
+        # measurement record (the one place that surface reports what its
+        # deal admitted) stays unwritten, where the loopback control
+        # writes it. Both halves matter: without the control the fixture
+        # could simply never have measured.
+        mid = self.listed_local_policy()
+        models = {mid: {"id": mid, "context_length": 262_144}}
+        history = os.path.join(self._tmp.name, "cache",
+                               "free-share-history.json")
+
+        for zone_name, argv, zones_kw in (
+                ("sensitive", ["--sensitive"], {"zones_default": "open"}),
+                ("closed", [], {"zones_default": "closed"})):
+            with self.subTest(zone=zone_name):
+                if os.path.exists(history):
+                    os.remove(history)
+                ranked, _, code, _ = self.run_cli(
+                    "--domain", "writing", *argv,
+                    serving_endpoint=self.LAN_ENDPOINT,
+                    local_listing={mid}, local_models=models, **zones_kw)
+                checked, _, check_code, _ = self.run_cli(
+                    "--check-policy", *argv,
+                    serving_endpoint=self.LAN_ENDPOINT,
+                    local_listing={mid}, local_models=models, **zones_kw)
+
+                row = next(ln for ln in ranked.splitlines()
+                           if ln.startswith("|") and f"{mid} |" in ln)
+                self.assertIn("exposed (trains)", row)
+                self.assertNotIn(f"default pick (top of task order): {mid}",
+                                 ranked)
+                self.assertEqual(code, 0)
+                self.assertIsNone(check_code)
+                self.assertFalse(
+                    os.path.exists(history),
+                    "check-policy measured a free share from a deal that "
+                    f"admitted a row the ranking run excludes:\n{checked}")
+
+                self.run_cli("--check-policy", *argv,
+                             local_listing={mid}, local_models=models,
+                             **zones_kw)
+                self.assertTrue(os.path.exists(history),
+                                "the loopback control never measured — the "
+                                "fixture cannot tell the surfaces apart")
 
     def test_the_exposure_override_can_declare_a_non_loopback_local_serving(self):
         # The one escape hatch: the policy's exposure-override map declares
