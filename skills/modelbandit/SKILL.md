@@ -173,6 +173,13 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    Twin. Plan tickets carry their budget facts: the deal prints an
    `allowance draw:` line per plan model and the pick names the Draw beside
    the cash price (see **Plan readout**).
+   Every dealt row also names its **Spare** — the highest-Score eligible
+   candidate that missed the draw (no-load failover preferred on
+   non-sensitive shapes, local candidates only on Sensitive ones) — so a
+   dead model never strands the ticket; when the served model fails,
+   re-run the deal's own flags with `--substitute <model>` to record the
+   Spare taking the ticket over whole, reason and fence restated (see
+   **Spares & substitution**).
    One invocation deals one ticket shape — a run's domain, effort, token
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
@@ -606,6 +613,40 @@ starts closed everywhere, so this is the interview's only opening move:
   tickets, an absorbed ticket counted metered — and
   `local share: N/M tickets (P%)` — this machine's own servings over dealt
   tickets.
+
+- **Spares & substitution** — every dealt row names exactly one **Spare**:
+  the highest-Score eligible candidate that missed the draw, shown in the
+  deal table's `spare` column (`-` on a row that missed the draw itself,
+  `none` plus a `spare:` note when every eligible candidate is dealt) and,
+  on a budgeted `--json` run, in `spares` keyed by provider-qualified id.
+  Score is the table's own fit-adjusted number. On a non-sensitive shape
+  the Spare prefers a candidate that serves without a model load — a cloud
+  route fails over in seconds where a local swap is minutes — Score
+  breaking the ties inside that class, and a load-required local candidate
+  standing only when no no-load candidate missed the draw. On a Sensitive
+  shape the Spare is drawn from local candidates only: the fence is
+  restated, never re-gated, so substitution can never loosen the gate.
+  Substitution is an invocation, not stored state — modelbandit is
+  stateless and the draw is seed-deterministic, so re-run the deal's own
+  flags plus `--substitute <dealt-id>` and the identical deal re-derives;
+  the record replaces the deal readout's tail and the run exits 0:
+  `substitution: <model> -> <spare>`, then indented `reason:` (mechanical —
+  unreachable, out of quota or allowance, unloadable, substituted
+  automatically; or dead-attempt — the harness's explicit failed-attempt
+  report), `takeover:` (the spare restarts the ticket whole) and `fence:`
+  lines — the Spare's band, `sensitive — local-only (ADR 0008)` and the
+  non-leak note on a Sensitive ticket. Reasons distinguish class:
+  `--reason mechanical` (the default — unreachable, out of quota or
+  allowance, unloadable) substitutes automatically; `--reason dead-attempt`
+  carries the harness's explicit failed-attempt report — the only way a
+  quality failure substitutes. `--reason quality` alone is refused
+  (`substitution refused: …`, exit 0, `refused` in `--json`), so taste
+  never reshuffles work mid-run. Exhaustion — no candidate missed the
+  draw — answers `blocked: no eligible … missed the draw for <model> (…)`,
+  exit 0: terminal for Sensitive (the local-only fence is never re-gated),
+  a non-sensitive run failing only after the no-load failover preference
+  has had its pick. Blocked and substituted outcomes exit 0; a target
+  outside the re-derived deal is a usage error (2).
 
 - **Plan readout** — a deal that drew plan tickets prints, per plan row with
   tickets, `allowance draw: <model> $X of $Y (Z% of monthly; W% of 5h)` — `$X`

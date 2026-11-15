@@ -3788,6 +3788,171 @@ def plan_deal(share: dict, models: dict, aff: dict,
             in zip(pool, bases, prefs, draws, counts)]
 
 
+def _spare_candidates(rows: list[dict], *, local=(),
+                      sensitive=False) -> list[dict]:
+    """The rows that missed the draw, in Spare order (issue #71, GLOSSARY
+    "Spare"): the candidates the deal did not deal, best first.
+
+    Two preferences order them, and Score breaks every tie:
+
+    - Sensitive draws spares from local candidates only — the fence is
+      admission's, so the Spare selection re-states it rather than trusting
+      it: a non-local row is never a Sensitive Spare, whatever it scores
+      (the run then finds itself exhausted instead of re-gated).
+    - A non-sensitive ticket prefers a candidate that serves without a model
+      load (a non-local route: failover is seconds, a local swap is minutes),
+      Score breaking ties inside that class; only when no no-load candidate
+      missed the draw does a load-required one stand.
+
+    Score is the deal table's own number — the fit-adjusted task score
+    (standing), the same `score` column the readout prints. The sort is
+    stable, so equal scores fall back to the pool's own order.
+    """
+    local = set(local)
+    missed = [row for row in rows if row["tickets"] == 0]
+    if sensitive:
+        missed = [row for row in missed if row["mid"] in local]
+        missed.sort(key=lambda row: -row["base"])
+        return missed
+    missed.sort(key=lambda row: -row["base"])
+    missed.sort(key=lambda row: 0 if row["mid"] not in local else 1)
+    return missed
+
+
+def spare_for(mid: str, rows: list[dict], *, local=(),
+              sensitive=False) -> str | None:
+    """`mid`'s Spare: the best candidate that missed the draw, never `mid`
+    itself (issue #71). None means exhausted — every eligible candidate is
+    dealt (or, Sensitive, every local one), and the caller reports that
+    instead of reaching outside the fence for a taker."""
+    for row in _spare_candidates(rows, local=local, sensitive=sensitive):
+        if row["mid"] != mid:
+            return row["mid"]
+    return None
+
+
+def deal_spares(rows: list[dict], *, local=(), sensitive=False) -> dict:
+    """One named Spare per dealt model (issue #71): {dealt mid -> spare mid
+    or None}. Rows that missed the draw are spares themselves and key
+    nothing — every dealt row names exactly one candidate from behind the
+    draw, and None records an exhausted deal."""
+    return {row["mid"]: spare_for(row["mid"], rows, local=local,
+                                  sensitive=sensitive)
+            for row in rows if row["tickets"]}
+
+
+def spare_exhaustion_text(mid: str, *, sensitive: bool) -> str:
+    """Why a ticket has no Spare left — the one sentence the readout's
+    `spare:` note and a substitution's `blocked:` report share (issue #71).
+    The parenthetical states the fence: Sensitive stops because the
+    local-only rule is never re-gated, a non-sensitive run only fails after
+    the no-load failover preference has had its pick."""
+    if sensitive:
+        return (f"no eligible local candidate missed the draw for {mid} "
+                "(local-only fence holds; never re-gated)")
+    return (f"no eligible candidate missed the draw for {mid} "
+            "(no-load failover preferred first)")
+
+
+# The reason classes a substitution records (issue #71): mechanical failures
+# substitute automatically; a quality failure substitutes only on the
+# harness's explicit dead-attempt report, so taste never reshuffles work
+# mid-run (`--reason quality` alone is refused before anything is fetched).
+SUBSTITUTION_REASONS = {
+    "mechanical": ("mechanical — unreachable, out of quota or allowance, "
+                   "unloadable (substituted automatically)"),
+    "dead-attempt": ("dead-attempt — the harness's explicit failed-attempt "
+                     "report (quality; substituted on the report alone)"),
+}
+
+
+def band_line(mid: str, band: dict | None) -> str:
+    """The fence's band restatement in a substitution record: the Spare's
+    own Capability band when the roster speaks for it, or the honest
+    absence — the band is the roster's judgment on a local row and never
+    binds a cloud route (GLOSSARY, Capability band)."""
+    if not isinstance(band, dict):
+        return (f"none binds {mid} (the Capability band judges a rostered "
+                "local row only)")
+    domains = ", ".join(str(d) for d in band.get("domains") or []) or "none"
+    parts = [f"domains {domains}"]
+    difficulty = band.get("difficulty")
+    if difficulty:
+        parts.append(f"difficulty ceiling {difficulty}")
+    demand = band.get("context_demand")
+    if _is_plain_int(demand):
+        parts.append(f"context-demand ceiling {demand:,} tokens")
+    return f"{mid}: " + "; ".join(parts)
+
+
+def run_substitution(target: str, reason: str, rows: list[dict], *,
+                     local=(), sensitive: bool = False, roster=None,
+                     zone=None, as_json: bool = False) -> int:
+    """The substitution record (issue #71): the named model's Spare takes
+    the ticket over whole, the fence restated, the reason recorded.
+
+    Stateless by construction — the caller has re-derived the same seeded
+    deal from the same flags, so this only reports the takeover the draw
+    already named; nothing is stored, and the next invocation re-derives
+    again (the AllowanceLedger's ethos: two identical runs answer
+    identically). The fence is re-stated, never re-gated: a Sensitive
+    substitution's Spare came from local candidates only, whatever a
+    cloud route would have scored. A target outside this deal is a usage
+    error (2); exhaustion is a verdict like any other — `blocked:`, exit 0,
+    terminal for Sensitive (never re-gated), reported only after the
+    no-load preference has had its pick elsewhere.
+    """
+    local = set(local)
+    mid = norm_id(target)
+    by_id = {row["mid"]: row for row in rows}
+    if mid not in by_id:
+        print(f"substitute: '{target}' is not part of this deal "
+              "(the same seed and shape flags re-derive the same deal)",
+              file=sys.stderr)
+        return 2
+    frm = qualified_id(mid, local=mid in local)
+    to_mid = spare_for(mid, rows, local=local, sensitive=sensitive)
+    if to_mid is None:
+        text = spare_exhaustion_text(frm, sensitive=sensitive)
+        if as_json:
+            emit_json({"mode": "substitution", "ok": True,
+                       "verdict": "blocked", "from": frm, "to": None,
+                       "reason": text, "sensitive": sensitive,
+                       "zone": zone_payload(zone)})
+        else:
+            print(f"blocked: {text}")
+        return 0
+    to = qualified_id(to_mid, local=to_mid in local)
+    entry = (roster or {}).get(to_mid)
+    band = entry.get("band") if isinstance(entry, dict) else None
+    tickets = by_id[mid]["tickets"]
+    if as_json:
+        emit_json({"mode": "substitution", "ok": True,
+                   "verdict": "substituted", "from": frm, "to": to,
+                   "reason": reason,
+                   "reason_class": ("quality" if reason == "dead-attempt"
+                                    else "automatic"),
+                   "tickets": tickets, "sensitive": sensitive, "band": band,
+                   "non_leak_note": (NON_LEAK_NOTE if sensitive else None),
+                   "zone": zone_payload(zone)})
+        return 0
+    print(f"substitution: {frm} -> {to}")
+    print(f"  reason: {SUBSTITUTION_REASONS[reason]}")
+    if tickets:
+        plural = "" if tickets == 1 else "s"
+        print(f"  takeover: {to} takes the ticket over whole "
+              f"({tickets} ticket{plural})")
+    else:
+        # The substituted model was itself a Spare already holding the
+        # ticket (a second death): the held ticket still moves whole.
+        print(f"  takeover: {to} takes the held ticket over whole")
+    print(f"  fence: band — {band_line(to, band)}")
+    if sensitive:
+        print("  fence: sensitive — local-only (ADR 0008)")
+        print(NON_LEAK_NOTE)
+    return 0
+
+
 def policy_age_days(policy_path: str) -> int | None:
     try:
         return int((time.time() - os.path.getmtime(policy_path)) // 86400)
@@ -4547,8 +4712,9 @@ def main() -> None:
     ap.add_argument("--json", action="store_true",
                     help="answer with one JSON object on stdout instead of "
                          "the human lines: --check-secrets, --assert-allowed, "
-                         "--status, and a budgeted ranking run (--domain with "
-                         "--budget); a usage error anywhere else. `ok` is "
+                         "--status, a budgeted ranking run (--domain with "
+                         "--budget), and a substitution (--deal "
+                         "--substitute); a usage error anywhere else. `ok` is "
                          "always true — the status says the tool ran, the "
                          "object says what's true. The ranking table itself "
                          "is never JSON-ized.")
@@ -4583,6 +4749,21 @@ def main() -> None:
     ap.add_argument("--deal", action="store_true",
                     help="deal tickets across the eligible pool by seeded draw "
                          "from the preference-blended distribution")
+    ap.add_argument("--substitute", default=None, metavar="ID",
+                    help="with --deal: re-derive this seeded deal and print "
+                         "the substitution record — the named model's Spare "
+                         "takes the ticket over whole, fence restated, "
+                         "reason recorded (exit 0); pass the same seed and "
+                         "shape flags the deal ran with")
+    ap.add_argument("--reason", default=None,
+                    choices=("mechanical", "quality", "dead-attempt"),
+                    help="with --substitute: why the model failed — "
+                         "'mechanical' (unreachable, out of quota or "
+                         "allowance, unloadable; the default, substitutes "
+                         "automatically), 'dead-attempt' (the harness's "
+                         "explicit failed-attempt report — the only way a "
+                         "quality failure substitutes), or 'quality' alone, "
+                         "which is refused")
     ap.add_argument("--seed", default="modelbandit",
                     help="deal seed for reproducibility; use the project name")
     ap.add_argument("--fit", default=None, metavar="SPEC",
@@ -4629,11 +4810,22 @@ def main() -> None:
     if args.plain and args.sensitive:
         ap.error("--plain and --sensitive contradict; state one shape")
 
+    # Same rule for the substitution flags: a flag silently ignored is a
+    # rule the user believes in. `--substitute` lives in the deal's shape —
+    # it re-derives the seeded deal — and `--reason` names only why.
+    if args.reason is not None and not args.substitute:
+        ap.error("--reason is read only by --substitute")
+    if args.substitute is not None and not args.deal:
+        ap.error("--substitute is read only by --deal")
+
     # --json answers the verdict modes only; the ranking table is never
     # JSON-ized (issue #41), so anywhere else the flag would be silently
-    # ignored — it stops as the usage error it is.
+    # ignored — it stops as the usage error it is. A substitution answers
+    # with its own record (issue #71), so it counts as served beside the
+    # budgeted ranking run.
     if args.json:
-        domain_served = bool(args.domain) and args.budget is not None
+        domain_served = bool(args.domain) and (args.budget is not None
+                                               or args.substitute is not None)
         served = (int(args.check_secrets) + int(args.assert_allowed)
                   + int(args.status) + int(domain_served))
         riders = (args.write_secrets or args.write_zones or args.list_domains
@@ -4642,8 +4834,26 @@ def main() -> None:
                   or (args.domain and not domain_served))
         if served != 1 or riders:
             ap.error("--json is read only by --check-secrets, --assert-allowed, "
-                     "--status and a budgeted ranking run (--domain with "
-                     "--budget), each on its own")
+                     "--status, a budgeted ranking run (--domain with "
+                     "--budget) and a substitution (--deal --substitute), "
+                     "each on its own")
+
+    if args.reason == "quality":
+        # The quality class refuses at the flag (issue #71): taste never
+        # reshuffles work mid-run — a quality failure substitutes only on
+        # the harness's explicit dead-attempt report. The refusal is this
+        # run's verdict, like any other: it prints (or answers --json) and
+        # exits 0, before anything is fetched.
+        refusal = ("quality failure substitutes only on the harness's "
+                   "explicit dead-attempt report "
+                   "(state --reason dead-attempt)")
+        if args.json:
+            emit_json({"mode": "substitution", "ok": True,
+                       "verdict": "refused", "substitute": args.substitute,
+                       "reason": refusal, "zone": None})
+        else:
+            print(f"substitution refused: {refusal}")
+        raise SystemExit(0)
 
     if args.assert_allowed:
         # The pre-flight reads the zone and the local policy, never the board:
@@ -5190,12 +5400,29 @@ def main() -> None:
         rows = plan_deal(share, models, aff, parameters=deal_parameters,
                          local=local_ids, plans=policy["plans"],
                          ledger=ledger)
+        if args.substitute is not None:
+            # The substitution record is this invocation's whole answer
+            # (issue #71): the same seed and shape flags above re-derived
+            # the identical deal, so the Spare the record names is the one
+            # the original readout named — and the record, not the deal
+            # table, is what prints (exit 0 for substituted and blocked
+            # alike).
+            raise SystemExit(run_substitution(
+                args.substitute, args.reason or "mechanical", rows,
+                local=local_ids, sensitive=sensitive_shape(shape),
+                roster=roster, zone=zone, as_json=args.json))
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
-        print("| # | model | pop% | score | pref | draw% | tickets | $/ticket | "
-              "subtotal |")
-        print("|---|---|---|---|---|---|---|---|---|")
+        # Every dealt row names its Spare (issue #71): the best candidate
+        # that missed the draw, no-load preferred off-Sensitive, local-only
+        # on it. `-` marks the rows that missed the draw themselves; `none`
+        # (and a `spare:` note below) records a dealt row with no Spare left.
+        spares = deal_spares(rows, local=local_ids,
+                             sensitive=sensitive_shape(shape))
+        print("| # | model | pop% | score | pref | draw% | tickets | spare | "
+              "$/ticket | subtotal |")
+        print("|---|---|---|---|---|---|---|---|---|---|")
         total = floor_total = 0.0
         for i, row in enumerate(rows, 1):
             pr = priced.get(row["mid"])
@@ -5208,10 +5435,23 @@ def main() -> None:
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
             out_mid = qualified_id(row["mid"], local=row["mid"] in local_ids)
+            spare_mid = spares.get(row["mid"])
+            spare_cell = ("-" if not row["tickets"] else
+                          (qualified_id(spare_mid,
+                                        local=spare_mid in local_ids)
+                           if spare_mid else "none"))
             print(f"| {i} | {out_mid} | {row['share']:.2%} | "
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
-                  f"${per:.4f} | ${per * row['tickets']:.4f} |")
+                  f"{spare_cell} | ${per:.4f} | ${per * row['tickets']:.4f} |")
+        for row in rows:
+            # An exhausted dealt row says so where the Spare column reads
+            # `none`: a substitution would report blocked, and the fence
+            # that keeps it from reaching outside the pool stands either way.
+            if row["tickets"] and spares.get(row["mid"]) is None:
+                print("spare: " + spare_exhaustion_text(
+                    qualified_id(row["mid"], local=row["mid"] in local_ids),
+                    sensitive=sensitive_shape(shape)))
         for row in rows:
             mid = row["mid"]
             readout = ledger.readout(mid)
@@ -5266,6 +5506,14 @@ def main() -> None:
                        "zone": zone_payload(zone)}
             if local_share is not None:
                 payload["local_share"] = local_share
+                # The Spares twin of the readout's spare column (issue #71):
+                # one entry per dealt model, keyed by provider-qualified id;
+                # null records the exhausted row the column shows as `none`.
+                payload["spares"] = {
+                    qualified_id(mid, local=mid in local_ids):
+                        (qualified_id(spare, local=spare in local_ids)
+                         if spare else None)
+                    for mid, spare in spares.items()}
             emit_json(payload)
         else:
             verdict = "under" if not over_budget else "OVER"

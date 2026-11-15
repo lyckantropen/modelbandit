@@ -286,5 +286,39 @@ class MarketResolutionWordingTests(unittest.TestCase):
         self.assertNotIn("metered to plan", TEXT)
 
 
+class SparesWordingTests(unittest.TestCase):
+    """Issue #71: the skill tells the spares/substitution truth — a named
+    Spare per dealt row, the no-load/local-only preferences, the invocation
+    shape (`--substitute`, the reason classes), the fenced record and the
+    exit-0 exhaustion. Every claim pinned here is honoured by the code on
+    this branch."""
+
+    def test_the_deal_step_names_the_spare_and_the_substitution_invocation(self):
+        body = step(5, "Pick — or deal.")
+        self.assertIn("**Spare**", body)
+        self.assertIn("highest-Score eligible", body)
+        self.assertIn("--substitute <model>", body)
+        self.assertIn("no-load failover preferred", body)
+
+    def test_the_reference_carries_the_record_shape_and_the_reason_classes(self):
+        body = section("Reference")
+        self.assertIn("**Spares & substitution**", body)
+        self.assertIn("substitution: <model> -> <spare>", body)
+        self.assertIn("restarts the ticket whole", body)
+        self.assertIn("--reason dead-attempt", body)
+        self.assertIn("substitution refused", body)
+        self.assertIn("`spare` column", body)
+
+    def test_the_reference_states_the_fence_and_the_exit_zero_exhaustion(self):
+        body = section("Reference")
+        self.assertIn("never re-gated", body)
+        self.assertIn("sensitive — local-only (ADR 0008)", body)
+        self.assertIn("Blocked and substituted outcomes exit 0", body)
+        self.assertIn("no-load failover preference", body)
+        # The stateless invocation contract: no stored state, same seed.
+        self.assertIn("Substitution is an invocation, not stored state", body)
+        self.assertIn("seed-deterministic", body)
+
+
 if __name__ == "__main__":
     unittest.main()

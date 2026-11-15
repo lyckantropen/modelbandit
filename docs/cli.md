@@ -78,6 +78,17 @@ and reproducible per project seed:
 python3 skills/modelbandit/scripts/modelbandit.py --domain writing --tickets 12 --deal --seed my-project
 ```
 
+When a dealt model cannot serve, record its Spare taking the ticket over
+whole — re-run the deal's own flags plus `--substitute`, so the same seed
+re-derives the same deal. `--reason mechanical` (the default) covers
+unreachable, out-of-quota or unloadable; a quality failure substitutes only
+on an explicit dead-attempt report (`--reason dead-attempt`). Either way the
+record — takeover, reason, restated fence — exits 0:
+
+```bash
+python3 skills/modelbandit/scripts/modelbandit.py --domain writing --tickets 12 --deal --seed my-project --substitute openrouter/deepseek/deepseek-v4-pro-0813 --reason mechanical
+```
+
 The agent's task-fit judgments (0-5) compose as score * fit/5:
 
 ```bash
