@@ -2301,6 +2301,12 @@ class DealParameters:
     tickets: int
     fit_adjusted_task_scores: dict | None = None
     admitted: frozenset | None = None
+    # The standing favor (issue #69): {mid -> multiplier} folded into the
+    # draw's pref beside the hint affinity — keyed by the caller's local
+    # rows, so only a row the admission seam already passed (band gate
+    # included) can be favored. None means no favor; the draw is the
+    # affinity table alone.
+    favor: dict | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3155,6 +3161,16 @@ def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, i
     return sum(row["tickets"] for row in rows if row["mid"] in free), total
 
 
+def deal_local_share(rows: list[dict], *, local=()) -> tuple[int, int]:
+    """Count tickets dealt to this machine's own servings — the harness's
+    local rows (issue #69): how much of the deal stays on this hardware.
+    The set is the run's local facts alone; no id shape is re-judged here,
+    so a remote route can never be counted local."""
+    local = set(local)
+    total = sum(row["tickets"] for row in rows)
+    return sum(row["tickets"] for row in rows if row["mid"] in local), total
+
+
 def share_line(label: str, tickets: int, dealt: int) -> str:
     """The deal's share readout: `<label>: N/M tickets (P%)`, a zero
     denominator reading 0% rather than dividing by nothing."""
@@ -3661,8 +3677,14 @@ def plan_deal(share: dict, models: dict, aff: dict,
 
     where every pool member's base is its fit-adjusted task score, supplied
     for the whole pool by the caller (blend_bases). Deterministic in seed.
-    The pool is admission-filtered before the draw (parameters.admitted), so
-    the deal and the ranked table agree about what may serve the shape.
+    The standing favor (issue #69) multiplies into a row's pref —
+    ``pref = weight_for(mid, aff) * favor.get(mid, 1.0)`` — so the caller's
+    band-passing local rows tilt the draw through the same affinity
+    machinery that reads the hints, while the seeded draw still decides
+    which tickets land where. The favor moves preference alone: eligibility
+    (the pool), the bases, Nominal-floor pricing and the ledger never read
+    it. The pool is admission-filtered before the draw (parameters.admitted),
+    so the deal and the ranked table agree about what may serve the shape.
     Plan rows the plans catalog prices draw here too; the second brace keeps
     an uncataloged plan id out whatever reaches it.
 
@@ -3699,7 +3721,9 @@ def plan_deal(share: dict, models: dict, aff: dict,
     if not pool:
         return []
     bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
-    prefs = [weight_for(mid, aff) for mid, _ in pool]
+    favor = parameters.favor or {}
+    prefs = [weight_for(mid, aff) * favor.get(mid, 1.0)
+             for mid, _ in pool]
     pt, at = sum(bases) or 1.0, sum(prefs) or 1.0
     draws = [(1 - blend_weight) * (p / pt) + blend_weight * (a / at)
              for p, a in zip(bases, prefs)]
@@ -5137,12 +5161,23 @@ def main() -> None:
         print(f"cheapest shown: {cheapest[0]} at ${cheapest[1]:.4f}/ticket "
               f"(budget pressure moves within the ranking, by price)")
 
+    local_share = None
     if args.deal:
         # Every pool member's base is the table's own scoring number: the
         # fit-adjusted task score, at score scale for the whole pool.
         fit_adjusted_task_scores = {
             mid: standing(s, eff_costs[mid], fit_for(mid, fit_map), alpha, beta)
             for mid, s in pool}
+        # The standing favor (issue #69): an admitted local row — the band
+        # gate has already passed it — tilts the draw's pref by the
+        # affinity factors' validated favor, so a qualifying shape
+        # genuinely deals local hardware while the seeded draw still
+        # chooses the row. Cloud rows are never keyed here, so score,
+        # Nominal floor, family-share inheritance and paid-pool balance
+        # stand untouched; a shape that loses its locals at the band gate
+        # has no admitted row to favor.
+        favor = {mid: config.factors["favor_validated"]
+                 for mid in local_ids if mid in admitted}
         deal_parameters = DealParameters(
             blend_weight=config.deal.blend_weight,
             top_k=config.deal.eligibility_top_k,
@@ -5150,6 +5185,7 @@ def main() -> None:
             tickets=args.tickets,
             fit_adjusted_task_scores=fit_adjusted_task_scores,
             admitted=admitted,
+            favor=favor,
         )
         rows = plan_deal(share, models, aff, parameters=deal_parameters,
                          local=local_ids, plans=policy["plans"],
@@ -5193,6 +5229,14 @@ def main() -> None:
                            if is_plan_route(row["mid"],
                                             local=row["mid"] in local_ids))
         print(share_line("plan share", plan_tickets, dealt_tickets))
+        # The local share (issue #69): the third readout line, beside free
+        # and plan — how many of the batch's tickets never leave the
+        # machine. It always prints; zero is an answer, not an absence.
+        local_tickets, local_dealt = deal_local_share(rows, local=local_ids)
+        print(share_line("local share", local_tickets, local_dealt))
+        local_share = {"tickets": local_tickets, "dealt": local_dealt,
+                       "percent": (100.0 * local_tickets / local_dealt
+                                   if local_dealt else 0.0)}
         if sensitive_shape(shape):
             # Standing contract marker for a deal touching Sensitive
             # material (ADR 0008): the harness applies it at prompt time —
@@ -5208,8 +5252,10 @@ def main() -> None:
         if args.json:
             # The budget verdict is this run's answer, in place of the human
             # line; the ranking table above stays line output (never
-            # JSON-ized — issue #41).
-            emit_json({"mode": "budget", "ok": True,
+            # JSON-ized — issue #41). A dealt run also carries its local
+            # share (issue #69): the machine-readable twin of the printed
+            # readout's third share line, present only when a deal ran.
+            payload = {"mode": "budget", "ok": True,
                        "over_budget": over_budget,
                        "budget": args.budget,
                        "projection": {"tickets": args.tickets,
@@ -5217,7 +5263,10 @@ def main() -> None:
                                       "floor": floor_total,
                                       "baseline": (base_per * args.tickets
                                                    if base_per else None)},
-                       "zone": zone_payload(zone)})
+                       "zone": zone_payload(zone)}
+            if local_share is not None:
+                payload["local_share"] = local_share
+            emit_json(payload)
         else:
             verdict = "under" if not over_budget else "OVER"
             print(f"budget: ${args.budget:.2f} -> {verdict}")
