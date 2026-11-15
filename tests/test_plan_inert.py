@@ -145,13 +145,15 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
 
     def test_a_locally_served_plan_shaped_id_assembles_as_local(self):
         # The local serving fact outranks the id shape at the seam: a machine
-        # that serves an `opencode-go/*`-shaped id offers a LOCAL candidate,
-        # never a plan one — even when a plans entry catalogues the id.
+        # whose harness lists an `opencode-go/*`-shaped id offers a LOCAL
+        # candidate, never a plan one — even when a plans entry catalogues
+        # the id.
+        listed = [PLAN]
         served = {PLAN: {"id": PLAN, "context_length": 8192}}
         free_models = {PLAN: {"context_length": 8192, "exposure": "local",
                               "summary_ref": "s"}}
         share, models = modelbandit.merge_local_candidates(
-            {}, {}, served, free_models)
+            {}, {}, listed, served, free_models)
         self.assertIn(PLAN, share)
         facts = modelbandit.candidate_for(
             PLAN, {"free_models": free_models, "summaries": {"s": "x"},
@@ -162,11 +164,11 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
         self.assertEqual(facts.exposure, "local")
         self.assertEqual(modelbandit.classify_route(PLAN, local=True), "local")
 
-    def test_a_served_plan_shaped_id_without_a_local_entry_is_ignored(self):
+    def test_a_listed_plan_shaped_id_without_a_local_entry_is_ignored(self):
         # In service the catalog cannot carry a plan prefix (the load refuses
-        # it), so a served plan-shaped id matches no entry and is ignored.
-        served = {PLAN: {"id": PLAN, "context_length": 8192}}
-        share, models = modelbandit.merge_local_candidates({}, {}, served, {})
+        # it), so a listed plan-shaped id matches no entry and is ignored.
+        listed = [PLAN]
+        share, models = modelbandit.merge_local_candidates({}, {}, listed, {}, {})
         self.assertNotIn(PLAN, share)
         self.assertNotIn(PLAN, models)
 

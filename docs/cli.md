@@ -84,6 +84,15 @@ The agent's task-fit judgments (0-5) compose as score * fit/5:
 python3 skills/modelbandit/scripts/modelbandit.py --domain writing --fit "z-ai/glm-5.3=4.5,openai/gpt-6-luna=1"
 ```
 
+Local candidates come from the harness listing — pass the `lmstudio/*`
+ids exactly as the harness dispatches them (e.g. from `opencode models`),
+comma-separated and repeatable; without the flag the run claims no local
+candidate:
+
+```bash
+python3 skills/modelbandit/scripts/modelbandit.py --domain writing --local-listing "lmstudio/qwen/qwen3.6-35b-a3b,lmstudio/zai-org/glm-4.7-flash"
+```
+
 Price at the floor instead of the budget-safe worst endpoint:
 
 ```bash

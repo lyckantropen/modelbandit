@@ -29,10 +29,19 @@ import sys
 import tempfile
 import textwrap
 import time
+import urllib.parse
 import urllib.request
 
 MODELS_URL = "https://openrouter.ai/api/v1/models"
-LOCAL_MODELS_URL = "http://127.0.0.1:1234/v1/models"
+# The harness's local serving endpoint: LM Studio's own loopback default,
+# overridden for this run by the baseURL the harness config declares.
+DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:1234/v1"
+LOCAL_MODELS_URL = DEFAULT_LOCAL_ENDPOINT + "/models"
+# The harness's local namespace — the ids it dispatches local models by
+# (`lmstudio/<model>`), passed into the run as the listing that decides
+# which local candidates exist. One spelling, shared by the classifier and
+# the --local-listing filter.
+HARNESS_LOCAL_NAMESPACE = "lmstudio/"
 CLASS_URL = "https://openrouter.ai/api/v1/classifications/task?window=7d"
 RANK_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 KEY_URL = "https://openrouter.ai/api/v1/key"
@@ -143,20 +152,28 @@ def fetch_json(url: str, cache_name: str, *, auth: bool, refresh: bool,
     return data
 
 
-def probe_local_models(fetcher=None) -> dict[str, dict]:
-    """Discover LM Studio models for this run; failures are silent.
+def probe_local_models(fetcher=None, *, url: str = LOCAL_MODELS_URL
+                       ) -> dict[str, dict]:
+    """Probe the serving endpoint for its live models; failures are silent.
 
-    This is deliberately not cached: the local server and its loaded models can
-    change between invocations. ``fetcher`` accepts the URL and returns decoded
-    JSON, keeping the probe deterministic and network-free in unit tests.
+    Demoted to two narrow facts about candidates the harness listing
+    already made real: the context window the Context gate is judged
+    against, and whether a listed id is being served right now. It never
+    establishes existence or identity — the harness's listing does — so a
+    missing server has no effect on the candidate set or the readout.
+
+    This is deliberately not cached: the local server and its loaded models
+    can change between invocations. ``fetcher`` accepts the URL and returns
+    decoded JSON, keeping the probe deterministic and network-free in unit
+    tests.
     """
     if fetcher is None:
-        def fetcher(url):
-            with urllib.request.urlopen(url, timeout=1) as response:
+        def fetcher(fetch_url):
+            with urllib.request.urlopen(fetch_url, timeout=1) as response:
                 return json.load(response)
 
     try:
-        payload = fetcher(LOCAL_MODELS_URL)
+        payload = fetcher(url)
     except Exception:
         return {}
     rows = payload.get("data", []) if isinstance(payload, dict) else payload
@@ -175,6 +192,146 @@ def probe_local_models(fetcher=None) -> dict[str, dict]:
             model["context_length"] = window
         served[mid] = model
     return served
+
+
+# --- Harness listing seam --------------------------------------------------
+# What local models exist belongs to the harness: this run's local universe
+# is passed in with --local-listing (the harness's own `opencode models`
+# output), and the serving endpoint is read from the harness's config. The
+# script never discovers a local model on its own — the probe below is two
+# narrow facts about an already-listed candidate, never identity.
+
+
+def parse_local_listing(values) -> set[str] | None:
+    """The local universe the harness passed in, or None when it did not.
+
+    Each --local-listing value may carry comma-separated ids. Absent means
+    unknown — the harness never spoke, so nothing joins and nothing is
+    judged unrunnable — while a flag that states no local id is an empty
+    universe the report may judge. Only the harness's local namespace
+    survives the filter: a foreign id can never seed a local candidate, so
+    what joins is exactly what the harness dispatches as `lmstudio/*`.
+    """
+    if not values:
+        return None
+    if isinstance(values, str):
+        values = [values]
+    ids = set()
+    for chunk in values:
+        for mid in str(chunk).split(","):
+            mid = mid.strip()
+            if not mid.startswith(HARNESS_LOCAL_NAMESPACE):
+                continue
+            rest = mid[len(HARNESS_LOCAL_NAMESPACE):]
+            if all(rest.split("/")):
+                ids.add(mid)
+    return ids
+
+
+def _strip_json_comments(text: str) -> str:
+    """JSONC to JSON: drop `//` and `/* */` comments outside string literals,
+    so a `//` inside a URL value survives while the harness's comments do
+    not."""
+    out = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def read_local_endpoint(path: str) -> str | None:
+    """The harness local provider's baseURL from one config file, or None.
+
+    Any unreadable or unparseable file says nothing rather than failing the
+    run: the endpoint is one fact, and its absence falls back to the next
+    config source and finally the loopback default.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            config = json.loads(_strip_json_comments(f.read()))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    provider = config.get("provider")
+    entry = provider.get("lmstudio") if isinstance(provider, dict) else None
+    options = entry.get("options") if isinstance(entry, dict) else None
+    base = options.get("baseURL") if isinstance(options, dict) else None
+    return base.strip() if isinstance(base, str) and base.strip() else None
+
+
+def harness_config_paths(cwd: str | None = None) -> list[str]:
+    """Where the harness declares its providers: the project config first,
+    then the user config (XDG_CONFIG_HOME when the machine states it, else
+    `~/.config`), both spellings the harness accepts."""
+    cwd = os.getcwd() if cwd is None else cwd
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    root = os.path.join(config_home, "opencode")
+    return [os.path.join(cwd, "opencode.json"),
+            os.path.join(cwd, "opencode.jsonc"),
+            os.path.join(root, "opencode.json"),
+            os.path.join(root, "opencode.jsonc")]
+
+
+def harness_serving_endpoint(paths: list[str] | None = None) -> str:
+    """The baseURL the harness's local provider serves on — the endpoint
+    `local` Exposure's loopback rule judges — defaulting to LM Studio's
+    loopback binding when no config declares one."""
+    for path in harness_config_paths() if paths is None else paths:
+        if (base := read_local_endpoint(path)) is not None:
+            return base
+    return DEFAULT_LOCAL_ENDPOINT
+
+
+def loopback_endpoint(url: str | None) -> bool:
+    """Whether the serving endpoint is loopback on this machine — the one
+    condition `local` Exposure resolves under. Anything unparseable, empty,
+    or bound elsewhere (a LAN or tailnet name, `0.0.0.0`) is not loopback,
+    so a non-local serving fails closed until the policy's exposure-override
+    map declares it."""
+    if not isinstance(url, str) or not url:
+        return False
+    try:
+        host = urllib.parse.urlparse(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return host == "localhost" or host == "::1" or host.startswith("127.")
+
+
+def models_url(endpoint: str | None) -> str:
+    """The probe's URL: the serving endpoint's `/v1/models` document."""
+    if not endpoint:
+        return LOCAL_MODELS_URL
+    return endpoint.rstrip("/") + "/models"
 
 
 def norm_id(model_id: str) -> str:
@@ -231,6 +388,15 @@ def classify_route(mid: str, *, local: bool = False) -> str | None:
         return "local"
     if not isinstance(mid, str):
         return None
+
+    # The harness's own local namespace claims local by itself: the id shape
+    # is a serving fact, so `lmstudio/*` classifies without the serving flag
+    # and without any catalogue consulted — checked before norm_id so an
+    # `openrouter/lmstudio/*` market slug stays the remote serving it is.
+    # A malformed namespace (no model path, an empty segment) fails closed.
+    if mid.startswith(HARNESS_LOCAL_NAMESPACE):
+        rest = mid[len(HARNESS_LOCAL_NAMESPACE):]
+        return "local" if all(rest.split("/")) else None
 
     mid = norm_id(mid)
     if mid.startswith("opencode-go/"):
@@ -323,10 +489,11 @@ def qualified_id(mid: str, *, local: bool = False) -> str:
     The deal and the pick name a market, so an OpenRouter serving is
     re-prefixed with the namespace its configs dispatch through --
     `openrouter/` plus the normalized slug (norm_id) -- and every id already
-    carrying its provider namespace (`opencode/*`, `opencode-go/*`) or a model
-    this machine serves passes through unchanged. The Route kind is the
-    classifier's answer, never the id's spelling; an id no kind classifies is
-    left as written, since nothing in the run can dispatch it.
+    carrying its provider namespace (`opencode/*`, `opencode-go/*`,
+    `lmstudio/*`) or a model this machine serves passes through unchanged.
+    The Route kind is the classifier's answer, never the id's spelling; an
+    id no kind classifies is left as written, since nothing in the run can
+    dispatch it.
     """
     if classify_route(mid, local=local) in _OPENROUTER_KINDS:
         return "openrouter/" + norm_id(mid)
@@ -355,9 +522,10 @@ def local_label_is_void(mid: str) -> bool:
     Localness is a serving fact, never a catalogue claim: the classifier
     answers the remote serving namespaces remote whatever a label says - a
     `:free` slug, an `opencode/*` harness model, an `opencode-go/*` plan
-    route - so a `local` label on one is void. A market-shaped slash id is
-    not voided: local LM Studio ids are slash-shaped too, so the label may
-    claim one."""
+    route - so a `local` label on one is void. The harness's `lmstudio/*`
+    namespace classifies local by itself, and a market-shaped slash id is
+    not voided either: a served model's id can be slash-shaped, so the
+    label may claim one."""
     return classify_route(mid) in _REMOTE_KINDS
 
 
@@ -1373,12 +1541,13 @@ def policy_facts(path: str | None) -> dict:
 
 
 def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
-               sensitive: bool = False) -> str | None:
+               sensitive: bool = False, loopback: bool = True) -> str | None:
     """The effective zone's reason this model may not serve here, or None.
 
     The whole pre-flight rule: the shape's regime is the zone's, tightened by
     `--sensitive` and never loosened, and the candidate facts are the policy's
-    Exposure facts alone (an empty policy keeps the safe defaults). Blocked
+    Exposure facts plus the serving endpoint's loopback status (an empty
+    policy and an undeclared endpoint keep the safe defaults). Blocked
     means a prohibition the regime states outright — a remote free route in a
     closed zone, an exposed route at a sensitive regime or stricter — never a
     Footprint, catalog or quota exclusion.
@@ -1387,13 +1556,17 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
     serving fact, never a catalogue claim, and this guard observes no serving
     — so a policy label cannot make a remote id (`opencode/*`, `:free`) local
     here, and a remote Free route is refused in a closed zone whatever the
-    catalog says.
+    catalog says. The harness's `lmstudio/*` namespace classifies local, but
+    `local` still resolves only for a loopback endpoint: the pre-flight
+    reads the harness's declared endpoint (a file read, still no serving
+    observed) and a non-loopback serving fails closed as exposed.
     """
     shape = Shape(sensitive=sensitive,
                   regime=shape_regime(zone, sensitive=sensitive))
     model_id = norm_id(model_id)
     policy = policy or {}
-    return regime_prohibition(shape, candidate_for(model_id, policy))
+    return regime_prohibition(shape, candidate_for(model_id, policy,
+                                                   loopback=loopback))
 
 
 # The pre-flight's default-deny verdict: an id outside every Route kind names
@@ -1466,7 +1639,8 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         print(f"blocked: {UNKNOWN_SERVING_NAMESPACE}")
         print(f"model: {model_id}")
         return 0
-    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain)
+    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain,
+                        loopback=loopback_endpoint(harness_serving_endpoint()))
     if as_json:
         emit_json({"mode": "assert-allowed", "ok": True,
                    "allowed": reason is None,
@@ -2107,11 +2281,13 @@ def _free_catalog_kind(prefix: str, exposure: str) -> str | None:
     """The Route kind a ``free_models`` entry declares, from its prefix alone.
 
     Namespace first: ``opencode-go/*`` is a plan serving whatever the entry
-    says (plan has its own catalog), and ``opencode/*`` is a harness serving.
-    The ``local`` annotation supplies the local serving fact for a prefix no
-    remote namespace claims. A bare two-segment OpenRouter prefix is the
-    family the catalog keys a ``:free`` route by, so it declares a free-slug
-    serving. A ``:free`` suffix on any other shape routes through the seam,
+    says (plan has its own catalog), ``opencode/*`` is a harness serving, and
+    ``lmstudio/*`` is the harness's local serving — a malformed local
+    namespace fails closed through the classifier. The ``local`` annotation
+    supplies the local serving fact for a prefix no remote namespace claims.
+    A bare two-segment OpenRouter prefix is the family the catalog keys a
+    ``:free`` route by, so it declares a free-slug serving. A ``:free``
+    suffix on any other shape routes through the seam,
     which normalizes and classifies the whole prefix: a two-segment slug
     stays a free-slug serving, while a third segment or a plan namespace
     under the ``openrouter/`` qualifier is refused at load. Anything else
@@ -2120,6 +2296,11 @@ def _free_catalog_kind(prefix: str, exposure: str) -> str | None:
     """
     if prefix.startswith("opencode-go/"):
         return "plan"
+    if prefix.startswith(HARNESS_LOCAL_NAMESPACE):
+        # The harness's local namespace is a serving fact of its own —
+        # whatever the entry annotates, an `lmstudio/*` prefix declares a
+        # local serving, and a malformed one fails closed through the seam.
+        return classify_route(prefix)
     if exposure == "local":
         return "local"
     if prefix.startswith("opencode/"):
@@ -2405,6 +2586,11 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
         merged_models[mid] = _free_model_record(mid, entry, source)
 
     for prefix, entry in free_models.items():
+        if classify_route(prefix) == "local":
+            # A local-kind prefix never stands up its own row here: local
+            # candidates exist only where the harness listing says they do
+            # (merge_local_candidates), so a catalog entry alone raises none.
+            continue
         if (not is_free_route(prefix)
                 or not _free_summary(entry, summaries, prefix)):
             continue
@@ -2417,19 +2603,25 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
     return merged_share, merged_models
 
 
-def merge_local_candidates(share: dict, models: dict, served: dict,
+def merge_local_candidates(share: dict, models: dict, listed, served: dict,
                            free_models: dict, *,
                            inheritance: float = DEFAULT_FREE_SHARE_INHERITANCE
                            ) -> tuple[dict, dict]:
-    """Join this run's served local ids to the curated Free catalog.
+    """Join this run's harness-listed local ids to the curated Free catalog.
 
-    Served ids without a local Exposure catalog entry are ignored. Cataloged
-    served ids remain visible even without a summary, but the admission seam
-    requires that summary before they can be picked or dealt.
+    The harness listing is the sole source of existence and identity: an id
+    the harness does not list never joins, whatever the probe reports or the
+    catalog declares, and what joins is named exactly as the harness
+    dispatches it. Each listed id still needs a catalog entry whose Exposure
+    is ``local`` to be judged at all; cataloged listed ids remain visible
+    even without a summary, but the admission seam requires that summary
+    before they can be picked or dealt. The probe's contribution here is one
+    narrow fact — the live context window judged by the Context gate — never
+    existence: a missing server changes nothing about the candidate set.
     """
     merged_share = dict(share)
     merged_models = {mid: dict(model) for mid, model in models.items()}
-    for mid in served:
+    for mid in sorted(listed):
         match = longest_prefix_match(mid, free_models)
         if match is None:
             continue
@@ -2439,15 +2631,23 @@ def merge_local_candidates(share: dict, models: dict, served: dict,
         merged_share.setdefault(mid, 0.0)
         if merged_share[mid] == 0.0:
             merged_share[mid] = _family_share(merged_share, entry, inheritance)
-        # The curated context window is policy; the probe establishes that this
-        # candidate is currently served. Runtime metadata is not policy.
-        merged_models[mid] = _free_model_record(mid, entry, served[mid])
+        record = _free_model_record(mid, entry, served.get(mid))
+        live = served.get(mid)
+        if isinstance(live, dict) and live.get("context_length") is not None \
+                and _is_plain_int(live["context_length"]) \
+                and live["context_length"] > 0:
+            # The curated window stays the record's policy fact; the window
+            # the live serving reports is the capacity the Context gate is
+            # judged against, for this invocation only.
+            record["served_context_length"] = live["context_length"]
+        merged_models[mid] = record
     return merged_share, merged_models
 
 
-def local_candidate_ids(served: dict, free_models: dict) -> set[str]:
-    """Served ids matched by a catalog entry whose Exposure is ``local``."""
-    return {mid for mid in served
+def local_candidate_ids(listed, free_models: dict) -> set[str]:
+    """Harness-listed ids matched by a catalog entry whose Exposure is
+    ``local`` — the serving fact set the run's local flags read from."""
+    return {mid for mid in listed
             if (match := longest_prefix_match(mid, free_models)) is not None
             and isinstance(match[1], dict)
             and match[1].get("exposure") == "local"}
@@ -2656,14 +2856,15 @@ def facets_for_candidate(candidate: Candidate) -> dict | None:
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
                      overrides: dict | None = None, local: bool = False,
-                     plans: dict | None = None) -> str:
+                     plans: dict | None = None,
+                     loopback: bool = True) -> str:
     """One candidate's Exposure, by precedence:
 
-    explicit policy override (prefix-keyed) > locally served > curated free
-    catalog entry > the plans catalog entry > the default-exposure facet (a
-    free-slug or harness serving trains, a market or plan serving
-    no-retention); an id outside every kind keeps the default no-retention
-    assumption.
+    explicit policy override (prefix-keyed) > locally served on a loopback
+    endpoint > curated free catalog entry > the plans catalog entry > the
+    default-exposure facet (a free-slug or harness serving trains, a market
+    or plan serving no-retention); an id outside every kind keeps the
+    default no-retention assumption.
 
     The default is the no-retention assumption — the account's data policy
     already holds it. A free route the catalog does not carry is exposed until
@@ -2675,18 +2876,31 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     a remote serving identity is void - the classifier decides, and it says
     the remote namespaces (`:free`, `opencode/*`, `opencode-go/*`) are
     remote - so the serving facts answer even when a stale policy reached
-    this far without validation. A market-shaped slash id is not voided:
-    local LM Studio ids are slash-shaped too.
+    this far without validation. The harness's `lmstudio/*` namespace
+    classifies local by itself, but `local` resolves only for a loopback
+    endpoint on this machine (`loopback`): a LAN-served instance fails
+    closed to the unknown-free default (`trains`) whatever claims reach
+    here, until the policy's exposure-override map — the one source allowed
+    to declare `local` outright — states it.
     """
-    def stated(value) -> str | None:
+    def declared(value) -> str | None:
+        # The override map may name `local` itself: the operator's explicit
+        # statement about a serving, the escape hatch for a non-loopback one.
         if value == "local" and local_label_is_void(mid):
             return None
         return known_exposure(mid, value)
 
+    def stated(value) -> str | None:
+        # Every other source earns `local` only from the serving being
+        # loopback on this machine.
+        if value == "local" and not loopback:
+            return None
+        return declared(value)
+
     match = longest_prefix_match(mid, overrides or {})
-    if match is not None and (value := stated(match[1])) is not None:
+    if match is not None and (value := declared(match[1])) is not None:
         return value
-    if local:
+    if local and loopback:
         return "local"
     for catalog in (free_models or {}, plans or {}):
         match = longest_prefix_match(mid, catalog)
@@ -2695,7 +2909,12 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
                 and (value := stated(entry["exposure"])) is not None:
             return value
     facets = facets_for(mid, local=local)
-    return facets["default_exposure"] if facets else "no-retention"
+    default = facets["default_exposure"] if facets else "no-retention"
+    if default == "local" and not loopback:
+        # The local kind's own default cannot resolve without loopback;
+        # unknown Exposure for a Free route defaults to trains.
+        return "trains"
+    return default
 
 
 def known_exposure(mid: str, value: str) -> str:
@@ -2710,17 +2929,28 @@ def known_exposure(mid: str, value: str) -> str:
 def candidate_for(mid: str, policy: dict, *, local: bool = False,
                   model: dict | None = None,
                   endpoints: list[dict] | None = None,
-                  intent: str = "measured") -> Candidate:
+                  intent: str = "measured",
+                  loopback: bool = True) -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
     the policy's `exposure` override map, `free_models` and `plans` catalogs,
-    plus its Free price class (the seam's answer) and Footprint capacities."""
+    plus its Free price class (the seam's answer) and Footprint capacities.
+    `loopback` is the serving fact behind `local` Exposure — see
+    resolve_exposure."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
     plan_match = longest_prefix_match(mid, policy.get("plans", {}))
     is_free = is_free_route(mid, local=local)
     facets = facets_for(mid, local=local)
-    context_length = (catalog_entry.get("context_length")
-                      if isinstance(catalog_entry, dict) else None)
+    context_length = None
+    if model:
+        # The window the live serving reported for this candidate (the
+        # probe's one narrow contribution, see merge_local_candidates) is
+        # what the Context gate is judged against: the server enforces its
+        # own capacity, not the curated figure.
+        context_length = model.get("served_context_length")
+    if context_length is None:
+        context_length = (catalog_entry.get("context_length")
+                          if isinstance(catalog_entry, dict) else None)
     if context_length is None and model:
         context_length = model.get("context_length")
     completion_cap = endpoint_completion_cap(endpoints)
@@ -2740,7 +2970,8 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                       exposure=resolve_exposure(
                           mid, free_models=policy.get("free_models", {}),
                           overrides=policy.get("exposure", {}), local=local,
-                          plans=policy.get("plans", {})),
+                          plans=policy.get("plans", {}),
+                          loopback=loopback),
                       is_free=is_free,
                       local=local,
                       context_length=context_length,
@@ -3738,7 +3969,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      local_ids=(), regime: str = "open",
                      zone: Zone | None = None,
                      sensitive: bool = False,
-                     ranks=None) -> None:
+                     ranks=None, local_listing=None) -> None:
     zone = zone if zone is not None else Zone(path=None, regime=regime)
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
@@ -3883,6 +4114,24 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     print("\n## Signal coverage gaps (opinion elsewhere, silent here)")
     for line in sorted(coverage) or ["— none"]:
         print(f"- {line}")
+
+    # Rostered ahead of the harness: a local entry no listing id reaches is
+    # reported here, never dealt — existence comes from the listing alone,
+    # so this is the one surface that can speak for an entry the ranking
+    # cannot show. No flag means the harness never spoke: say that instead
+    # of judging what was never given.
+    print("\n## Local models the harness cannot run")
+    if local_listing is None:
+        print("- — harness listing not provided; not judgeable")
+    else:
+        stranded = sorted(
+            prefix for prefix, entry in policy.get("free_models", {}).items()
+            if isinstance(entry, dict) and entry.get("exposure") == "local"
+            and not any(mid.startswith(prefix) for mid in local_listing))
+        for prefix in stranded:
+            print(f"- {prefix} — not in the harness listing; never dealt")
+        if not stranded:
+            print("- — none")
 
     print("\n## Free-share trends to zero (safe-shape history)")
     print(f"History retains the last {FREE_SHARE_HISTORY_LIMIT} measurements "
@@ -4077,6 +4326,11 @@ def main() -> None:
     ap.add_argument("--fit", default=None, metavar="SPEC",
                     help="agent's task-fit judgments, 'mid=score,...' on 0-5; "
                          "composes as score * fit/5 (longest prefix wins)")
+    ap.add_argument("--local-listing", action="append", metavar="IDS",
+                    help="the harness's local model ids ('lmstudio/...', "
+                         "comma-separated, repeatable): the sole source of "
+                         "local candidate existence and identity; omitted, "
+                         "the run claims no local candidate at all")
     ap.add_argument("--sensitive", action="store_true",
                     help="Sensitive ticket shape (the Secrets gate's verdict): "
                          "exposed candidates — trains — are excluded from the "
@@ -4209,6 +4463,18 @@ def main() -> None:
         run_anchors(args.anchors, models, by_canon, classif, domains, policy,
                     args.top, args.refresh, config, zone, regime)
         return
+    # The local universe arrives from the harness — passed in with
+    # --local-listing — and the serving endpoint from the harness's config:
+    # one fact each, no discovery channel of our own (the probe below stays
+    # two narrow facts about already-listed candidates: is it serving, at
+    # what window). `loopback` is the condition `local` Exposure resolves
+    # under, and `listed` is empty whenever the harness never spoke.
+    serving_endpoint = harness_serving_endpoint()
+    loopback = loopback_endpoint(serving_endpoint)
+    local_listing = parse_local_listing(args.local_listing)
+    listed = sorted(local_listing) if local_listing is not None else []
+    served_local = probe_local_models(url=models_url(serving_endpoint))
+    local_ids = local_candidate_ids(listed, policy["free_models"])
     if args.check_policy or args.scope:
         # The scope path needs the daily token rankings for window totals; the
         # bare check never consults them and stays one fetch lighter.
@@ -4220,16 +4486,15 @@ def main() -> None:
             inheritance=config.free_share_inheritance)
         # Check-policy sees this invocation's same local candidates as a domain
         # run, but still performs no persistent policy update.
-        served_local = probe_local_models()
-        local_ids = local_candidate_ids(served_local, policy["free_models"])
         _, models = merge_local_candidates(
-            share, models, served_local, policy["free_models"],
+            share, models, listed, served_local, policy["free_models"],
             inheritance=config.free_share_inheritance)
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
                          config, local_ids=local_ids, regime=regime, zone=zone,
-                         sensitive=args.sensitive, ranks=ranks)
+                         sensitive=args.sensitive, ranks=ranks,
+                         local_listing=local_listing)
         return
 
     tags = domains[args.domain]
@@ -4248,12 +4513,10 @@ def main() -> None:
     share, models = merge_free_candidates(
         share, models, policy["free_models"], policy.get("summaries", {}),
         inheritance=config.free_share_inheritance)
-    # The local discovery is a live, per-run input, not persistent catalog
-    # state. Only served ids matched to an Exposure=local policy entry join.
-    served_local = probe_local_models()
-    local_ids = local_candidate_ids(served_local, policy["free_models"])
+    # The listing is the live, per-run input, not persistent catalog state:
+    # only harness-listed ids matched to an Exposure=local policy entry join.
     share, models = merge_local_candidates(
-        share, models, served_local, policy["free_models"],
+        share, models, listed, served_local, policy["free_models"],
         inheritance=config.free_share_inheritance)
     # The plans catalog is a plan serving's only way in: its id never resolves
     # in the models list. A cataloged plan row joins here, at split family
@@ -4373,7 +4636,8 @@ def main() -> None:
     # them. A candidate the zone forbids never got this far.
     decisions = {mid: admit(shape, candidate_for(
         mid, policy, local=mid in local_ids, model=models.get(mid),
-        endpoints=endpoint_cache.get(mid, ()), intent=args.effort),
+        endpoints=endpoint_cache.get(mid, ()), intent=args.effort,
+        loopback=loopback),
         quota=verdict)
         for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
@@ -4468,10 +4732,16 @@ def main() -> None:
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else m.get("context_length")
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
-        if free_details:
-            exposure = free_details[1]
-        elif is_free_route(mid, local=mid in local_ids) or plan_row:
-            exposure = candidate_for(mid, policy, model=m).exposure
+        if free_details or is_free_route(mid, local=mid in local_ids) or plan_row:
+            # The column shows the exposure admission judged: resolved
+            # through the same precedence, loopback fact included — a
+            # cataloged `local` the endpoint cannot back reads as the
+            # exposed fallback it was refused as.
+            exposure = resolve_exposure(mid, free_models=policy["free_models"],
+                                        overrides=policy.get("exposure", {}),
+                                        local=mid in local_ids,
+                                        plans=policy["plans"],
+                                        loopback=loopback)
         else:
             exposure = "—"
         if plan_row:
@@ -4533,11 +4803,13 @@ def main() -> None:
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else None
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = (free_details[1] if free_details else
-                    resolve_exposure(mid, free_models=policy["free_models"],
-                                     overrides=policy.get("exposure", {}))
-                     if is_free_route(mid, local=mid in local_ids)
-                     else "—")
+        exposure = (resolve_exposure(mid, free_models=policy["free_models"],
+                                     overrides=policy.get("exposure", {}),
+                                     local=mid in local_ids,
+                                     plans=policy["plans"],
+                                     loopback=loopback)
+                    if free_details or is_free_route(mid, local=mid in local_ids)
+                    else "—")
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
 

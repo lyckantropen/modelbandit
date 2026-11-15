@@ -82,11 +82,20 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    Done when: candidates are ranked by their share of the domain's traffic,
     prices and data timestamp shown. Cataloged
     OpenCode `opencode/*` models
-    also appear; OpenRouter `:free` routes retain their own slug. The script
-    silently probes LM Studio at `127.0.0.1:1234` each run; currently served
-    local ids matched by `free_models` join that run's candidate set with the
-    cataloged window and `local` Exposure. Probe results are not cached or
-    written to policy. A Free route without a resolving summary remains
+    also appear; OpenRouter `:free` routes retain their own slug. Local
+    models come from the harness alone: pass the harness's `lmstudio/*`
+    ids with `--local-listing` (comma-separated, e.g. from
+    `opencode models`), and each id matched by a `free_models` entry with
+    `local` Exposure joins that run's candidate set exactly as the harness
+    dispatches it — no flag, no local candidate, whatever the probe sees.
+    The script silently probes the serving endpoint the harness config
+    declares for two narrow facts only (the live context window the Context
+    gate judges, and whether a listed id serves right now); probe results
+    are not cached or written to policy, and a missing server has no effect
+    on output. `local` Exposure resolves only for a loopback endpoint on
+    this machine: a LAN-served instance reads as exposed (`trains`) until
+    the policy's `exposure` override map declares it. A Free route without
+    a resolving summary remains
     visible but is not selectable; OpenCode and local routes also need their
     own catalog entries. The same run reads the account's daily free-request
     counter and reports it in the header (`free quota: used/limit`): the
@@ -381,10 +390,15 @@ starts closed everywhere, so this is the interview's only opening move:
   by longest prefix without a `free_models` entry; their context window comes
   from the OpenRouter model catalog when available. A Free route without a
   resolving summary is never admitted. OpenCode entries are listed from this
-  catalog. Entries with `local` Exposure are listed only while a matching id is
-  served by the silent LM Studio probe; their context window and summary remain
-  curated policy facts. Probe results join the in-memory model catalog for that
-  invocation only. A missing server has no effect on output.
+  catalog. An entry with `local` Exposure raises a candidate only for an id
+  the harness listing carries (`lmstudio/*` classifies local by the namespace
+  itself); its curated window and summary remain policy facts, while the
+  probe contributes only the live window the Context gate is judged against
+  and the live-serving fact — never identity, never existence. Probe results
+  join the in-memory model catalog for that invocation only. A missing server
+  has no effect on output. The policy check names local entries the harness
+  cannot run (`## Local models the harness cannot run`): reported, never
+  dealt.
 
 - **Plan catalog (`plans`)** — `policy.json`'s optional `plans` maps a Plan
   route's id (`opencode-go/*`) to the facts the ledger and the Exposure

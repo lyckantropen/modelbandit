@@ -88,6 +88,51 @@ class ExposureResolutionTests(unittest.TestCase):
         self.assertEqual(modelbandit.resolve_exposure("qwen3-coder-30b", local=True),
                          "local")
 
+    def test_the_local_serving_fact_needs_loopback(self):
+        # The serving flag says a candidate is served; only a loopback
+        # endpoint makes that *this machine's* serving. A LAN-served
+        # instance fails closed as exposed — unknown free defaults to
+        # trains — until the policy's exposure-override map declares it,
+        # and the namespace claim alone never changes that.
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b", local=True,
+                                  loopback=False),
+            "trains")
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b",
+                                  free_models={"lmstudio/qwen": {
+                                      "context_length": 65_536,
+                                      "exposure": "local"}},
+                                  loopback=False),
+            "trains")
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b",
+                                  overrides={"lmstudio/qwen": "local"},
+                                  free_models={"lmstudio/qwen": {
+                                      "context_length": 65_536,
+                                      "exposure": "local"}},
+                                  loopback=False),
+            "local")
+        # Loopback is the default: the normal serving resolves local.
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b",
+                                  free_models={"lmstudio/qwen": {
+                                      "context_length": 65_536,
+                                      "exposure": "local"}}),
+            "local")
+
+    def test_candidate_for_carries_the_loopback_fact_into_admission(self):
+        policy = {"free_models": {"lmstudio/qwen": {
+            "context_length": 65_536, "exposure": "local",
+            "summary_ref": "qwen"}},
+            "summaries": {"qwen": "fixture summary"}}
+        facts = modelbandit.candidate_for("lmstudio/qwen/qwen3-4b", policy,
+                                   local=True, loopback=False)
+        self.assertEqual(facts.exposure, "trains")
+        decision = modelbandit.admit(modelbandit.Shape(sensitive=True), facts)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "exposed (trains)")
+
     def test_a_local_label_cannot_make_a_remote_identity_local(self):
         # Localness is a serving fact, never a catalogue claim: the route
         # predicate says an `opencode/*` or `:free` id is remote, so a policy

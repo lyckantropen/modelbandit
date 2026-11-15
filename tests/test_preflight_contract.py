@@ -63,7 +63,8 @@ def policy_for(prefix: str, exposure: str) -> dict:
 class EgressVerdictMixin:
     """Read the pre-flight's verdict at its egress — never from a status."""
 
-    def preflight_answer(self, mid, zone, policy, *, sensitive_preflight):
+    def preflight_answer(self, mid, zone, policy, *, sensitive_preflight,
+                         endpoint=None):
         """The pre-flight's verdict for one cell.
 
         Runs `run_assert_allowed` for the cell's zone and policy (both
@@ -71,13 +72,19 @@ class EgressVerdictMixin:
         verdict lines: exactly one of `allowed: <id>` or `blocked by the
         free-use zone` must come back, and the exit contract v2 pins the
         status to 0 for either answer — the status never carries the
-        verdict.
+        verdict. The harness endpoint is pinned to the fixture machine's
+        loopback default (a `local` Exposure's condition), so the verdict
+        never depends on this machine's real config; `endpoint` states
+        another serving for the loopback cells.
         """
         printed = io.StringIO()
         with mock.patch.object(modelbandit, "effective_zone",
                                return_value=zone), \
                 mock.patch.object(modelbandit, "policy_facts",
                                   return_value=policy), \
+                mock.patch.object(modelbandit, "harness_serving_endpoint",
+                                  return_value=endpoint or
+                                  modelbandit.DEFAULT_LOCAL_ENDPOINT), \
                 redirect_stdout(printed):
             code = modelbandit.run_assert_allowed(
                 model=mid, plain=not sensitive_preflight)
@@ -180,6 +187,35 @@ class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
                     policy, sensitive_preflight=True)
                 self.assertFalse(allowed)
                 self.assertIn("exposed (trains)", printed)
+
+
+class LoopbackServingTests(EgressVerdictMixin, unittest.TestCase):
+    """`local` Exposure's loopback rule at the pre-flight: the harness's
+    `lmstudio/*` namespace classifies local, but only a loopback endpoint
+    makes the serving this machine's — a LAN-served instance is refused as
+    exposed until the policy's exposure-override map declares it."""
+
+    LAN = "http://desktop-rme135a.tail409f29.ts.net:1234/v1"
+
+    def test_local_exposure_survives_the_pre_flight_only_on_loopback(self):
+        zone = modelbandit.Zone(path="z", regime="sensitive")
+        policy = policy_for("lmstudio/qwen", "local")
+
+        allowed, printed = self.preflight_answer(
+            "lmstudio/qwen/qwen3-4b", zone, policy,
+            sensitive_preflight=True, endpoint=self.LAN)
+        self.assertFalse(allowed)
+        self.assertIn("exposed (trains)", printed)
+
+        allowed, _ = self.preflight_answer(
+            "lmstudio/qwen/qwen3-4b", zone, policy, sensitive_preflight=True)
+        self.assertTrue(allowed)
+
+        declared = dict(policy, exposure={"lmstudio/qwen": "local"})
+        allowed, _ = self.preflight_answer(
+            "lmstudio/qwen/qwen3-4b", zone, declared,
+            sensitive_preflight=True, endpoint=self.LAN)
+        self.assertTrue(allowed)
 
 
 if __name__ == "__main__":

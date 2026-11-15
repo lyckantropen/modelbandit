@@ -252,11 +252,22 @@ class CliTests(unittest.TestCase):
             json.dump({"zones": list(zones or []), "default": default}, f)
         return config_home
 
-    def run_cli(self, *argv, world=None, local_models=None, key_payload=None,
+    def run_cli(self, *argv, world=None, local_models=None, local_listing=None,
+                listing_absent=False, serving_endpoint=None, key_payload=None,
                 zones=None, zones_default="open", policy_path=None,
                 zones_absent=False, real_benchmarks=False):
         world = world if world is not None else build_world()
         local_models = local_models if local_models is not None else {}
+        # The harness passes its local universe in with --local-listing: a
+        # fixture's served ids are exactly what this fixture machine's
+        # harness lists, `listing_absent` models a harness that never spoke,
+        # and a present flag with no ids is a listing that runs nothing.
+        if listing_absent:
+            listing_flag = []
+        elif local_listing is None:
+            listing_flag = ["--local-listing", ",".join(sorted(local_models))]
+        else:
+            listing_flag = ["--local-listing", ",".join(sorted(local_listing))]
         if zones_absent:
             # A fresh install: no zones.json exists anywhere the loader
             # looks, so the config root falls back to ~/.config against a
@@ -298,9 +309,13 @@ class CliTests(unittest.TestCase):
 
         out, err = io.StringIO(), io.StringIO()
         code = None
-        argv = ["modelbandit", "--policy", policy_path or self.policy_path, *argv]
+        argv = ["modelbandit", "--policy", policy_path or self.policy_path,
+                *listing_flag, *argv]
         with mock.patch("modelbandit.fetch_json", side_effect=fake_fetch), \
                 mock.patch("modelbandit.probe_local_models", return_value=local_models), \
+                mock.patch("modelbandit.harness_serving_endpoint",
+                           return_value=serving_endpoint or
+                           modelbandit.DEFAULT_LOCAL_ENDPOINT), \
                 mock.patch.object(modelbandit, "CACHE_DIR",
                                   os.path.join(self._tmp.name, "cache")), \
                 mock.patch.dict(os.environ, env), \
@@ -447,8 +462,9 @@ class CliTests(unittest.TestCase):
         # (family-share inheritance would otherwise give them real rotation).
         pol["summaries"]["ghost/family"] = "family summary"
         pol["free_models"] = {
-            "local-coder": {"context_length": 262_144, "exposure": "local",
-                            "summary_ref": "ghost/family"},
+            "lmstudio/local-coder": {"context_length": 262_144,
+                                      "exposure": "local",
+                                      "summary_ref": "ghost/family"},
             "opencode/free-coder": {
                 "context_length": 262_144, "exposure": "no-retention",
                 "summary_ref": "ghost/family"},
@@ -456,8 +472,8 @@ class CliTests(unittest.TestCase):
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
 
-        local = {"local-coder": {"id": "local-coder",
-                                 "context_length": 262_144}}
+        local = {"lmstudio/local-coder": {"id": "lmstudio/local-coder",
+                                           "context_length": 262_144}}
         world = build_world()
         world["classifications"]["classifications"] = [{
             "tag": "content_writing", "usage_share": 1.0,
@@ -1367,39 +1383,42 @@ class CliTests(unittest.TestCase):
     def test_served_cataloged_local_candidate_uses_local_exposure_and_window(self):
         policy = json.loads(json.dumps(POLICY))
         policy["free_models"] = {
-            "qwen/qwen3-coder": {"context_length": 65_536,
-                                  "exposure": "local",
-                                  "summary_ref": "deepseek/deepseek-v4-pro"}}
+            "lmstudio/qwen/qwen3-coder": {"context_length": 65_536,
+                                          "exposure": "local",
+                                          "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(policy, f)
-        served = {"qwen/qwen3-coder-30b": {
-            "id": "qwen/qwen3-coder-30b", "context_length": 32_768}}
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        served = {mid: {"id": mid, "context_length": 32_768}}
 
         out, _, code, calls = self.run_cli(
             "--domain", "writing", local_models=served)
 
         self.assertIsNone(code)
         row = next(line for line in out.splitlines()
-                   if line.startswith("|") and "qwen/qwen3-coder-30b" in line)
+                   if line.startswith("|") and mid in line)
         self.assertIn("64K | local |", row)
-        self.assertIn("qwen/qwen3-coder-30b: eol summary", out)
+        self.assertIn(f"{mid}: eol summary", out)
+        self.assertFalse(any(url.endswith("/endpoints") and mid in url
+                             for url, *_ in calls))
         self.assertFalse(any(url.endswith("/endpoints")
                              and "qwen/qwen3-coder" in url for url, *_ in calls))
 
     def test_served_local_candidate_without_summary_is_visible_but_not_admitted(self):
         policy = json.loads(json.dumps(POLICY))
         policy["free_models"] = {
-            "local/qwen": {"context_length": 262_144, "exposure": "local"}}
+            "lmstudio/local/qwen": {"context_length": 262_144, "exposure": "local"}}
         with open(self.policy_path, "w") as f:
             json.dump(policy, f)
+        mid = "lmstudio/local/qwen-30b"
 
         out, _, code, _ = self.run_cli(
             "--domain", "writing",
-            local_models={"local/qwen-30b": {"id": "local/qwen-30b"}})
+            local_models={mid: {"id": mid}})
 
         self.assertIsNone(code)
         row = next(line for line in out.splitlines()
-                   if line.startswith("|") and "local/qwen-30b" in line)
+                   if line.startswith("|") and mid in line)
         self.assertIn("local |", row)
         self.assertIn("free route requires a catalog entry and summary", row)
 
@@ -1415,6 +1434,277 @@ class CliTests(unittest.TestCase):
                               local_models=absent_models)
 
         self.assertEqual(absent, baseline)
+
+    # --- harness listing: local existence and identity --------------------
+
+    def test_check_policy_cannot_judge_local_models_without_a_listing(self):
+        # The flag omitted means the harness never spoke: the report says
+        # so rather than claiming every rostered model is unrunnable.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/dead/model": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        out, _, code, _ = self.run_cli("--check-policy", listing_absent=True)
+
+        self.assertIsNone(code)
+        section = out[out.index("## Local models the harness cannot run"):
+                      out.index("## Free-share trends")]
+        self.assertIn("not provided", section)
+
+    def test_check_policy_reports_local_models_the_harness_cannot_run(self):
+        # A local entry ahead of the harness: named by the policy check,
+        # and never dealt — the listing is the only existence there is, so
+        # the same fixture's ranking run carries no row for it while the
+        # entry the harness does run stays.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {
+            "lmstudio/dead/model": {
+                "context_length": 262_144, "exposure": "local",
+                "summary_ref": "deepseek/deepseek-v4-pro"},
+            "lmstudio/live/model": {
+                "context_length": 262_144, "exposure": "local",
+                "summary_ref": "deepseek/deepseek-v4-pro"},
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        live = "lmstudio/live/model"
+        listing = {live}
+
+        checked, _, code, _ = self.run_cli(
+            "--check-policy", local_listing=listing,
+            local_models={live: {"id": live, "context_length": 262_144}})
+        ranked, _, r_code, _ = self.run_cli(
+            "--domain", "writing", local_listing=listing,
+            local_models={live: {"id": live, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertIsNone(r_code)
+        section = checked[checked.index("## Local models the harness cannot run"):
+                          checked.index("## Free-share trends")]
+        self.assertIn("lmstudio/dead/model", section)
+        self.assertIn("never dealt", section)
+        self.assertNotIn(live, section)
+        self.assertNotIn("lmstudio/dead/model", ranked)
+        self.assertIn(f"{live} |", ranked)
+
+    def test_a_local_entry_the_harness_cannot_run_is_never_dealt(self):
+        # Deal-shaped run of the same rule: no listing match, no row, no
+        # pick, no deal — reported, never dealt.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/dead/model": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        other = "lmstudio/other/model"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "stranded",
+            local_listing={other},
+            local_models={other: {"id": other, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertNotIn("lmstudio/dead/model", out)
+
+    def test_a_harness_listed_local_candidate_is_dealt_as_the_harness_dispatches_it(self):
+        # The listing the harness passes in is the candidate's existence and
+        # identity: the row, the pick and the deal all name the id verbatim,
+        # provider-qualified — never re-prefixed with `openrouter/`, exactly
+        # what the harness dispatches.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "listing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("256K | local |", row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        deal_block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn(f"| {mid} |", deal_block)
+
+    def test_local_rows_are_absent_without_a_harness_listing(self):
+        # No flag means the harness never spoke: the run cannot invent local
+        # candidates from the probe alone, whatever the catalog declares.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 65_536, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", listing_absent=True,
+            local_models={mid: {"id": mid, "context_length": 65_536}})
+
+        self.assertIsNone(code)
+        # Neither the probe's ids nor the catalog's own prefix may stand up
+        # a local row: no listing, no local existence at all.
+        self.assertNotIn("lmstudio", out)
+
+    def listed_local_policy(self, window=262_144):
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": window, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        return "lmstudio/qwen/qwen3-coder-30b"
+
+    def test_the_probed_window_backs_the_context_gate(self):
+        # The probe's one narrow fact: the window the live serving reports
+        # is what the Context gate judges. The curated 256K cannot rescue a
+        # candidate whose serving states an 8K window — the row is excluded
+        # with the gate's named reason, not picked.
+        mid = self.listed_local_policy()
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 8_192}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("over window", row)
+        self.assertIn("4,096 tokens", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def test_the_probed_window_can_widen_admission_to_the_live_capacity(self):
+        # The other direction of the same fact: a serving that reports a
+        # wider window than the curated one admits the shape the live
+        # capacity can actually take.
+        mid = self.listed_local_policy(window=8_192)
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertNotIn("over window", row)
+
+    def test_probe_identity_never_reaches_the_readout(self):
+        # The probe reports what serves; the listing says what exists. An id
+        # the harness never listed is not adopted, however loudly the probe
+        # names it — and the listed candidate still stands on the catalog's
+        # own facts when the probe knows nothing about it.
+        listed_mid = self.listed_local_policy()
+        foreign_mid = "lmstudio/other/unlisted-model"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={listed_mid},
+            local_models={foreign_mid: {"id": foreign_mid,
+                                        "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertNotIn(foreign_mid, out)
+        self.assertIn(f"{listed_mid} |", out)
+
+    def test_the_budget_json_run_shares_the_table_with_local_candidates(self):
+        # The deal/pick seam has two halves: this pins the machine-readable
+        # verdict object beside the printed readout that carries the local
+        # row — same run, both surfaces.
+        mid = self.listed_local_policy()
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--budget", "100", "--json",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["over_budget"])
+        self.assertIn(f"{mid} |", out)
+
+    def test_a_missing_serving_stack_has_no_effect_on_output(self):
+        # Listing present, server down: the candidates, their facts and the
+        # whole readout are what a serving that reports its window would
+        # have produced - the probe adds no identity and, when it has
+        # nothing new to say, no difference.
+        mid = self.listed_local_policy()
+
+        down = self.run_cli("--domain", "writing",
+                            local_listing={mid}, local_models={})
+        serving = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIn(f"{mid} |", down[0])
+        self.assertEqual(down, serving)
+
+    LAN_ENDPOINT = "http://desktop-rme135a.tail409f29.ts.net:1234/v1"
+
+    def test_a_non_loopback_serving_fails_closed_as_exposed(self):
+        # `local` Exposure resolves only for loopback on this machine: a
+        # LAN-served instance is exposed (`trains`, the unknown-free
+        # default), so Sensitive excludes it with the named reason and the
+        # pick never names it — nothing about it may masquerade as local.
+        mid = self.listed_local_policy()
+
+        plain, _, code, _ = self.run_cli(
+            "--domain", "writing", serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+        sensitive, _, s_code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive",
+            serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertIsNone(s_code)
+        plain_row = next(ln for ln in plain.splitlines()
+                         if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("256K | trains |", plain_row)
+        sensitive_row = next(ln for ln in sensitive.splitlines()
+                             if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("exposed (trains)", sensitive_row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", sensitive)
+
+    def test_the_exposure_override_can_declare_a_non_loopback_local_serving(self):
+        # The one escape hatch: the policy's exposure-override map declares
+        # the serving local explicitly, and it is then judged local — the
+        # operator's statement, not the catalogue's or the namespace's.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        pol["exposure"] = {"lmstudio/qwen": "local"}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        sensitive, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive",
+            serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in sensitive.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("256K | local |", row)
+        self.assertNotIn("exposed", row)
 
     def test_ranked_free_slug_is_not_replaced_by_paid_family(self):
         policy = json.loads(json.dumps(POLICY))
@@ -1532,25 +1822,26 @@ class CliTests(unittest.TestCase):
     def test_a_closed_zone_still_admits_a_locally_served_model(self):
         pol = json.loads(json.dumps(POLICY))
         pol["scoring"].update(alpha=1.0, beta=1.0, free_risk=0.35)
-        pol["free_models"] = {"qwen/qwen3-coder": {
+        pol["free_models"] = {"lmstudio/qwen/qwen3-coder": {
             "context_length": 262_144, "exposure": "local",
             "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
         world = build_world()
         world["classifications"]["classifications"][0]["models"].append(
-            {"id": "qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+            {"id": "lmstudio/qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+        mid = "lmstudio/qwen/qwen3-coder-30b"
 
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             world=world, zones=self.zone_of("closed"),
-            local_models={"qwen/qwen3-coder-30b": {"id": "qwen/qwen3-coder-30b"}})
+            local_models={mid: {"id": mid}})
 
         self.assertIsNone(code)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and "qwen/qwen3-coder-30b |" in ln)
         self.assertNotIn("remote free route is prohibited", row)
-        self.assertIn("default pick (top of task order): qwen/qwen3-coder-30b",
+        self.assertIn(f"default pick (top of task order): {mid}",
                       out)
 
     def test_the_sensitive_flag_cannot_loosen_a_closed_zone(self):
@@ -2047,18 +2338,19 @@ class CliTests(unittest.TestCase):
         # its id: Free risk applies to it like any other Free route.
         pol = json.loads(json.dumps(POLICY))
         pol["scoring"].update(alpha=1.0, beta=1.0, free_risk=0.35)
-        pol["free_models"] = {"qwen/qwen3-coder": {
+        pol["free_models"] = {"lmstudio/qwen/qwen3-coder": {
             "context_length": 262_144, "exposure": "local",
             "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
         world = build_world()
         world["classifications"]["classifications"][0]["models"].append(
-            {"id": "qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+            {"id": "lmstudio/qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
         out, _, code, _ = self.run_cli(
             "--domain", "writing", world=world,
-            local_models={"qwen/qwen3-coder-30b":
-                          {"id": "qwen/qwen3-coder-30b"}})
+            local_models={mid: {"id": mid}})
         self.assertIsNone(code)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and "qwen/qwen3-coder-30b |" in ln)

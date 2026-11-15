@@ -49,7 +49,7 @@ class LocalProbeTests(unittest.TestCase):
         self.assertEqual(served, {})
         self.assertEqual(stderr.getvalue(), "")
 
-    def test_only_served_local_catalog_entries_are_merged(self):
+    def test_only_listed_local_catalog_entries_are_merged(self):
         catalog = {
             "qwen/qwen3-coder": {"context_length": 65_536,
                                   "exposure": "local",
@@ -61,13 +61,10 @@ class LocalProbeTests(unittest.TestCase):
                              "exposure": "local",
                              "summary_ref": "mistral"},
         }
-        served = {
-            "qwen/qwen3-coder-30b": {"id": "qwen/qwen3-coder-30b"},
-            "google/gemma-4-31b-it": {"id": "google/gemma-4-31b-it"},
-            "uncataloged/model": {"id": "uncataloged/model"},
-        }
+        listed = ["qwen/qwen3-coder-30b", "google/gemma-4-31b-it",
+                  "uncataloged/model"]
         share, models = modelbandit.merge_local_candidates(
-            {"vendor/ranked": 0.5}, {}, served, catalog)
+            {"vendor/ranked": 0.5}, {}, listed, {}, catalog)
 
         self.assertEqual(share, {"vendor/ranked": 0.5,
                                  "qwen/qwen3-coder-30b": 0.0,
@@ -77,13 +74,27 @@ class LocalProbeTests(unittest.TestCase):
         self.assertNotIn("mistral/nemo", share)
         self.assertNotIn("uncataloged/model", share)
 
+    def test_a_probe_id_the_harness_does_not_list_never_joins(self):
+        # Existence and identity come from the harness listing alone: the
+        # probe reporting an id is never enough for it to become a candidate.
+        catalog = {"qwen/qwen3-coder": {"context_length": 65_536,
+                                         "exposure": "local",
+                                         "summary_ref": "qwen-coder"}}
+        served = {"qwen/qwen3-coder-30b": {"id": "qwen/qwen3-coder-30b"}}
+        share, models = modelbandit.merge_local_candidates(
+            {}, {}, [], served, catalog)
+
+        self.assertEqual(share, {})
+        self.assertEqual(models, {})
+
     def test_served_catalog_entry_needs_summary_for_admission(self):
         policy = {"free_models": {
             "local/qwen": {"context_length": 65_536, "exposure": "local"}},
             "summaries": {}}
+        listed = ["local/qwen-30b"]
         served = {"local/qwen-30b": {"id": "local/qwen-30b"}}
         share, models = modelbandit.merge_local_candidates(
-            {}, {}, served, policy["free_models"])
+            {}, {}, listed, served, policy["free_models"])
         facts = modelbandit.candidate_for("local/qwen-30b", policy,
                                    local=True, model=models["local/qwen-30b"])
 

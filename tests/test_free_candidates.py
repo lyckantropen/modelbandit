@@ -78,16 +78,17 @@ class OpenCodeInheritanceTests(unittest.TestCase):
 
 
 class LocalInheritanceTests(unittest.TestCase):
-    def test_served_local_entry_inherits_family_share(self):
+    def test_listed_local_entry_inherits_family_share(self):
         free_models = catalog({
             "lmstudio/qwen/qwen3-4b": {
                 "exposure": "local",
                 "summary_ref": "deepseek/deepseek-v4.1-flash",
             },
         })
+        listed = ["lmstudio/qwen/qwen3-4b"]
         served = {"lmstudio/qwen/qwen3-4b": {"context_length": 131072}}
         share, _ = modelbandit.merge_local_candidates(
-            dict(SHARE), {}, served, free_models, inheritance=1.0)
+            dict(SHARE), {}, listed, served, free_models, inheritance=1.0)
         self.assertAlmostEqual(share["lmstudio/qwen/qwen3-4b"],
                                0.008 + 0.0172)
 
