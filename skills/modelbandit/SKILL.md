@@ -82,11 +82,20 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    Done when: candidates are ranked by their share of the domain's traffic,
     prices and data timestamp shown. Cataloged
     OpenCode `opencode/*` models
-    also appear; OpenRouter `:free` routes retain their own slug. The script
-    silently probes LM Studio at `127.0.0.1:1234` each run; currently served
-    local ids matched by `free_models` join that run's candidate set with the
-    cataloged window and `local` Exposure. Probe results are not cached or
-    written to policy. A Free route without a resolving summary remains
+    also appear; OpenRouter `:free` routes retain their own slug. Local
+    models come from the harness alone: pass the harness's `lmstudio/*`
+    ids with `--local-listing` (comma-separated, e.g. from
+    `opencode models`), and each id matched by a `free_models` entry with
+    `local` Exposure joins that run's candidate set exactly as the harness
+    dispatches it — no flag, no local candidate, whatever the probe sees.
+    The script silently probes the serving endpoint the harness config
+    declares for two narrow facts only (the live context window the Context
+    gate judges, and whether a listed id serves right now); probe results
+    are not cached or written to policy, and a missing server has no effect
+    on output. `local` Exposure resolves only for a loopback endpoint on
+    this machine: a LAN-served instance reads as exposed (`trains`) until
+    the policy's `exposure` override map declares it. A Free route without
+    a resolving summary remains
     visible but is not selectable; OpenCode and local routes also need their
     own catalog entries. The same run reads the account's daily free-request
     counter and reports it in the header (`free quota: used/limit`): the
@@ -147,7 +156,15 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    never capped and never floored: a shape may be dealt entirely to Free
    routes. Beside it the deal always prints `plan share: N/M tickets (P%)`
    — the plan rows' tickets over the dealt tickets, a ticket a Twin absorbed
-   counted metered — so the market mix is visible at a glance. A plan row at
+   counted metered — so the market mix is visible at a glance, and
+   `local share: N/M tickets (P%)` — the tickets this machine's own
+   servings drew — so how much of the deal stays on local hardware reads
+   at the same glance. On a shape a band-passing local candidate fits,
+   that local row carries a **standing favor** in the draw — the affinity
+   factors' validated favor multiplied into its pref — so small tickets
+   genuinely land on local hardware instead of losing to discounted
+   popularity; the seeded draw still decides which row takes each ticket,
+   and score, Nominal floor and balance are untouched. A plan row at
    its cap hands its ticket to its family's **Twin** — the same model served
    metered, resolved through the `plans` entry's declared `family_ref` — and
    the flip is plan → metered only, never the reverse; only when no Twin
@@ -156,6 +173,20 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    Twin. Plan tickets carry their budget facts: the deal prints an
    `allowance draw:` line per plan model and the pick names the Draw beside
    the cash price (see **Plan readout**).
+   Every dealt row also names its **Spare** — the highest-Score eligible
+   candidate that missed the draw (no-load failover preferred on
+   non-sensitive shapes, local candidates only on Sensitive ones) — so a
+   dead model never strands the ticket; when the served model fails,
+   re-run the deal's own flags with `--substitute <model>` to record the
+   Spare taking the ticket over whole, reason and fence restated (see
+   **Spares & substitution**). The deal also states the **lane**: one
+   strict lane, no two local runs concurrent — `ticket ids: <ids> ->
+   <model>` lines map the batch (numbered from 1 in the deal's assignment
+   order) to its models, and `lane: <ids> -> <model>` lines group the
+   local-dealt ids by served model, so execution runs one model load at
+   a time (see **Concurrency lane**). Substitution moves lane membership
+   with the serve — a cloud Spare's ids exit the lane, a local Spare's
+   join — and the record says which.
    One invocation deals one ticket shape — a run's domain, effort, token
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
@@ -244,8 +275,9 @@ area:
    <id>`, `blocked by the free-use zone`, or `blocked: unknown serving
    namespace` — with effective posture and regime named (never content) —
    status says the pre-flight ran, the lines say what's true. The dispatch fails closed: with no shape stated the pre-flight assumes the
-   material is Sensitive and says so (`shape: sensitive (assumed)`), so a
-   route that retains training data is refused by default; when you know the
+   material is Sensitive and says so (`shape: sensitive (assumed)`), so only
+   a route whose Exposure is `local` is allowed by default — `no-retention`
+   leaves the machine too (ADR 0008) — when you know the
    material is not Sensitive, say so explicitly with `--plain`
    (`shape: plain (via --plain)`), and `--sensitive` merely restates the
    default. The pre-flight reads
@@ -255,7 +287,8 @@ area:
    neither launches.
 
 Exposure exclusions stay visible: in a `sensitive` or `closed` zone the table
-marks an exposed (`trains`) route with its reason and never picks or deals it,
+marks every non-local route (`exposed (no-retention)`, `exposed (trains)`) with
+its reason and never picks or deals it,
 because that is the shape's decision, not the zone's prohibition.
 
 ### Worktrees
@@ -335,11 +368,11 @@ starts closed everywhere, so this is the interview's only opening move:
    models — some of which retain what you send — run on content here?"*
    and record one of the three answers:
    - `open` — free models may run on content here, whatever a route retains.
-   - `sensitive` — a free route that may retain what you send (`trains`) is
-     excluded; no-retention free routes and models served on this machine
-     stay.
-   - `closed` — no remote free route may run here at all; models served on
-     this machine never leave it and stay in.
+   - `sensitive` — nothing may leave the machine: only models served on this
+     machine run here, every non-local route excluded (`no-retention` alike
+     with `trains`).
+   - `closed` — no remote free route may run here at all, and, stricter
+     still, only models served on this machine stay in.
 2. Carry the worktree-root rule from **Closed-zone protocol** into the
    answers: an **undeclared worktree root stays closed** however open its
    repository, so ask about the directory the worktrees live in and declare
@@ -381,10 +414,15 @@ starts closed everywhere, so this is the interview's only opening move:
   by longest prefix without a `free_models` entry; their context window comes
   from the OpenRouter model catalog when available. A Free route without a
   resolving summary is never admitted. OpenCode entries are listed from this
-  catalog. Entries with `local` Exposure are listed only while a matching id is
-  served by the silent LM Studio probe; their context window and summary remain
-  curated policy facts. Probe results join the in-memory model catalog for that
-  invocation only. A missing server has no effect on output.
+  catalog. An entry with `local` Exposure raises a candidate only for an id
+  the harness listing carries (`lmstudio/*` classifies local by the namespace
+  itself); its curated window and summary remain policy facts, while the
+  probe contributes only the live window the Context gate is judged against
+  and the live-serving fact — never identity, never existence. Probe results
+  join the in-memory model catalog for that invocation only. A missing server
+  has no effect on output. The policy check names local entries the harness
+  cannot run (`## Local models the harness cannot run`): reported, never
+  dealt.
 
 - **Plan catalog (`plans`)** — `policy.json`'s optional `plans` maps a Plan
   route's id (`opencode-go/*`) to the facts the ledger and the Exposure
@@ -492,13 +530,13 @@ starts closed everywhere, so this is the interview's only opening move:
   no file can open what the machine closed. The regime a run works under is
   the stricter of the working folder's zone and the origin repository's
   (`git rev-parse --git-common-dir`, its parent); git missing or failing
-  leaves the working folder's zone alone. `open` and `sensitive` are today's
-  behaviour. A `closed` zone removes every remote Free route (`:free`,
-  `opencode/*`) at source — never ranked, scored, dealt or listed — and admits
-  locally served models, which never leave the machine; a paid no-retention
-  route still serves. Exposure exclusions are the shape's, not the zone's, so
-  they mark and never hide, and because `closed` implies `sensitive` an
-  exposed *paid* route is excluded there exactly as under `sensitive`. For
+  leaves the working folder's zone alone. A `closed` zone removes every remote
+  Free route (`:free`, `opencode/*`) at source — never ranked, scored, dealt or
+  listed — and, `closed` implying `sensitive`, a `sensitive` or `closed` zone
+  admits only locally served models: every non-local route, paid included, is
+  excluded under ADR 0008. Exposure exclusions are the shape's, not the zone's,
+  so they mark and never hide: the table shows `exposed (no-retention)` or
+  `exposed (trains)` on each excluded row. For
   setup, follow **Set up the free-use zones**; `--write-zones` reads the
   interview's proposal from stdin, validates it through this loader's
   rules, and writes the file atomically — no mode needs `zones.json`
@@ -537,7 +575,8 @@ starts closed everywhere, so this is the interview's only opening move:
 
 - **Exit statuses** — **0** ran to completion: any verdict — safe,
   sensitive, not certified, allowed, blocked by the free-use zone, unknown
-  serving namespace, over-budget, empty pool, no candidate admitted. **1** carries no contract
+  serving namespace, over-budget, empty pool, no candidate admitted, blocked
+  (no eligible local candidate). **1** carries no contract
   meaning: what CPython and generic operational failures (network
   unreachable, unreadable input) produce — never an answer. **2** usage
   errors (argparse's own channel). **4** rules/config error (secrets rules,
@@ -567,14 +606,79 @@ starts closed everywhere, so this is the interview's only opening move:
   for a reproducible deal. **Affinity** is derived at run time, never stored: a
   hint's fit for the domain and its evidence map through `affinity.factors`
   (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
-  avoid/suspected ×0.5). Longest prefix wins. The deal is the only place taste
-  acts — the ranking itself is never reordered. Every dealt row is named by
-  its provider-qualified id (see **Pick line**), so a row is a dispatch,
-  not an interpretation. Its Free share — the fraction
+  avoid/suspected ×0.5). Longest prefix wins. A band-passing local row
+  additionally carries a **standing favor**: the factors' validated favor
+  multiplied into its pref by the deal (the caller's local rows only —
+  never eligibility, never score), so a qualifying shape genuinely deals
+  local hardware while the seeded draw still picks the row. The deal is the
+  only place taste acts — the ranking itself is never reordered. Every dealt
+  row is named by its provider-qualified id (see **Pick line**), so a row is
+  a dispatch, not an interpretation. Its Free share — the fraction
   of tickets Free routes drew — is a report, never a cap and never a floor:
   some tickets, all of them, or none, as the draw falls. Beside it, the deal
   always prints `plan share: N/M tickets (P%)` — plan tickets over dealt
-  tickets, an absorbed ticket counted metered.
+  tickets, an absorbed ticket counted metered — and
+  `local share: N/M tickets (P%)` — this machine's own servings over dealt
+  tickets.
+
+- **Spares & substitution** — every dealt row names exactly one **Spare**:
+  the highest-Score eligible candidate that missed the draw, shown in the
+  deal table's `spare` column (`-` on a row that missed the draw itself,
+  `none` plus a `spare:` note when every eligible candidate is dealt) and,
+  on a budgeted `--json` run, in `spares` keyed by provider-qualified id.
+  Score is the table's own fit-adjusted number. On a non-sensitive shape
+  the Spare prefers a candidate that serves without a model load — a cloud
+  route fails over in seconds where a local swap is minutes — Score
+  breaking the ties inside that class, and a load-required local candidate
+  standing only when no no-load candidate missed the draw. On a Sensitive
+  shape the Spare is drawn from local candidates only: the fence is
+  restated, never re-gated, so substitution can never loosen the gate.
+  Substitution is an invocation, not stored state — modelbandit is
+  stateless and the draw is seed-deterministic, so re-run the deal's own
+  flags plus `--substitute <dealt-id>` and the identical deal re-derives;
+  the record replaces the deal readout's tail and the run exits 0:
+  `substitution: <model> -> <spare>`, then indented `reason:` (mechanical —
+  unreachable, out of quota or allowance, unloadable, substituted
+  automatically; or dead-attempt — the harness's explicit failed-attempt
+  report), `takeover:` (the spare restarts the ticket whole) and `fence:`
+  lines — the Spare's band, `sensitive — local-only (ADR 0008)` and the
+  non-leak note on a Sensitive ticket. Reasons distinguish class:
+  `--reason mechanical` (the default — unreachable, out of quota or
+  allowance, unloadable) substitutes automatically; `--reason dead-attempt`
+  carries the harness's explicit failed-attempt report — the only way a
+  quality failure substitutes. `--reason quality` alone is refused
+  (`substitution refused: …`, exit 0, `refused` in `--json`), so taste
+  never reshuffles work mid-run. Exhaustion — no candidate missed the
+  draw — answers `blocked: no eligible … missed the draw for <model> (…)`,
+  exit 0: terminal for Sensitive (the local-only fence is never re-gated),
+  a non-sensitive run failing only after the no-load failover preference
+  has had its pick. Blocked and substituted outcomes exit 0; a target
+  outside the re-derived deal is a usage error (2). The record is the
+  audit trail: modelbandit deliberately stores no substitution state
+  (the draw is seed-deterministic and re-derivable), so the harness
+  records each substitution record the invocation prints in its own run
+  log — substitution, reason, takeover and fence together — and that
+  record is what makes every takeover auditable.
+
+- **Concurrency lane** — the deal's statement of mutual exclusion: one
+  strict lane of the local-dealt ticket ids, no two local runs concurrent,
+  same model or not (the single lane is the whole answer; load management
+  stays with the serving stack). Ticket ids number the batch from 1 in the
+  deal's assignment order — ticket i+1 is the draw keyed `seed::i`. The
+  readout maps every dealt id with `ticket ids: <ids> -> <model>` lines
+  (deal-row order) and prints the lane: `lane: strict — one local run at a
+  time (grouped by model)` followed by one `lane: <ids> -> <model>` line per
+  local-served group — groups ordered by each model's first assignment, ids
+  ascending inside a group — or `lane: none — no local-dealt tickets`. The
+  budget `--json` carries `lane` as a list of `{model, tickets}` groups
+  (empty when no local drew) and `tickets_by_model`, the full id → model
+  map; non-local tickets never appear in the lane. Membership follows the
+  served model under substitution: a substitution record prints `lane:` —
+  ids exit when the Spare is cloud, join when it is local, move between
+  groups when both are local, `unchanged` when neither serves local — and
+  its `--json` answers with the post-substitution lane, computed from the
+  same seeded deal with the new serve swapped in. The published chain stays
+  put: the lane record is the truth that substitution follows.
 
 - **Plan readout** — a deal that drew plan tickets prints, per plan row with
   tickets, `allowance draw: <model> $X of $Y (Z% of monthly; W% of 5h)` — `$X`
@@ -634,14 +738,20 @@ starts closed everywhere, so this is the interview's only opening move:
   imply trains, paid does not imply no-retention, an unknown free route
   defaults to trains. Localness is a serving fact, never a catalogue claim: a
   `local` label counts only for an id the route predicate does not classify as
-  remote. On a Sensitive shape the exposed — `trains` — are
-  excluded from the pick and the deal, marked in the table with the reason
-  (`exposed (trains)`), never hidden; no-retention free routes and local
-  models stay admitted. Exposure, not price, decides — and one admission
+  remote. On a Sensitive shape only Exposure `local` may serve (ADR 0008):
+  every non-local route — `no-retention` alike with `trains`, paid included —
+  is excluded from the pick and the deal, marked in the table with the reason
+  (`exposed (no-retention)`, `exposed (trains)`), never hidden; only local
+  models stay admitted, and a Sensitive shape with no eligible local candidate
+  stops with `blocked: no eligible local candidate` (exit 0 — the report is
+  the human escalation, never a re-gate). A deal touching Sensitive material
+  carries the standing non-leak note — a contract marker for the harness to
+  apply at prompt time; the prompt itself stays the harness's to author.
+  Exposure, not price, decides — and one admission
   verdict serves both the table and the deal, so the two never disagree
   about what may serve a shape. A `sensitive` zone is the `--sensitive` flag
   by another name, and a `closed` zone is at least that strict: it refuses
-  every exposed route a sensitive zone refuses — including an exposed *paid*
+  every non-local route a sensitive zone refuses — including a *paid*
   route — on top of every remote free one. The flag can only tighten a zone;
   it can never loosen one.
 

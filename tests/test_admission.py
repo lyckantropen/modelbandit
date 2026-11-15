@@ -88,6 +88,51 @@ class ExposureResolutionTests(unittest.TestCase):
         self.assertEqual(modelbandit.resolve_exposure("qwen3-coder-30b", local=True),
                          "local")
 
+    def test_the_local_serving_fact_needs_loopback(self):
+        # The serving flag says a candidate is served; only a loopback
+        # endpoint makes that *this machine's* serving. A LAN-served
+        # instance fails closed as exposed — unknown free defaults to
+        # trains — until the policy's exposure-override map declares it,
+        # and the namespace claim alone never changes that.
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b", local=True,
+                                  loopback=False),
+            "trains")
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b",
+                                  free_models={"lmstudio/qwen": {
+                                      "context_length": 65_536,
+                                      "exposure": "local"}},
+                                  loopback=False),
+            "trains")
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b",
+                                  overrides={"lmstudio/qwen": "local"},
+                                  free_models={"lmstudio/qwen": {
+                                      "context_length": 65_536,
+                                      "exposure": "local"}},
+                                  loopback=False),
+            "local")
+        # Loopback is the default: the normal serving resolves local.
+        self.assertEqual(
+            modelbandit.resolve_exposure("lmstudio/qwen/qwen3-4b",
+                                  free_models={"lmstudio/qwen": {
+                                      "context_length": 65_536,
+                                      "exposure": "local"}}),
+            "local")
+
+    def test_candidate_for_carries_the_loopback_fact_into_admission(self):
+        policy = {"free_models": {"lmstudio/qwen": {
+            "context_length": 65_536, "exposure": "local",
+            "summary_ref": "qwen"}},
+            "summaries": {"qwen": "fixture summary"}}
+        facts = modelbandit.candidate_for("lmstudio/qwen/qwen3-4b", policy,
+                                   local=True, loopback=False)
+        self.assertEqual(facts.exposure, "trains")
+        decision = modelbandit.admit(modelbandit.Shape(sensitive=True), facts)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "exposed (trains)")
+
     def test_a_local_label_cannot_make_a_remote_identity_local(self):
         # Localness is a serving fact, never a catalogue claim: the route
         # predicate says an `opencode/*` or `:free` id is remote, so a policy
@@ -142,14 +187,22 @@ class AdmissionTests(unittest.TestCase):
         decision = modelbandit.admit(SENSITIVE, candidate("z-ai/glm-5.3:free", "trains"))
         self.assertIn("trains", decision.reason)
 
-    def test_no_retention_free_candidate_admitted_to_sensitive_shape(self):
+    def test_no_retention_free_candidate_is_excluded_from_sensitive_shape(self):
+        # ADR 0008: no-retention is a promise about storage, not about
+        # transit — it leaves the machine like trains does, so Sensitive
+        # refuses it alike, marked with the named reason.
         decision = modelbandit.admit(SENSITIVE,
                               candidate("opencode/glm-5.3-flash", "no-retention"))
-        self.assertTrue(decision.admitted)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "exposed (no-retention)")
 
-    def test_paid_candidate_admitted_to_sensitive_shape(self):
-        self.assertTrue(modelbandit.admit(
-            SENSITIVE, candidate("deepseek/deepseek-v4-pro", "no-retention")))
+    def test_paid_no_retention_candidate_is_excluded_from_sensitive_shape(self):
+        # ADR 0008 applies to paid routes too: Exposure decides, never
+        # price, and only `local` may serve a Sensitive shape.
+        decision = modelbandit.admit(
+            SENSITIVE, candidate("deepseek/deepseek-v4-pro", "no-retention"))
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "exposed (no-retention)")
 
     def test_local_candidate_admitted_to_sensitive_shape(self):
         self.assertTrue(modelbandit.admit(
@@ -299,10 +352,16 @@ class CandidateFactsTests(unittest.TestCase):
         self.assertEqual(facts.exposure, "trains")
         self.assertFalse(modelbandit.admit(SENSITIVE, facts).admitted)
 
-    def test_curated_no_retention_route_binds_admitted(self):
+    def test_curated_no_retention_route_is_excluded_from_sensitive(self):
+        # The binding still resolves the curated fact — and under ADR 0008
+        # that fact is exactly what a Sensitive shape refuses: no local
+        # Exposure, no admission. An ordinary shape admits it as before.
         facts = modelbandit.candidate_for("opencode/glm-5.3-flash", self.POLICY)
         self.assertEqual(facts.exposure, "no-retention")
-        self.assertTrue(modelbandit.admit(SENSITIVE, facts).admitted)
+        self.assertFalse(modelbandit.admit(SENSITIVE, facts).admitted)
+        self.assertEqual(modelbandit.admit(SENSITIVE, facts).reason,
+                         "exposed (no-retention)")
+        self.assertTrue(modelbandit.admit(ORDINARY, facts).admitted)
 
     def test_candidate_binds_free_serving_and_catalog_window(self):
         facts = modelbandit.candidate_for("opencode/glm-5.3-flash", self.POLICY)

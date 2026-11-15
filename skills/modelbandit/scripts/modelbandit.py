@@ -29,10 +29,19 @@ import sys
 import tempfile
 import textwrap
 import time
+import urllib.parse
 import urllib.request
 
 MODELS_URL = "https://openrouter.ai/api/v1/models"
-LOCAL_MODELS_URL = "http://127.0.0.1:1234/v1/models"
+# The harness's local serving endpoint: LM Studio's own loopback default,
+# overridden for this run by the baseURL the harness config declares.
+DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:1234/v1"
+LOCAL_MODELS_URL = DEFAULT_LOCAL_ENDPOINT + "/models"
+# The harness's local namespace — the ids it dispatches local models by
+# (`lmstudio/<model>`), passed into the run as the listing that decides
+# which local candidates exist. One spelling, shared by the classifier and
+# the --local-listing filter.
+HARNESS_LOCAL_NAMESPACE = "lmstudio/"
 CLASS_URL = "https://openrouter.ai/api/v1/classifications/task?window=7d"
 RANK_URL = "https://openrouter.ai/api/v1/datasets/rankings-daily"
 KEY_URL = "https://openrouter.ai/api/v1/key"
@@ -143,20 +152,28 @@ def fetch_json(url: str, cache_name: str, *, auth: bool, refresh: bool,
     return data
 
 
-def probe_local_models(fetcher=None) -> dict[str, dict]:
-    """Discover LM Studio models for this run; failures are silent.
+def probe_local_models(fetcher=None, *, url: str = LOCAL_MODELS_URL
+                       ) -> dict[str, dict]:
+    """Probe the serving endpoint for its live models; failures are silent.
 
-    This is deliberately not cached: the local server and its loaded models can
-    change between invocations. ``fetcher`` accepts the URL and returns decoded
-    JSON, keeping the probe deterministic and network-free in unit tests.
+    Demoted to two narrow facts about candidates the harness listing
+    already made real: the context window the Context gate is judged
+    against, and whether a listed id is being served right now. It never
+    establishes existence or identity — the harness's listing does — so a
+    missing server has no effect on the candidate set or the readout.
+
+    This is deliberately not cached: the local server and its loaded models
+    can change between invocations. ``fetcher`` accepts the URL and returns
+    decoded JSON, keeping the probe deterministic and network-free in unit
+    tests.
     """
     if fetcher is None:
-        def fetcher(url):
-            with urllib.request.urlopen(url, timeout=1) as response:
+        def fetcher(fetch_url):
+            with urllib.request.urlopen(fetch_url, timeout=1) as response:
                 return json.load(response)
 
     try:
-        payload = fetcher(LOCAL_MODELS_URL)
+        payload = fetcher(url)
     except Exception:
         return {}
     rows = payload.get("data", []) if isinstance(payload, dict) else payload
@@ -175,6 +192,158 @@ def probe_local_models(fetcher=None) -> dict[str, dict]:
             model["context_length"] = window
         served[mid] = model
     return served
+
+
+# --- Harness listing seam --------------------------------------------------
+# What local models exist belongs to the harness: this run's local universe
+# is passed in with --local-listing (the harness's own `opencode models`
+# output), and the serving endpoint is read from the harness's config. The
+# script never discovers a local model on its own — the probe below is two
+# narrow facts about an already-listed candidate, never identity.
+
+
+def is_harness_local_id(mid) -> bool:
+    """Whether `mid` is exactly a harness-local id: the harness's own local
+    namespace followed by a non-empty model path — no empty segment, no
+    bare namespace.
+
+    The one spelling of the namespace rule every consumer answers to: the
+    --local-listing filter (what may seed a local candidate), the route
+    classifier (what classifies `local`) and the Local roster loader (what
+    keys an entry). A malformed namespace fails closed everywhere — it is
+    never local, whatever asks."""
+    return isinstance(mid, str) \
+        and mid.startswith(HARNESS_LOCAL_NAMESPACE) \
+        and all(mid[len(HARNESS_LOCAL_NAMESPACE):].split("/"))
+
+
+def parse_local_listing(values) -> set[str] | None:
+    """The local universe the harness passed in, or None when it did not.
+
+    Each --local-listing value may carry comma-separated ids. Absent means
+    unknown — the harness never spoke, so nothing joins and nothing is
+    judged unrunnable — while a flag that states no local id is an empty
+    universe the report may judge. Only the harness's local namespace
+    survives the filter: a foreign id can never seed a local candidate, so
+    what joins is exactly what the harness dispatches as `lmstudio/*`.
+    """
+    if not values:
+        return None
+    if isinstance(values, str):
+        values = [values]
+    ids = set()
+    for chunk in values:
+        for mid in str(chunk).split(","):
+            mid = mid.strip()
+            if is_harness_local_id(mid):
+                ids.add(mid)
+    return ids
+
+
+def _strip_json_comments(text: str) -> str:
+    """JSONC to JSON: drop `//` and `/* */` comments outside string literals,
+    so a `//` inside a URL value survives while the harness's comments do
+    not."""
+    out = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def read_local_endpoint(path: str) -> str | None:
+    """The harness local provider's baseURL from one config file, or None.
+
+    Any unreadable or unparseable file says nothing rather than failing the
+    run: the endpoint is one fact, and its absence falls back to the next
+    config source and finally the loopback default.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            config = json.loads(_strip_json_comments(f.read()))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    provider = config.get("provider")
+    entry = provider.get("lmstudio") if isinstance(provider, dict) else None
+    options = entry.get("options") if isinstance(entry, dict) else None
+    base = options.get("baseURL") if isinstance(options, dict) else None
+    return base.strip() if isinstance(base, str) and base.strip() else None
+
+
+def harness_config_paths(cwd: str | None = None) -> list[str]:
+    """Where the harness declares its providers: the project config first,
+    then the user config (XDG_CONFIG_HOME when the machine states it, else
+    `~/.config`), both spellings the harness accepts."""
+    cwd = os.getcwd() if cwd is None else cwd
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    root = os.path.join(config_home, "opencode")
+    return [os.path.join(cwd, "opencode.json"),
+            os.path.join(cwd, "opencode.jsonc"),
+            os.path.join(root, "opencode.json"),
+            os.path.join(root, "opencode.jsonc")]
+
+
+def harness_serving_endpoint(paths: list[str] | None = None) -> str:
+    """The baseURL the harness's local provider serves on — the endpoint
+    `local` Exposure's loopback rule judges — defaulting to LM Studio's
+    loopback binding when no config declares one."""
+    for path in harness_config_paths() if paths is None else paths:
+        if (base := read_local_endpoint(path)) is not None:
+            return base
+    return DEFAULT_LOCAL_ENDPOINT
+
+
+def loopback_endpoint(url: str | None) -> bool:
+    """Whether the serving endpoint is loopback on this machine — the one
+    condition `local` Exposure resolves under. Anything unparseable, empty,
+    or bound elsewhere (a LAN or tailnet name, `0.0.0.0`) is not loopback,
+    so a non-local serving fails closed until the policy's exposure-override
+    map declares it."""
+    if not isinstance(url, str) or not url:
+        return False
+    try:
+        host = urllib.parse.urlparse(url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return host == "localhost" or host == "::1" or host.startswith("127.")
+
+
+def models_url(endpoint: str | None) -> str:
+    """The probe's URL: the serving endpoint's `/v1/models` document."""
+    if not endpoint:
+        return LOCAL_MODELS_URL
+    return endpoint.rstrip("/") + "/models"
 
 
 def norm_id(model_id: str) -> str:
@@ -231,6 +400,15 @@ def classify_route(mid: str, *, local: bool = False) -> str | None:
         return "local"
     if not isinstance(mid, str):
         return None
+
+    # The harness's own local namespace claims local by itself: the id shape
+    # is a serving fact, so `lmstudio/*` classifies without the serving flag
+    # and without any catalogue consulted — checked before norm_id so an
+    # `openrouter/lmstudio/*` market slug stays the remote serving it is.
+    # A malformed namespace (no model path, an empty segment) fails closed
+    # — is_harness_local_id is the one spelling of that rule.
+    if mid.startswith(HARNESS_LOCAL_NAMESPACE):
+        return "local" if is_harness_local_id(mid) else None
 
     mid = norm_id(mid)
     if mid.startswith("opencode-go/"):
@@ -323,10 +501,11 @@ def qualified_id(mid: str, *, local: bool = False) -> str:
     The deal and the pick name a market, so an OpenRouter serving is
     re-prefixed with the namespace its configs dispatch through --
     `openrouter/` plus the normalized slug (norm_id) -- and every id already
-    carrying its provider namespace (`opencode/*`, `opencode-go/*`) or a model
-    this machine serves passes through unchanged. The Route kind is the
-    classifier's answer, never the id's spelling; an id no kind classifies is
-    left as written, since nothing in the run can dispatch it.
+    carrying its provider namespace (`opencode/*`, `opencode-go/*`,
+    `lmstudio/*`) or a model this machine serves passes through unchanged.
+    The Route kind is the classifier's answer, never the id's spelling; an
+    id no kind classifies is left as written, since nothing in the run can
+    dispatch it.
     """
     if classify_route(mid, local=local) in _OPENROUTER_KINDS:
         return "openrouter/" + norm_id(mid)
@@ -355,9 +534,10 @@ def local_label_is_void(mid: str) -> bool:
     Localness is a serving fact, never a catalogue claim: the classifier
     answers the remote serving namespaces remote whatever a label says - a
     `:free` slug, an `opencode/*` harness model, an `opencode-go/*` plan
-    route - so a `local` label on one is void. A market-shaped slash id is
-    not voided: local LM Studio ids are slash-shaped too, so the label may
-    claim one."""
+    route - so a `local` label on one is void. The harness's `lmstudio/*`
+    namespace classifies local by itself, and a market-shaped slash id is
+    not voided either: a served model's id can be slash-shaped, so the
+    label may claim one."""
     return classify_route(mid) in _REMOTE_KINDS
 
 
@@ -1081,6 +1261,143 @@ def zones_absent_line(*, environ=None) -> str:
             "— undeclared paths are closed")
 
 
+# --- Local roster ----------------------------------------------------------
+# The author-owned record of judgment about this machine's local models —
+# the Capability band (domains handled, Difficulty ceiling, context-demand
+# ceiling) and prose, keyed by the harness's own model id — and only that
+# (GLOSSARY, Local roster). Existence, ids and serving facts belong to the
+# harness; the roster never restates them. It lives beside zones.json:
+# machine-global, uncommitted, hand-maintained (ADR-0009).
+ROSTER_FILE = "local-roster.json"
+ROSTER_VERSION = 1
+# The file's two top-level sections: an unknown key is a config error the
+# way the plan catalog's unknown entry keys are — read by nobody, believed
+# by somebody.
+ROSTER_KEYS = ("version", "entries")
+# An entry's three fields: band + prose is the whole judgment (spec #66,
+# "kept thin"), provenance is the exporter's optional stamp (ADR-0009).
+# Anything else — a stray `context_length`, a serving fact — would be a
+# catalog claim in a judgment file, refused loudly like the plan catalog's
+# unknown keys.
+ROSTER_ENTRY_KEYS = ("band", "prose", "provenance")
+ROSTER_BAND_KEYS = ("domains", "difficulty", "context_demand")
+# The domain names a band may state: the modelbandit domain vocabulary
+# spelled out, so a typo stops the run instead of silently never matching
+# a ticket (understating a band costs reach; a typo would cost it all
+# without a word).
+ROSTER_DOMAINS = ("research", "writing", "coding", "orchestration", "ops")
+
+
+def roster_path(*, environ=None) -> str:
+    """`local-roster.json` under the machine's config root — the same
+    directory as zones.json ($XDG_CONFIG_HOME/modelbandit/, else
+    ~/.config/modelbandit/), honouring the environment it is given."""
+    env = os.environ if environ is None else environ
+    base = (env.get("XDG_CONFIG_HOME")
+            or os.path.join(expand_path("~", environ=env), ".config"))
+    return os.path.join(base, ZONES_CONFIG_DIR, ROSTER_FILE)
+
+
+def load_local_roster(*, path: str | None = None, environ=None) -> dict:
+    """Validate the Local roster at the config boundary: its entries, or an
+    empty roster when the file is absent.
+
+    Loud in the style of `load_free_models`: an unknown key or a bad type
+    stops the run naming the entry — never a silent default, because a band
+    the reader guessed is a judgment nobody made. A missing file is absent
+    setup (the harness listing, not the roster, says what exists). The keys
+    are the harness's own model ids: a key outside the harness's local
+    namespace is refused here, so a roster entry can never speak for a
+    remote serving — judgment binds only the local row (ADR-0005).
+    """
+    roster = path if path is not None else roster_path(environ=environ)
+    if not os.path.exists(roster):
+        return {}
+    try:
+        with open(roster, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(
+            f"cannot read local roster file {roster}: {exc}") from None
+    if not isinstance(data, dict):
+        raise SystemExit(f"local roster file {roster} must be a JSON object")
+    for key in data:
+        if key not in ROSTER_KEYS:
+            raise SystemExit(
+                f"local roster: unknown top-level key '{key}' "
+                f"(expected {', '.join(ROSTER_KEYS)})")
+    if not _is_plain_int(data.get("version")) \
+            or data["version"] != ROSTER_VERSION:
+        raise SystemExit(f"local roster: version must be {ROSTER_VERSION} "
+                         f"(got {data.get('version')!r})")
+    if "entries" not in data:
+        raise SystemExit("local roster missing required key: entries")
+    entries = data["entries"]
+    if not isinstance(entries, dict):
+        raise SystemExit("local roster entries must be an object")
+    for mid in entries:
+        if not is_harness_local_id(mid):
+            raise SystemExit(
+                f"local roster entries.{mid}: key must be a harness model "
+                f"id ({HARNESS_LOCAL_NAMESPACE}<model>), exactly as the "
+                f"harness invokes it")
+        entry = entries[mid]
+        where = f"entries.{mid}"
+        if not isinstance(entry, dict):
+            raise SystemExit(f"local roster {where} must be an object")
+        for key in entry:
+            if key not in ROSTER_ENTRY_KEYS:
+                raise SystemExit(
+                    f"local roster {where}: unknown key '{key}' "
+                    f"(expected {', '.join(ROSTER_ENTRY_KEYS)})")
+        if "band" not in entry:
+            raise SystemExit(f"local roster missing required key: "
+                             f"{where}.band")
+        band = entry["band"]
+        if not isinstance(band, dict):
+            raise SystemExit(f"local roster {where}.band must be an object")
+        for key in band:
+            if key not in ROSTER_BAND_KEYS:
+                raise SystemExit(
+                    f"local roster {where}.band: unknown key '{key}' "
+                    f"(expected {', '.join(ROSTER_BAND_KEYS)})")
+        for field in ROSTER_BAND_KEYS:
+            if field not in band:
+                raise SystemExit(
+                    f"local roster missing required key: {where}.band.{field}")
+        domains = band["domains"]
+        if not isinstance(domains, list) \
+                or not all(isinstance(name, str) for name in domains):
+            raise SystemExit(f"local roster {where}.band.domains must be a "
+                             f"list of domain names")
+        for name in domains:
+            if name not in ROSTER_DOMAINS:
+                raise SystemExit(
+                    f"local roster {where}.band.domains: unknown domain "
+                    f"'{name}' (known: {', '.join(ROSTER_DOMAINS)})")
+        difficulty = band["difficulty"]
+        if difficulty not in INTENTS:
+            raise SystemExit(
+                f"local roster {where}.band.difficulty must be one of "
+                f"{'|'.join(INTENTS)} (got {difficulty!r})")
+        demand = band["context_demand"]
+        if not _is_plain_int(demand) or demand <= 0:
+            raise SystemExit(f"local roster {where}.band.context_demand "
+                             f"must be a positive integer")
+        if "prose" not in entry:
+            raise SystemExit(
+                f"local roster missing required key: {where}.prose")
+        prose = entry["prose"]
+        if not isinstance(prose, str) or not prose.strip():
+            raise SystemExit(f"local roster {where}.prose must be a "
+                             f"non-empty string")
+        if "provenance" in entry and not isinstance(entry["provenance"],
+                                                    dict):
+            raise SystemExit(f"local roster {where}.provenance must be an "
+                             f"object")
+    return entries
+
+
 def expand_path(text: str, *, environ=None) -> str:
     """`~` and environment variables, against the environment it is given."""
     env = os.environ if environ is None else environ
@@ -1373,27 +1690,33 @@ def policy_facts(path: str | None) -> dict:
 
 
 def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
-               sensitive: bool = False) -> str | None:
+               sensitive: bool = False, loopback: bool = True) -> str | None:
     """The effective zone's reason this model may not serve here, or None.
 
     The whole pre-flight rule: the shape's regime is the zone's, tightened by
     `--sensitive` and never loosened, and the candidate facts are the policy's
-    Exposure facts alone (an empty policy keeps the safe defaults). Blocked
+    Exposure facts plus the serving endpoint's loopback status (an empty
+    policy and an undeclared endpoint keep the safe defaults). Blocked
     means a prohibition the regime states outright — a remote free route in a
-    closed zone, an exposed route at a sensitive regime or stricter — never a
-    Footprint, catalog or quota exclusion.
+    closed zone, a non-local route at a sensitive regime or stricter (ADR
+    0008: only Exposure `local` serves Sensitive work) — never a Footprint,
+    catalog or quota exclusion.
 
     The candidate is judged by its serving identity alone: localness is a
     serving fact, never a catalogue claim, and this guard observes no serving
     — so a policy label cannot make a remote id (`opencode/*`, `:free`) local
     here, and a remote Free route is refused in a closed zone whatever the
-    catalog says.
+    catalog says. The harness's `lmstudio/*` namespace classifies local, but
+    `local` still resolves only for a loopback endpoint: the pre-flight
+    reads the harness's declared endpoint (a file read, still no serving
+    observed) and a non-loopback serving fails closed as exposed.
     """
     shape = Shape(sensitive=sensitive,
                   regime=shape_regime(zone, sensitive=sensitive))
     model_id = norm_id(model_id)
     policy = policy or {}
-    return regime_prohibition(shape, candidate_for(model_id, policy))
+    return regime_prohibition(shape, candidate_for(model_id, policy,
+                                                   loopback=loopback))
 
 
 # The pre-flight's default-deny verdict: an id outside every Route kind names
@@ -1420,9 +1743,10 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     """Pre-flight: may this model serve in this folder's zone?
 
     The dispatch contract fails closed: an unstated shape is **Sensitive**,
-    and the output states the assumption (`shape: sensitive (assumed)`) — a
-    route that retains training data is refused by default, never allowed
-    because nobody said otherwise. A caller that knows the material is not
+    and the output states the assumption (`shape: sensitive (assumed)`) —
+    only a route whose Exposure is `local` is allowed by default (ADR 0008:
+    Sensitive material leaves the machine on any remote route, no-retention
+    alike), never allowed because nobody said otherwise. A caller that knows the material is not
     Sensitive must say so explicitly (`--plain`, printed as
     `shape: plain (via --plain)`); `--sensitive` restates the default and is
     accepted with the same verdict.
@@ -1466,7 +1790,8 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         print(f"blocked: {UNKNOWN_SERVING_NAMESPACE}")
         print(f"model: {model_id}")
         return 0
-    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain)
+    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain,
+                        loopback=loopback_endpoint(harness_serving_endpoint()))
     if as_json:
         emit_json({"mode": "assert-allowed", "ok": True,
                    "allowed": reason is None,
@@ -1988,6 +2313,12 @@ class DealParameters:
     tickets: int
     fit_adjusted_task_scores: dict | None = None
     admitted: frozenset | None = None
+    # The standing favor (issue #69): {mid -> multiplier} folded into the
+    # draw's pref beside the hint affinity — keyed by the caller's local
+    # rows, so only a row the admission seam already passed (band gate
+    # included) can be favored. None means no favor; the draw is the
+    # affinity table alone.
+    favor: dict | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2107,11 +2438,13 @@ def _free_catalog_kind(prefix: str, exposure: str) -> str | None:
     """The Route kind a ``free_models`` entry declares, from its prefix alone.
 
     Namespace first: ``opencode-go/*`` is a plan serving whatever the entry
-    says (plan has its own catalog), and ``opencode/*`` is a harness serving.
-    The ``local`` annotation supplies the local serving fact for a prefix no
-    remote namespace claims. A bare two-segment OpenRouter prefix is the
-    family the catalog keys a ``:free`` route by, so it declares a free-slug
-    serving. A ``:free`` suffix on any other shape routes through the seam,
+    says (plan has its own catalog), ``opencode/*`` is a harness serving, and
+    ``lmstudio/*`` is the harness's local serving — a malformed local
+    namespace fails closed through the classifier. The ``local`` annotation
+    supplies the local serving fact for a prefix no remote namespace claims.
+    A bare two-segment OpenRouter prefix is the family the catalog keys a
+    ``:free`` route by, so it declares a free-slug serving. A ``:free``
+    suffix on any other shape routes through the seam,
     which normalizes and classifies the whole prefix: a two-segment slug
     stays a free-slug serving, while a third segment or a plan namespace
     under the ``openrouter/`` qualifier is refused at load. Anything else
@@ -2120,6 +2453,11 @@ def _free_catalog_kind(prefix: str, exposure: str) -> str | None:
     """
     if prefix.startswith("opencode-go/"):
         return "plan"
+    if prefix.startswith(HARNESS_LOCAL_NAMESPACE):
+        # The harness's local namespace is a serving fact of its own —
+        # whatever the entry annotates, an `lmstudio/*` prefix declares a
+        # local serving, and a malformed one fails closed through the seam.
+        return classify_route(prefix)
     if exposure == "local":
         return "local"
     if prefix.startswith("opencode/"):
@@ -2405,6 +2743,11 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
         merged_models[mid] = _free_model_record(mid, entry, source)
 
     for prefix, entry in free_models.items():
+        if classify_route(prefix) == "local":
+            # A local-kind prefix never stands up its own row here: local
+            # candidates exist only where the harness listing says they do
+            # (merge_local_candidates), so a catalog entry alone raises none.
+            continue
         if (not is_free_route(prefix)
                 or not _free_summary(entry, summaries, prefix)):
             continue
@@ -2417,19 +2760,25 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
     return merged_share, merged_models
 
 
-def merge_local_candidates(share: dict, models: dict, served: dict,
+def merge_local_candidates(share: dict, models: dict, listed, served: dict,
                            free_models: dict, *,
                            inheritance: float = DEFAULT_FREE_SHARE_INHERITANCE
                            ) -> tuple[dict, dict]:
-    """Join this run's served local ids to the curated Free catalog.
+    """Join this run's harness-listed local ids to the curated Free catalog.
 
-    Served ids without a local Exposure catalog entry are ignored. Cataloged
-    served ids remain visible even without a summary, but the admission seam
-    requires that summary before they can be picked or dealt.
+    The harness listing is the sole source of existence and identity: an id
+    the harness does not list never joins, whatever the probe reports or the
+    catalog declares, and what joins is named exactly as the harness
+    dispatches it. Each listed id still needs a catalog entry whose Exposure
+    is ``local`` to be judged at all; cataloged listed ids remain visible
+    even without a summary, but the admission seam requires that summary
+    before they can be picked or dealt. The probe's contribution here is one
+    narrow fact — the live context window judged by the Context gate — never
+    existence: a missing server changes nothing about the candidate set.
     """
     merged_share = dict(share)
     merged_models = {mid: dict(model) for mid, model in models.items()}
-    for mid in served:
+    for mid in sorted(listed):
         match = longest_prefix_match(mid, free_models)
         if match is None:
             continue
@@ -2439,15 +2788,23 @@ def merge_local_candidates(share: dict, models: dict, served: dict,
         merged_share.setdefault(mid, 0.0)
         if merged_share[mid] == 0.0:
             merged_share[mid] = _family_share(merged_share, entry, inheritance)
-        # The curated context window is policy; the probe establishes that this
-        # candidate is currently served. Runtime metadata is not policy.
-        merged_models[mid] = _free_model_record(mid, entry, served[mid])
+        record = _free_model_record(mid, entry, served.get(mid))
+        live = served.get(mid)
+        if isinstance(live, dict) and live.get("context_length") is not None \
+                and _is_plain_int(live["context_length"]) \
+                and live["context_length"] > 0:
+            # The curated window stays the record's policy fact; the window
+            # the live serving reports is the capacity the Context gate is
+            # judged against, for this invocation only.
+            record["served_context_length"] = live["context_length"]
+        merged_models[mid] = record
     return merged_share, merged_models
 
 
-def local_candidate_ids(served: dict, free_models: dict) -> set[str]:
-    """Served ids matched by a catalog entry whose Exposure is ``local``."""
-    return {mid for mid in served
+def local_candidate_ids(listed, free_models: dict) -> set[str]:
+    """Harness-listed ids matched by a catalog entry whose Exposure is
+    ``local`` — the serving fact set the run's local flags read from."""
+    return {mid for mid in listed
             if (match := longest_prefix_match(mid, free_models)) is not None
             and isinstance(match[1], dict)
             and match[1].get("exposure") == "local"}
@@ -2625,7 +2982,9 @@ class Shape:
     Sensitive is the shape's fifth element: the Secrets gate's verdict on the
     material, bound per invocation, never a mood declared mid-run. `regime` is
     the free-use zone the run works under (see shape_regime), `open` unless a
-    zone or the flag says otherwise.
+    zone or the flag says otherwise. `domain` and `intent` are the ticket
+    facts the Local roster's band judges against: which domain the run works
+    (None when nothing judges one) and which effort rung it asks for.
     """
     sensitive: bool = False
     input_tokens: int | None = None
@@ -2633,11 +2992,14 @@ class Shape:
     context_margin: float = 0.5
     output_tokens: int | None = None
     regime: str = "open"
+    domain: str | None = None
+    intent: str = "measured"
 
 
 @dataclasses.dataclass(frozen=True)
 class Candidate:
-    """The candidate facts admission judges: Exposure, serving and Footprint."""
+    """The candidate facts admission judges: Exposure, serving, Footprint
+    and — for a rostered local row — its Capability band."""
     id: str
     exposure: str
     is_free: bool = False
@@ -2646,6 +3008,7 @@ class Candidate:
     completion_cap: int | None = None
     output_multiplier: float = 1.0
     local: bool = False
+    band: dict | None = None
 
 
 def facets_for_candidate(candidate: Candidate) -> dict | None:
@@ -2656,14 +3019,15 @@ def facets_for_candidate(candidate: Candidate) -> dict | None:
 
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
                      overrides: dict | None = None, local: bool = False,
-                     plans: dict | None = None) -> str:
+                     plans: dict | None = None,
+                     loopback: bool = True) -> str:
     """One candidate's Exposure, by precedence:
 
-    explicit policy override (prefix-keyed) > locally served > curated free
-    catalog entry > the plans catalog entry > the default-exposure facet (a
-    free-slug or harness serving trains, a market or plan serving
-    no-retention); an id outside every kind keeps the default no-retention
-    assumption.
+    explicit policy override (prefix-keyed) > locally served on a loopback
+    endpoint > curated free catalog entry > the plans catalog entry > the
+    default-exposure facet (a free-slug or harness serving trains, a market
+    or plan serving no-retention); an id outside every kind keeps the
+    default no-retention assumption.
 
     The default is the no-retention assumption — the account's data policy
     already holds it. A free route the catalog does not carry is exposed until
@@ -2675,27 +3039,47 @@ def resolve_exposure(mid: str, *, free_models: dict | None = None,
     a remote serving identity is void - the classifier decides, and it says
     the remote namespaces (`:free`, `opencode/*`, `opencode-go/*`) are
     remote - so the serving facts answer even when a stale policy reached
-    this far without validation. A market-shaped slash id is not voided:
-    local LM Studio ids are slash-shaped too.
+    this far without validation. The harness's `lmstudio/*` namespace
+    classifies local by itself, but `local` resolves only for a loopback
+    endpoint on this machine (`loopback`): a LAN-served instance fails
+    closed to the unknown-free default (`trains`) whatever claims reach
+    here, until the policy's exposure-override map — the one source allowed
+    to declare `local` outright — states it.
     """
-    def stated(value) -> str | None:
+    def overridden(value) -> str | None:
+        # The override map may name `local` itself: the operator's explicit
+        # statement about a serving, the escape hatch for a non-loopback one
+        # — still void on an identity whose local label is void.
         if value == "local" and local_label_is_void(mid):
             return None
         return known_exposure(mid, value)
 
+    def catalog_stated(value) -> str | None:
+        # Every other source — the free and plans catalogs alike — earns
+        # `local` only from the serving being loopback on this machine;
+        # what survives then answers under the override rule.
+        if value == "local" and not loopback:
+            return None
+        return overridden(value)
+
     match = longest_prefix_match(mid, overrides or {})
-    if match is not None and (value := stated(match[1])) is not None:
+    if match is not None and (value := overridden(match[1])) is not None:
         return value
-    if local:
+    if local and loopback:
         return "local"
     for catalog in (free_models or {}, plans or {}):
         match = longest_prefix_match(mid, catalog)
         entry = match[1] if match is not None else {}
         if isinstance(entry, dict) and entry.get("exposure") \
-                and (value := stated(entry["exposure"])) is not None:
+                and (value := catalog_stated(entry["exposure"])) is not None:
             return value
     facets = facets_for(mid, local=local)
-    return facets["default_exposure"] if facets else "no-retention"
+    default = facets["default_exposure"] if facets else "no-retention"
+    if default == "local" and not loopback:
+        # The local kind's own default cannot resolve without loopback;
+        # unknown Exposure for a Free route defaults to trains.
+        return "trains"
+    return default
 
 
 def known_exposure(mid: str, value: str) -> str:
@@ -2707,20 +3091,46 @@ def known_exposure(mid: str, value: str) -> str:
     return value
 
 
+def row_exposure(mid: str, policy: dict, *, local_ids, loopback: bool) -> str:
+    """One ranked table row's Exposure cell: the same precedence admission
+    judged — override map, local serving, catalogs and the loopback fact
+    included — so the column can never disagree with the gate."""
+    return resolve_exposure(mid, free_models=policy["free_models"],
+                            overrides=policy.get("exposure", {}),
+                            local=mid in local_ids,
+                            plans=policy["plans"],
+                            loopback=loopback)
+
+
 def candidate_for(mid: str, policy: dict, *, local: bool = False,
                   model: dict | None = None,
                   endpoints: list[dict] | None = None,
-                  intent: str = "measured") -> Candidate:
+                  intent: str = "measured",
+                  loopback: bool = True,
+                  roster: dict | None = None) -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
     the policy's `exposure` override map, `free_models` and `plans` catalogs,
-    plus its Free price class (the seam's answer) and Footprint capacities."""
+    plus its Free price class (the seam's answer) and Footprint capacities.
+    `loopback` is the serving fact behind `local` Exposure — see
+    resolve_exposure. `roster` is this machine's Local roster (entries keyed
+    by harness id): an exact key match attaches the entry's Capability band —
+    judgment only, it changes no serving fact, and an id the roster does not
+    carry simply has no band to judge."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
     plan_match = longest_prefix_match(mid, policy.get("plans", {}))
     is_free = is_free_route(mid, local=local)
     facets = facets_for(mid, local=local)
-    context_length = (catalog_entry.get("context_length")
-                      if isinstance(catalog_entry, dict) else None)
+    context_length = None
+    if model:
+        # The window the live serving reported for this candidate (the
+        # probe's one narrow contribution, see merge_local_candidates) is
+        # what the Context gate is judged against: the server enforces its
+        # own capacity, not the curated figure.
+        context_length = model.get("served_context_length")
+    if context_length is None:
+        context_length = (catalog_entry.get("context_length")
+                          if isinstance(catalog_entry, dict) else None)
     if context_length is None and model:
         context_length = model.get("context_length")
     completion_cap = endpoint_completion_cap(endpoints)
@@ -2736,13 +3146,17 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     needs_catalog_entry = (facets["needs_policy_catalog_entry"]
                            if facets else True)
     is_plan = is_plan_route(mid, local=local)
+    roster_entry = roster.get(mid) if roster else None
+    band = roster_entry.get("band") if isinstance(roster_entry, dict) else None
     return Candidate(id=mid,
                       exposure=resolve_exposure(
                           mid, free_models=policy.get("free_models", {}),
                           overrides=policy.get("exposure", {}), local=local,
-                          plans=policy.get("plans", {})),
+                          plans=policy.get("plans", {}),
+                          loopback=loopback),
                       is_free=is_free,
                       local=local,
+                      band=band if isinstance(band, dict) else None,
                       context_length=context_length,
                       completion_cap=completion_cap,
                       output_multiplier=(mult_for(model, intent) if model
@@ -2772,11 +3186,31 @@ def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, i
     return sum(row["tickets"] for row in rows if row["mid"] in free), total
 
 
+def deal_local_share(rows: list[dict], *, local=()) -> tuple[int, int]:
+    """Count tickets dealt to this machine's own servings — the harness's
+    local rows (issue #69): how much of the deal stays on this hardware.
+    The set is the run's local facts alone; no id shape is re-judged here,
+    so a remote route can never be counted local."""
+    local = set(local)
+    total = sum(row["tickets"] for row in rows)
+    return sum(row["tickets"] for row in rows if row["mid"] in local), total
+
+
 def share_line(label: str, tickets: int, dealt: int) -> str:
     """The deal's share readout: `<label>: N/M tickets (P%)`, a zero
     denominator reading 0% rather than dividing by nothing."""
     share = tickets / dealt if dealt else 0.0
     return f"{label}: {tickets}/{dealt} tickets ({share:.0%})"
+
+
+# The standing non-leak contract marker (ADR 0008): every deal touching
+# Sensitive material carries this line in its output, for the harness to
+# apply at prompt time. Prompt authoring itself stays with the harness —
+# this line is the marker, never the prompt.
+NON_LEAK_NOTE = (
+    "non-leak note: Sensitive material never leaves the machine "
+    "(standing contract marker — apply at prompt time; the harness "
+    "authors the prompt)")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2793,18 +3227,32 @@ class Decision:
 ADMITTED = Decision(True)
 
 
-def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
-    """The Exposure clause: why an exposed candidate may not serve, or None.
+def sensitive_shape(shape: Shape) -> bool:
+    """Whether the shape is Sensitive: material (`--sensitive`, or the
+    pre-flight's assumed default) or place (an effective regime at least as
+    strict as `sensitive`), whichever is stricter — a flag may only tighten
+    the zone's regime, never loosen it (shape_regime), so either trigger
+    firing is enough (ADR 0008)."""
+    return shape.sensitive or regime_at_least(shape.regime, "sensitive")
 
-    Exposed — `trains` — candidates never serve a Sensitive shape, whether
-    free or paid; no-retention and local candidates stay — Exposure, not
-    price, decides. A `sensitive` zone is the flag by another name, and a
-    `closed` zone is at least that strict (see regime_at_least), so it refuses
-    the same exposed routes on top of every remote free one.
+
+def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
+    """The Exposure clause: why a non-local candidate may not serve a
+    Sensitive shape, or None.
+
+    Only Exposure `local` may serve Sensitive work, whether Sensitive came
+    from place or material (ADR 0008): `no-retention` is a vendor promise
+    about storage, not about transit — Sensitive material leaves the
+    machine on any remote route — so it is excluded alike with `trains`.
+    Exposure, never price, decides; an excluded candidate is marked with
+    its Exposure in the table and never hidden. A `sensitive` zone is the
+    flag by another name, and a `closed` zone is at least that strict (see
+    regime_at_least), so it refuses every non-local route on top of every
+    remote free one.
     """
-    if candidate.exposure != "trains":
+    if not sensitive_shape(shape):
         return None
-    if not (shape.sensitive or regime_at_least(shape.regime, "sensitive")):
+    if candidate.exposure == "local":
         return None
     return f"exposed ({candidate.exposure})"
 
@@ -2813,6 +3261,61 @@ def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
     """The Exposure<->Sensitive gate; see `exposed_prohibition`."""
     reason = exposed_prohibition(shape, candidate)
     return Decision(reason is None, reason or "")
+
+
+def band_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """The Local roster's Capability band: hard exclusion, named per
+    dimension — the binding judgment on the local row only.
+
+    Only a rostered id carries a band (exact key match on the harness's own
+    id, attached by candidate_for), so the gate judges exactly the rows the
+    roster speaks for and never touches anyone else's admission. Each
+    dimension excludes with its own named reason, in the spirit of the
+    context gate's `over window`: the ticket's domain outside the band, the
+    effort rung over the Difficulty ceiling, the shape's Footprint over the
+    context-demand ceiling. Understating a band costs only reach;
+    overstating one fails at the ticket — and never at the window: the
+    Footprint is measured from the shape, the band ceiling is the number
+    enforced, and the probed context window stays the Context gate's own
+    (GLOSSARY, Capability band).
+    """
+    band = candidate.band
+    if not isinstance(band, dict):
+        return ADMITTED
+    reasons = []
+    domains = band.get("domains")
+    if not isinstance(domains, list):
+        domains = []
+    if shape.domain is not None and shape.domain not in domains:
+        if domains:
+            reasons.append(f"outside band (domain '{shape.domain}' not in "
+                           f"band: {', '.join(domains)})")
+        else:
+            reasons.append(f"outside band (domain '{shape.domain}' — the "
+                           f"band admits no domain)")
+    ceiling = band.get("difficulty")
+    if ceiling in INTENTS and shape.intent in INTENTS \
+            and INTENTS.index(shape.intent) > INTENTS.index(ceiling):
+        # Same ladder, one comparison: the band's ceiling and the ticket's
+        # effort rung are rungs of the one effort ladder (GLOSSARY,
+        # Difficulty — deliberation judged, never measured against a window).
+        reasons.append(f"over difficulty ceiling (effort {shape.intent} > "
+                       f"{ceiling})")
+    demand = band.get("context_demand")
+    if shape.input_tokens is not None and _is_plain_int(demand) \
+            and demand > 0:
+        # The shape's Footprint (input x growth headroom), measured from the
+        # token profile — the band ceiling is the enforced number, and no
+        # window figures in this comparison at all (the probed window stays
+        # the Context gate's own).
+        footprint = shape.input_tokens * shape.context_headroom
+        if footprint > demand:
+            reasons.append(
+                f"over band footprint (footprint {footprint:,.0f} over "
+                f"context-demand ceiling {demand:,} tokens)")
+    if not reasons:
+        return ADMITTED
+    return Decision(False, "; ".join(reasons))
 
 
 def context_gate(shape: Shape, candidate: Candidate) -> Decision:
@@ -2885,13 +3388,21 @@ def zone_prohibition(shape: Shape, candidate: Candidate) -> str | None:
 
 
 def filter_zone_candidates(share: dict, models: dict, policy: dict, *,
-                           local_ids, regime: str, intent: str) -> dict:
-    """Drop routes prohibited by this free-use regime before ranking or scoring."""
+                           local_ids, regime: str, intent: str,
+                           loopback: bool = True) -> dict:
+    """Drop routes prohibited by this free-use regime before ranking or scoring.
+
+    The candidate built here carries the run's serving facts — the loopback
+    fact among them — rather than defaulting a local row to loopback: a
+    default that assumes the serving is this machine's fails open against
+    what the run actually observed (ADR-0003, fail closed by default), and
+    the row must read here exactly as the admission that judges it later
+    reads it."""
     zone_shape = Shape(regime=regime)
     return {mid: value for mid, value in share.items()
             if zone_prohibition(zone_shape, candidate_for(
                 mid, policy, local=mid in local_ids, model=models.get(mid),
-                intent=intent)) is None}
+                intent=intent, loopback=loopback)) is None}
 
 
 def zone_gate(shape: Shape, candidate: Candidate) -> Decision:
@@ -2908,19 +3419,22 @@ def regime_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     """What the shape's regime forbids outright, or None.
 
     The pre-flight's yardstick, and the only two clauses a zone states: no
-    remote free route in a closed zone, no exposed route at a regime at least
-    as strict as `sensitive`. Everything else — Footprint, quota, an
-    uncataloged Free route — is a shape-level exclusion the table marks, so it
-    is not a zone block.
+    remote free route in a closed zone, no non-local route at a regime at
+    least as strict as `sensitive` (ADR 0008 — the closed regime implies
+    sensitive). Everything else — Footprint, quota, an uncataloged Free
+    route — is a shape-level exclusion the table marks, so it is not a zone
+    block.
     """
     return zone_prohibition(shape, candidate) \
         or exposed_prohibition(shape, candidate)
 
 
 # The gates, in order, behind the one decision. The zone comes first: a route a
-# closed zone forbids outright does not need its Exposure or Footprint judged,
-# and the first failing gate is the reason the table shows.
-GATES = (zone_gate, exposure_gate, context_gate, catalog_gate)
+# closed zone forbids outright does not need its Exposure, band or Footprint
+# judged, and the first failing gate is the reason the table shows. The band
+# sits beside them: judgment about the rostered local row, after the regime
+# and Exposure facts, before the mechanical capacity checks.
+GATES = (zone_gate, exposure_gate, band_gate, context_gate, catalog_gate)
 
 
 def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
@@ -3185,7 +3699,8 @@ def _twin_index(mid: str, pool: list[tuple[str, float]], plans: dict,
 
 def plan_deal(share: dict, models: dict, aff: dict,
               parameters: DealParameters, local=(), plans=None,
-              ledger: AllowanceLedger | None = None) -> list[dict]:
+              ledger: AllowanceLedger | None = None,
+              assign: list | None = None) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility is popularity (eligibility_pool). The draw blends the task
@@ -3196,8 +3711,14 @@ def plan_deal(share: dict, models: dict, aff: dict,
 
     where every pool member's base is its fit-adjusted task score, supplied
     for the whole pool by the caller (blend_bases). Deterministic in seed.
-    The pool is admission-filtered before the draw (parameters.admitted), so
-    the deal and the ranked table agree about what may serve the shape.
+    The standing favor (issue #69) multiplies into a row's pref —
+    ``pref = weight_for(mid, aff) * favor.get(mid, 1.0)`` — so the caller's
+    band-passing local rows tilt the draw through the same affinity
+    machinery that reads the hints, while the seeded draw still decides
+    which tickets land where. The favor moves preference alone: eligibility
+    (the pool), the bases, Nominal-floor pricing and the ledger never read
+    it. The pool is admission-filtered before the draw (parameters.admitted),
+    so the deal and the ranked table agree about what may serve the shape.
     Plan rows the plans catalog prices draw here too; the second brace keeps
     an uncataloged plan id out whatever reaches it.
 
@@ -3216,6 +3737,13 @@ def plan_deal(share: dict, models: dict, aff: dict,
     uncataloged plan id -- keep drawing and never enter the ledger.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
+
+    `assign` is an optional out-list (issue #72): when the caller passes
+    one, every draw appends the mid the batch's ticket landed on — or None
+    when the draw left the ticket unassigned (every row at cap) — so
+    position i records which model took ticket i+1, the draw keyed
+    `seed::i`. The lane and the ticket map read that record; callers that
+    pass none are untouched.
     """
     blend_weight = parameters.blend_weight
     seed = parameters.seed
@@ -3234,7 +3762,9 @@ def plan_deal(share: dict, models: dict, aff: dict,
     if not pool:
         return []
     bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
-    prefs = [weight_for(mid, aff) for mid, _ in pool]
+    favor = parameters.favor or {}
+    prefs = [weight_for(mid, aff) * favor.get(mid, 1.0)
+             for mid, _ in pool]
     pt, at = sum(bases) or 1.0, sum(prefs) or 1.0
     draws = [(1 - blend_weight) * (p / pt) + blend_weight * (a / at)
              for p, a in zip(bases, prefs)]
@@ -3270,6 +3800,8 @@ def plan_deal(share: dict, models: dict, aff: dict,
         r = random.Random(f"{seed}::{i}").random() * run
         start = next((j for j, c in enumerate(cum) if r <= c), None)
         if start is None:
+            if assign is not None:
+                assign.append(None)
             continue
         for step in range(len(cum)):
             j = (start + step) % len(cum)
@@ -3279,6 +3811,8 @@ def plan_deal(share: dict, models: dict, aff: dict,
                 k = twins[j]
                 counts[k] += 1
                 ledger.charge(pool[k][0])
+                if assign is not None:
+                    assign.append(pool[k][0])
                 break
             mid = pool[j][0]
             if ledger.crosses(mid):
@@ -3287,16 +3821,261 @@ def plan_deal(share: dict, models: dict, aff: dict,
                     twins[j] = k
                     counts[k] += 1
                     ledger.charge(pool[k][0])
+                    if assign is not None:
+                        assign.append(pool[k][0])
                     break
                 evicted[j] = True
                 continue
             counts[j] += 1
             ledger.charge(mid)
+            if assign is not None:
+                assign.append(mid)
             break
+        else:
+            # Every row evicted: the draw left this ticket unassigned, and
+            # the record keeps its position honest — None, no lane, no map.
+            if assign is not None:
+                assign.append(None)
     return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
              "tickets": n}
             for (mid, s), b, pr, d, n
             in zip(pool, bases, prefs, draws, counts)]
+
+
+def _spare_candidates(rows: list[dict], *, local=(),
+                      sensitive=False) -> list[dict]:
+    """The rows that missed the draw, in Spare order (issue #71, GLOSSARY
+    "Spare"): the candidates the deal did not deal, best first.
+
+    Two preferences order them, and Score breaks every tie:
+
+    - Sensitive draws spares from local candidates only — the fence is
+      admission's, so the Spare selection re-states it rather than trusting
+      it: a non-local row is never a Sensitive Spare, whatever it scores
+      (the run then finds itself exhausted instead of re-gated).
+    - A non-sensitive ticket prefers a candidate that serves without a model
+      load (a non-local route: failover is seconds, a local swap is minutes),
+      Score breaking ties inside that class; only when no no-load candidate
+      missed the draw does a load-required one stand.
+
+    Score is the deal table's own number — the fit-adjusted task score
+    (standing), the same `score` column the readout prints. The sort is
+    stable, so equal scores fall back to the pool's own order.
+    """
+    local = set(local)
+    missed = [row for row in rows if row["tickets"] == 0]
+    if sensitive:
+        missed = [row for row in missed if row["mid"] in local]
+        missed.sort(key=lambda row: -row["base"])
+        return missed
+    missed.sort(key=lambda row: -row["base"])
+    missed.sort(key=lambda row: 0 if row["mid"] not in local else 1)
+    return missed
+
+
+def spare_for(mid: str, rows: list[dict], *, local=(),
+              sensitive=False) -> str | None:
+    """`mid`'s Spare: the best candidate that missed the draw, never `mid`
+    itself (issue #71). None means exhausted — every eligible candidate is
+    dealt (or, Sensitive, every local one), and the caller reports that
+    instead of reaching outside the fence for a taker."""
+    for row in _spare_candidates(rows, local=local, sensitive=sensitive):
+        if row["mid"] != mid:
+            return row["mid"]
+    return None
+
+
+def deal_spares(rows: list[dict], *, local=(), sensitive=False) -> dict:
+    """One named Spare per dealt model (issue #71): {dealt mid -> spare mid
+    or None}. Rows that missed the draw are spares themselves and key
+    nothing — every dealt row names exactly one candidate from behind the
+    draw, and None records an exhausted deal."""
+    return {row["mid"]: spare_for(row["mid"], rows, local=local,
+                                  sensitive=sensitive)
+            for row in rows if row["tickets"]}
+
+
+def deal_lane(assign: list, *, local=()) -> list[dict]:
+    """The single strict local lane (issue #72): one group per local-served
+    model, its dealt ticket ids in assignment order, groups ordered by each
+    model's first assignment — consecutive lane members share a served
+    model, so the batch runs one model load at a time with minimal
+    load/unload churn (spec US25).
+
+    `assign` is plan_deal's out-record: position i is the mid that took
+    ticket i+1 (the draw keyed `seed::i`), None when a draw went
+    unassigned. Membership follows the served model alone — the harness's
+    local facts, never an id's spelling (the ADR-0005 invariant), so a
+    cloud ticket is absent from the lane whatever it draws. The result is
+    stable for a fixed roster, listing, shape and seed.
+    """
+    groups: dict[str, list[int]] = {}
+    local = set(local)
+    for i, mid in enumerate(assign, 1):
+        if mid is None or mid not in local:
+            continue
+        groups.setdefault(mid, []).append(i)
+    return [{"model": qualified_id(mid, local=True), "tickets": ids}
+            for mid, ids in groups.items()]
+
+
+def tickets_by_model(rows: list[dict], *, assign: list, local=()) -> dict:
+    """The batch's ticket id → model map, keyed by provider-qualified id in
+    deal-row order: the ids each dealt row actually drew (issue #72). Rows
+    that missed the draw key nothing; together with the lane — which names
+    the local ids per model — the map makes every ticket id's model
+    recoverable from the deal output. Unassigned draws (None in `assign`)
+    name no model and so appear under no key."""
+    dealt = [row for row in rows if row["tickets"]]
+    local = set(local)
+    return {qualified_id(row["mid"], local=row["mid"] in local):
+            [i for i, mid in enumerate(assign, 1) if mid == row["mid"]]
+            for row in dealt}
+
+
+def spare_exhaustion_text(mid: str, *, sensitive: bool) -> str:
+    """Why a ticket has no Spare left — the one sentence the readout's
+    `spare:` note and a substitution's `blocked:` report share (issue #71).
+    The parenthetical states the fence: Sensitive stops because the
+    local-only rule is never re-gated, a non-sensitive run only fails after
+    the no-load failover preference has had its pick."""
+    if sensitive:
+        return (f"no eligible local candidate missed the draw for {mid} "
+                "(local-only fence holds; never re-gated)")
+    return (f"no eligible candidate missed the draw for {mid} "
+            "(no-load failover preferred first)")
+
+
+# The reason classes a substitution records (issue #71): mechanical failures
+# substitute automatically; a quality failure substitutes only on the
+# harness's explicit dead-attempt report, so taste never reshuffles work
+# mid-run (`--reason quality` alone is refused before anything is fetched).
+SUBSTITUTION_REASONS = {
+    "mechanical": ("mechanical — unreachable, out of quota or allowance, "
+                   "unloadable (substituted automatically)"),
+    "dead-attempt": ("dead-attempt — the harness's explicit failed-attempt "
+                     "report (quality; substituted on the report alone)"),
+}
+
+
+def band_line(mid: str, band: dict | None) -> str:
+    """The fence's band restatement in a substitution record: the Spare's
+    own Capability band when the roster speaks for it, or the honest
+    absence — the band is the roster's judgment on a local row and never
+    binds a cloud route (GLOSSARY, Capability band)."""
+    if not isinstance(band, dict):
+        return (f"none binds {mid} (the Capability band judges a rostered "
+                "local row only)")
+    domains = ", ".join(str(d) for d in band.get("domains") or []) or "none"
+    parts = [f"domains {domains}"]
+    difficulty = band.get("difficulty")
+    if difficulty:
+        parts.append(f"difficulty ceiling {difficulty}")
+    demand = band.get("context_demand")
+    if _is_plain_int(demand):
+        parts.append(f"context-demand ceiling {demand:,} tokens")
+    return f"{mid}: " + "; ".join(parts)
+
+
+def run_substitution(target: str, reason: str, rows: list[dict], *,
+                     local=(), sensitive: bool = False, roster=None,
+                     zone=None, as_json: bool = False,
+                     assign: list | None = None) -> int:
+    """The substitution record (issue #71): the named model's Spare takes
+    the ticket over whole, the fence restated, the reason recorded — and
+    the lane effect stated (issue #72): lane membership follows the served
+    model, so a cloud Spare's tickets exit the strict lane, a local one's
+    join it, and the record carries the post-substitution lane computed
+    from the same seeded deal with this serve swapped in.
+
+    Stateless by construction — the caller has re-derived the same seeded
+    deal from the same flags, so this only reports the takeover the draw
+    already named; nothing is stored, and the next invocation re-derives
+    again (the AllowanceLedger's ethos: two identical runs answer
+    identically). The fence is re-stated, never re-gated: a Sensitive
+    substitution's Spare came from local candidates only, whatever a
+    cloud route would have scored. A target outside this deal is a usage
+    error (2); exhaustion is a verdict like any other — `blocked:`, exit 0,
+    terminal for Sensitive (never re-gated), reported only after the
+    no-load preference has had its pick elsewhere.
+    """
+    local = set(local)
+    mid = norm_id(target)
+    by_id = {row["mid"]: row for row in rows}
+    if mid not in by_id:
+        print(f"substitute: '{target}' is not part of this deal "
+              "(the same seed and shape flags re-derive the same deal)",
+              file=sys.stderr)
+        return 2
+    frm = qualified_id(mid, local=mid in local)
+    to_mid = spare_for(mid, rows, local=local, sensitive=sensitive)
+    if to_mid is None:
+        text = spare_exhaustion_text(frm, sensitive=sensitive)
+        if as_json:
+            emit_json({"mode": "substitution", "ok": True,
+                       "verdict": "blocked", "from": frm, "to": None,
+                       "reason": text, "sensitive": sensitive,
+                       "zone": zone_payload(zone)})
+        else:
+            print(f"blocked: {text}")
+        return 0
+    to = qualified_id(to_mid, local=to_mid in local)
+    entry = (roster or {}).get(to_mid)
+    band = entry.get("band") if isinstance(entry, dict) else None
+    tickets = by_id[mid]["tickets"]
+    # The lane effect (issue #72): the ids this substitution moved are the
+    # target row's own draws from the seeded assignment, and the emitted
+    # lane is the seeded deal's lane with this serve swapped in — the same
+    # record's takeover section states the move in words. A target that
+    # missed the draw holds a ticket through an earlier substitution: no id
+    # of this deal's assignment names it, so the words say `the held
+    # ticket` and the lane (no id of it to move) stays as dealt.
+    held = [i for i, m in enumerate(assign or [], 1) if m == mid]
+    lane = deal_lane([to_mid if m == mid else m for m in (assign or [])],
+                     local=local)
+    ids = ", ".join(str(i) for i in held)
+    if held:
+        who, many = f"tickets {ids}", True
+    else:
+        who, many = "the held ticket", False
+    if mid in local and to_mid in local:
+        effect = (f"{who} {'move' if many else 'moves'} to {to} — "
+                  "membership follows the serve")
+    elif mid in local:
+        effect = (f"{who} {'exit' if many else 'exits'} the lane — "
+                  f"{to} is not local")
+    elif to_mid in local:
+        effect = (f"{who} {'join' if many else 'joins'} the lane — "
+                  f"served by {to}")
+    else:
+        effect = "unchanged — neither serve is local"
+    if as_json:
+        emit_json({"mode": "substitution", "ok": True,
+                   "verdict": "substituted", "from": frm, "to": to,
+                   "reason": reason,
+                   "reason_class": ("quality" if reason == "dead-attempt"
+                                    else "automatic"),
+                   "tickets": tickets, "sensitive": sensitive, "band": band,
+                   "non_leak_note": (NON_LEAK_NOTE if sensitive else None),
+                   "lane": lane,
+                   "zone": zone_payload(zone)})
+        return 0
+    print(f"substitution: {frm} -> {to}")
+    print(f"  reason: {SUBSTITUTION_REASONS[reason]}")
+    if tickets:
+        plural = "" if tickets == 1 else "s"
+        print(f"  takeover: {to} takes the ticket over whole "
+              f"({tickets} ticket{plural})")
+    else:
+        # The substituted model was itself a Spare already holding the
+        # ticket (a second death): the held ticket still moves whole.
+        print(f"  takeover: {to} takes the held ticket over whole")
+    print(f"  lane: {effect}")
+    print(f"  fence: band — {band_line(to, band)}")
+    if sensitive:
+        print("  fence: sensitive — local-only (ADR 0008)")
+        print(NON_LEAK_NOTE)
+    return 0
 
 
 def policy_age_days(policy_path: str) -> int | None:
@@ -3416,11 +4195,12 @@ SOURCE_COLUMNS = {
 def domain_rankings(classif: dict, domains: dict, models: dict,
                     by_canon: dict, top: int, config: PolicyConfig,
                     policy: dict, local_ids=(), regime: str = "open",
-                    intent: str = "measured"):
+                    intent: str = "measured", loopback: bool = True):
     """Per-domain share boards (free candidates merged, zone-filtered — the
     same source the check and a ranking run judge), their top-cut ranked mids
     and the union of ranked mids. The shared input for the check's drift
-    derivation, the --scope facts and the --anchors scope."""
+    derivation, the --scope facts and the --anchors scope. The loopback fact
+    reaches the zone filter so the candidates it builds read as the run's."""
     summaries = policy.get("summaries", {})
     local_ids = set(local_ids)
     share_by_domain: dict[str, dict] = {}
@@ -3436,7 +4216,7 @@ def domain_rankings(classif: dict, domains: dict, models: dict,
                 share.setdefault(mid, 0.0)
         share = filter_zone_candidates(
             share, models, policy, local_ids=local_ids,
-            regime=regime, intent=intent)
+            regime=regime, intent=intent, loopback=loopback)
         share_by_domain[name] = share
         ranked_by_domain[name] = [mid for mid, _ in
                                   sorted(share.items(), key=lambda kv: -kv[1])[:top]]
@@ -3738,7 +4518,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      local_ids=(), regime: str = "open",
                      zone: Zone | None = None,
                      sensitive: bool = False,
-                     ranks=None) -> None:
+                     ranks=None, local_listing=None,
+                     roster=None, loopback: bool = True) -> None:
     zone = zone if zone is not None else Zone(path=None, regime=regime)
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
@@ -3749,7 +4530,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     # serve and no Free-share signal is claimed for routes that cannot draw.
     share_by_domain, ranked_by_domain, all_ranked = domain_rankings(
         classif, domains, models, by_canon, top, config, policy,
-        local_ids=local_ids, regime=regime, intent=intent)
+        local_ids=local_ids, regime=regime, intent=intent,
+        loopback=loopback)
     # The deal's players: the eligibility top-K of each domain, plus ranked
     # models the user favors (weight > 1) below the cut — the same pool
     # plan_deal admits. Coverage is judged only for those.
@@ -3796,13 +4578,14 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         shape = Shape(sensitive=False, input_tokens=in_tok,
                       context_headroom=config.context.headroom,
                       context_margin=config.context.margin,
-                      regime=regime)
+                      regime=regime, domain=name, intent=intent)
         aff = domain_weights(signals, name, config.factors)
         admitted = frozenset(
             mid for mid in share_by_domain[name]
             if admit(shape, candidate_for(
                 mid, policy, local=mid in local_ids,
-                model=models.get(mid))).admitted)
+                model=models.get(mid), roster=roster,
+                loopback=loopback)).admitted)
         pool = eligibility_pool(share_by_domain[name], models, aff, pool_k,
                                 admitted, local=local_ids)
         free = free_route_ids((mid for mid, _ in pool), policy,
@@ -3883,6 +4666,45 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     print("\n## Signal coverage gaps (opinion elsewhere, silent here)")
     for line in sorted(coverage) or ["— none"]:
         print(f"- {line}")
+
+    # Spec #66 US8's second half: seeded bands the operator has not
+    # confirmed are exporter-stamped `suspected` evidence, and the
+    # diagnostic surface is where the operator meets them. Ids and a count
+    # only — the prose is the roster's own, and this report never restates
+    # it. Reporting changes nothing: a suspected band still binds exactly
+    # like a confirmed one (ADR-0009), it just says so.
+    print("\n## Roster bands awaiting confirmation")
+    unconfirmed = sorted(
+        mid for mid, entry in (roster or {}).items()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("provenance"), dict)
+        and entry["provenance"].get("evidence") == "suspected")
+    if unconfirmed:
+        print(f"- {len(unconfirmed)} suspected (exporter-stamped, "
+              f"unconfirmed): {', '.join(unconfirmed)}")
+    else:
+        print("- — none")
+
+    # Rostered ahead of the harness: a local entry no listing id reaches is
+    # reported here, never dealt — existence comes from the listing alone,
+    # so this is the one surface that can speak for an entry the ranking
+    # cannot show. Both sources speak: the free catalog's local entries
+    # (a policy-side claim about existence) and the Local roster's own
+    # keys (judgment ahead of the harness). No flag means the harness
+    # never spoke: say that instead of judging what was never given.
+    print("\n## Local models the harness cannot run")
+    if local_listing is None:
+        print("- — harness listing not provided; not judgeable")
+    else:
+        stranded = sorted(
+            {prefix for prefix, entry in policy.get("free_models", {}).items()
+             if isinstance(entry, dict) and entry.get("exposure") == "local"
+             and not any(mid.startswith(prefix) for mid in local_listing)}
+            | {mid for mid in (roster or {}) if mid not in local_listing})
+        for prefix in stranded:
+            print(f"- {prefix} — not in the harness listing; never dealt")
+        if not stranded:
+            print("- — none")
 
     print("\n## Free-share trends to zero (safe-shape history)")
     print(f"History retains the last {FREE_SHARE_HISTORY_LIMIT} measurements "
@@ -4036,8 +4858,9 @@ def main() -> None:
     ap.add_argument("--json", action="store_true",
                     help="answer with one JSON object on stdout instead of "
                          "the human lines: --check-secrets, --assert-allowed, "
-                         "--status, and a budgeted ranking run (--domain with "
-                         "--budget); a usage error anywhere else. `ok` is "
+                         "--status, a budgeted ranking run (--domain with "
+                         "--budget), and a substitution (--deal "
+                         "--substitute); a usage error anywhere else. `ok` is "
                          "always true — the status says the tool ran, the "
                          "object says what's true. The ranking table itself "
                          "is never JSON-ized.")
@@ -4072,16 +4895,39 @@ def main() -> None:
     ap.add_argument("--deal", action="store_true",
                     help="deal tickets across the eligible pool by seeded draw "
                          "from the preference-blended distribution")
+    ap.add_argument("--substitute", default=None, metavar="ID",
+                    help="with --deal: re-derive this seeded deal and print "
+                         "the substitution record — the named model's Spare "
+                         "takes the ticket over whole, fence restated, "
+                         "reason recorded (exit 0); pass the same seed and "
+                         "shape flags the deal ran with")
+    ap.add_argument("--reason", default=None,
+                    choices=("mechanical", "quality", "dead-attempt"),
+                    help="with --substitute: why the model failed — "
+                         "'mechanical' (unreachable, out of quota or "
+                         "allowance, unloadable; the default, substitutes "
+                         "automatically), 'dead-attempt' (the harness's "
+                         "explicit failed-attempt report — the only way a "
+                         "quality failure substitutes), or 'quality' alone, "
+                         "which is refused")
     ap.add_argument("--seed", default="modelbandit",
                     help="deal seed for reproducibility; use the project name")
     ap.add_argument("--fit", default=None, metavar="SPEC",
                     help="agent's task-fit judgments, 'mid=score,...' on 0-5; "
                          "composes as score * fit/5 (longest prefix wins)")
+    ap.add_argument("--local-listing", action="append", metavar="IDS",
+                    help="the harness's local model ids ('lmstudio/...', "
+                         "comma-separated, repeatable): the sole source of "
+                         "local candidate existence and identity; omitted, "
+                         "the run claims no local candidate at all")
     ap.add_argument("--sensitive", action="store_true",
                     help="Sensitive ticket shape (the Secrets gate's verdict): "
-                         "exposed candidates — trains — are excluded from the "
-                         "pick and the deal, and marked with a reason in the "
-                         "table; no-retention free and local routes stay in")
+                         "only Exposure 'local' candidates are admitted — every "
+                         "non-local route (no-retention and trains alike) is "
+                         "excluded from the pick and the deal, marked with a "
+                         "reason in the table; no eligible local candidate "
+                         "stops the run with 'blocked: no eligible local "
+                         "candidate' (exit 0)")
     ap.add_argument("--budget", type=float, help="run budget in USD")
     ap.add_argument("--top", type=int, default=8, help="ranking rows to show")
     ap.add_argument("--policy", default=DEFAULT_POLICY,
@@ -4110,11 +4956,22 @@ def main() -> None:
     if args.plain and args.sensitive:
         ap.error("--plain and --sensitive contradict; state one shape")
 
+    # Same rule for the substitution flags: a flag silently ignored is a
+    # rule the user believes in. `--substitute` lives in the deal's shape —
+    # it re-derives the seeded deal — and `--reason` names only why.
+    if args.reason is not None and not args.substitute:
+        ap.error("--reason is read only by --substitute")
+    if args.substitute is not None and not args.deal:
+        ap.error("--substitute is read only by --deal")
+
     # --json answers the verdict modes only; the ranking table is never
     # JSON-ized (issue #41), so anywhere else the flag would be silently
-    # ignored — it stops as the usage error it is.
+    # ignored — it stops as the usage error it is. A substitution answers
+    # with its own record (issue #71), so it counts as served beside the
+    # budgeted ranking run.
     if args.json:
-        domain_served = bool(args.domain) and args.budget is not None
+        domain_served = bool(args.domain) and (args.budget is not None
+                                               or args.substitute is not None)
         served = (int(args.check_secrets) + int(args.assert_allowed)
                   + int(args.status) + int(domain_served))
         riders = (args.write_secrets or args.write_zones or args.list_domains
@@ -4123,8 +4980,26 @@ def main() -> None:
                   or (args.domain and not domain_served))
         if served != 1 or riders:
             ap.error("--json is read only by --check-secrets, --assert-allowed, "
-                     "--status and a budgeted ranking run (--domain with "
-                     "--budget), each on its own")
+                     "--status, a budgeted ranking run (--domain with "
+                     "--budget) and a substitution (--deal --substitute), "
+                     "each on its own")
+
+    if args.reason == "quality":
+        # The quality class refuses at the flag (issue #71): taste never
+        # reshuffles work mid-run — a quality failure substitutes only on
+        # the harness's explicit dead-attempt report. The refusal is this
+        # run's verdict, like any other: it prints (or answers --json) and
+        # exits 0, before anything is fetched.
+        refusal = ("quality failure substitutes only on the harness's "
+                   "explicit dead-attempt report "
+                   "(state --reason dead-attempt)")
+        if args.json:
+            emit_json({"mode": "substitution", "ok": True,
+                       "verdict": "refused", "substitute": args.substitute,
+                       "reason": refusal, "zone": None})
+        else:
+            print(f"substitution refused: {refusal}")
+        raise SystemExit(0)
 
     if args.assert_allowed:
         # The pre-flight reads the zone and the local policy, never the board:
@@ -4177,6 +5052,14 @@ def main() -> None:
         print(f"policy/config error: {exc}", file=sys.stderr)
         raise SystemExit(RULES_CONFIG_ERROR) from None
     domains = policy.get("domains", {})
+    # The Local roster travels the same status-4 road as the policy it sits
+    # beside: a malformed entry stops the run naming it, never reaching
+    # admission as a guessed band.
+    try:
+        roster = load_local_roster()
+    except SystemExit as exc:
+        print(f"local roster/config error: {exc}", file=sys.stderr)
+        raise SystemExit(RULES_CONFIG_ERROR) from None
 
     if args.list_domains:
         for name, tags in domains.items():
@@ -4209,6 +5092,18 @@ def main() -> None:
         run_anchors(args.anchors, models, by_canon, classif, domains, policy,
                     args.top, args.refresh, config, zone, regime)
         return
+    # The local universe arrives from the harness — passed in with
+    # --local-listing — and the serving endpoint from the harness's config:
+    # one fact each, no discovery channel of our own (the probe below stays
+    # two narrow facts about already-listed candidates: is it serving, at
+    # what window). `loopback` is the condition `local` Exposure resolves
+    # under, and `listed` is empty whenever the harness never spoke.
+    serving_endpoint = harness_serving_endpoint()
+    loopback = loopback_endpoint(serving_endpoint)
+    local_listing = parse_local_listing(args.local_listing)
+    listed = sorted(local_listing) if local_listing is not None else []
+    served_local = probe_local_models(url=models_url(serving_endpoint))
+    local_ids = local_candidate_ids(listed, policy["free_models"])
     if args.check_policy or args.scope:
         # The scope path needs the daily token rankings for window totals; the
         # bare check never consults them and stays one fetch lighter.
@@ -4218,18 +5113,19 @@ def main() -> None:
         share, models = merge_free_candidates(
             {}, models, policy["free_models"], policy.get("summaries", {}),
             inheritance=config.free_share_inheritance)
-        # Check-policy sees this invocation's same local candidates as a domain
-        # run, but still performs no persistent policy update.
-        served_local = probe_local_models()
-        local_ids = local_candidate_ids(served_local, policy["free_models"])
+        # Check-policy sees this invocation's same local candidates and
+        # serving facts (the loopback condition included) as a domain run,
+        # but still performs no persistent policy update.
         _, models = merge_local_candidates(
-            share, models, served_local, policy["free_models"],
+            share, models, listed, served_local, policy["free_models"],
             inheritance=config.free_share_inheritance)
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
                          config, local_ids=local_ids, regime=regime, zone=zone,
-                         sensitive=args.sensitive, ranks=ranks)
+                         sensitive=args.sensitive, ranks=ranks,
+                         local_listing=local_listing, roster=roster,
+                         loopback=loopback)
         return
 
     tags = domains[args.domain]
@@ -4248,12 +5144,10 @@ def main() -> None:
     share, models = merge_free_candidates(
         share, models, policy["free_models"], policy.get("summaries", {}),
         inheritance=config.free_share_inheritance)
-    # The local discovery is a live, per-run input, not persistent catalog
-    # state. Only served ids matched to an Exposure=local policy entry join.
-    served_local = probe_local_models()
-    local_ids = local_candidate_ids(served_local, policy["free_models"])
+    # The listing is the live, per-run input, not persistent catalog state:
+    # only harness-listed ids matched to an Exposure=local policy entry join.
     share, models = merge_local_candidates(
-        share, models, served_local, policy["free_models"],
+        share, models, listed, served_local, policy["free_models"],
         inheritance=config.free_share_inheritance)
     # The plans catalog is a plan serving's only way in: its id never resolves
     # in the models list. A cataloged plan row joins here, at split family
@@ -4267,15 +5161,17 @@ def main() -> None:
                   output_tokens=out_tok,
                   context_headroom=config.context.headroom,
                   context_margin=config.context.margin,
-                  regime=regime)
+                  regime=regime,
+                  domain=args.domain, intent=args.effort)
     # Zone prohibitions filter at source: a candidate the zone forbids outright
     # never enters the candidate set — not ranked, not scored, not dealt, not
     # listed, and its endpoints never priced. The header states the zone that
     # made it absent. Shape-level exclusions (Exposure, Footprint, quota,
-    # catalog) still mark, never hide.
+    # catalog) still mark, never hide. The loopback fact travels with the
+    # candidate so the row the table later marks is the row admission judged.
     share = filter_zone_candidates(
         share, models, policy, local_ids=local_ids,
-        regime=regime, intent=args.effort)
+        regime=regime, intent=args.effort, loopback=loopback)
     missing = set(tags) - known_tags
     if missing:
         print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
@@ -4373,7 +5269,8 @@ def main() -> None:
     # them. A candidate the zone forbids never got this far.
     decisions = {mid: admit(shape, candidate_for(
         mid, policy, local=mid in local_ids, model=models.get(mid),
-        endpoints=endpoint_cache.get(mid, ()), intent=args.effort),
+        endpoints=endpoint_cache.get(mid, ()), intent=args.effort,
+        loopback=loopback, roster=roster),
         quota=verdict)
         for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
@@ -4392,7 +5289,7 @@ def main() -> None:
     ledger = AllowanceLedger(policy["plans"], local=local_ids)
 
     if shape.sensitive:
-        print("shape: sensitive — exposed candidates are excluded from the "
+        print("shape: sensitive — non-local candidates are excluded from the "
               "pick and the deal (marked below, never hidden)\n")
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
           + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
@@ -4468,10 +5365,13 @@ def main() -> None:
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else m.get("context_length")
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
-        if free_details:
-            exposure = free_details[1]
-        elif is_free_route(mid, local=mid in local_ids) or plan_row:
-            exposure = candidate_for(mid, policy, model=m).exposure
+        if free_details or is_free_route(mid, local=mid in local_ids) or plan_row:
+            # The column shows the exposure admission judged: resolved
+            # through the same precedence, loopback fact included — a
+            # cataloged `local` the endpoint cannot back reads as the
+            # exposed fallback it was refused as.
+            exposure = row_exposure(mid, policy, local_ids=local_ids,
+                                    loopback=loopback)
         else:
             exposure = "—"
         if plan_row:
@@ -4533,11 +5433,10 @@ def main() -> None:
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else None
         ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = (free_details[1] if free_details else
-                    resolve_exposure(mid, free_models=policy["free_models"],
-                                     overrides=policy.get("exposure", {}))
-                     if is_free_route(mid, local=mid in local_ids)
-                     else "—")
+        exposure = (row_exposure(mid, policy, local_ids=local_ids,
+                                 loopback=loopback)
+                    if free_details or is_free_route(mid, local=mid in local_ids)
+                    else "—")
         print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
 
@@ -4559,6 +5458,20 @@ def main() -> None:
                 print(f"  {mid}: {note}")
 
     if pick is None:
+        if sensitive_shape(shape):
+            # ADR 0008: a Sensitive shape with no eligible local candidate
+            # stops with the blocked report — the report is the human
+            # escalation, never a re-gate — and, like every verdict, exits
+            # 0 (the table above has already marked every exclusion's
+            # reason, so nothing is hidden by the stop).
+            if args.json:
+                emit_json({"mode": "budget", "ok": True,
+                           "verdict": "blocked",
+                           "reason": "no eligible local candidate",
+                           "rule": None, "zone": zone_payload(zone)})
+            else:
+                print("blocked: no eligible local candidate")
+            raise SystemExit(0)
         # A completed run that found nothing to pick: the answer (why there
         # is no pick) goes to stderr on its own line — byte-identical to the
         # v1 message — and the status stays 0 (exit contract v2, ADR-0004).
@@ -4601,12 +5514,23 @@ def main() -> None:
         print(f"cheapest shown: {cheapest[0]} at ${cheapest[1]:.4f}/ticket "
               f"(budget pressure moves within the ranking, by price)")
 
+    local_share = None
     if args.deal:
         # Every pool member's base is the table's own scoring number: the
         # fit-adjusted task score, at score scale for the whole pool.
         fit_adjusted_task_scores = {
             mid: standing(s, eff_costs[mid], fit_for(mid, fit_map), alpha, beta)
             for mid, s in pool}
+        # The standing favor (issue #69): an admitted local row — the band
+        # gate has already passed it — tilts the draw's pref by the
+        # affinity factors' validated favor, so a qualifying shape
+        # genuinely deals local hardware while the seeded draw still
+        # chooses the row. Cloud rows are never keyed here, so score,
+        # Nominal floor, family-share inheritance and paid-pool balance
+        # stand untouched; a shape that loses its locals at the band gate
+        # has no admitted row to favor.
+        favor = {mid: config.factors["favor_validated"]
+                 for mid in local_ids if mid in admitted}
         deal_parameters = DealParameters(
             blend_weight=config.deal.blend_weight,
             top_k=config.deal.eligibility_top_k,
@@ -4614,16 +5538,39 @@ def main() -> None:
             tickets=args.tickets,
             fit_adjusted_task_scores=fit_adjusted_task_scores,
             admitted=admitted,
+            favor=favor,
         )
+        # plan_deal's out-record of the draw (issue #72): position i is
+        # the mid that took ticket i+1, feeding the ticket map and the
+        # lane printed below.
+        assign: list = []
         rows = plan_deal(share, models, aff, parameters=deal_parameters,
                          local=local_ids, plans=policy["plans"],
-                         ledger=ledger)
+                         ledger=ledger, assign=assign)
+        if args.substitute is not None:
+            # The substitution record is this invocation's whole answer
+            # (issue #71): the same seed and shape flags above re-derived
+            # the identical deal, so the Spare the record names is the one
+            # the original readout named — and the record, not the deal
+            # table, is what prints (exit 0 for substituted and blocked
+            # alike).
+            raise SystemExit(run_substitution(
+                args.substitute, args.reason or "mechanical", rows,
+                local=local_ids, sensitive=sensitive_shape(shape),
+                roster=roster, zone=zone, as_json=args.json,
+                assign=assign))
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
-        print("| # | model | pop% | score | pref | draw% | tickets | $/ticket | "
-              "subtotal |")
-        print("|---|---|---|---|---|---|---|---|---|")
+        # Every dealt row names its Spare (issue #71): the best candidate
+        # that missed the draw, no-load preferred off-Sensitive, local-only
+        # on it. `-` marks the rows that missed the draw themselves; `none`
+        # (and a `spare:` note below) records a dealt row with no Spare left.
+        spares = deal_spares(rows, local=local_ids,
+                             sensitive=sensitive_shape(shape))
+        print("| # | model | pop% | score | pref | draw% | tickets | spare | "
+              "$/ticket | subtotal |")
+        print("|---|---|---|---|---|---|---|---|---|---|")
         total = floor_total = 0.0
         for i, row in enumerate(rows, 1):
             pr = priced.get(row["mid"])
@@ -4636,10 +5583,38 @@ def main() -> None:
             total += per * row["tickets"]
             floor_total += pr["best"] * row["tickets"]
             out_mid = qualified_id(row["mid"], local=row["mid"] in local_ids)
+            spare_mid = spares.get(row["mid"])
+            spare_cell = ("-" if not row["tickets"] else
+                          (qualified_id(spare_mid,
+                                        local=spare_mid in local_ids)
+                           if spare_mid else "none"))
             print(f"| {i} | {out_mid} | {row['share']:.2%} | "
                   f"{row['base']:.2f} | "
                   f"{row['pref']:.1f} | {row['draw']:.2%} | {row['tickets']} | "
-                  f"${per:.4f} | ${per * row['tickets']:.4f} |")
+                  f"{spare_cell} | ${per:.4f} | ${per * row['tickets']:.4f} |")
+        for row in rows:
+            # An exhausted dealt row says so where the Spare column reads
+            # `none`: a substitution would report blocked, and the fence
+            # that keeps it from reaching outside the pool stands either way.
+            if row["tickets"] and spares.get(row["mid"]) is None:
+                print("spare: " + spare_exhaustion_text(
+                    qualified_id(row["mid"], local=row["mid"] in local_ids),
+                    sensitive=sensitive_shape(shape)))
+        # The batch's ticket map and the single strict lane (issue #72):
+        # every ticket id's model, then the local-dealt ids grouped by
+        # served model — one local run at a time, minimal load churn.
+        # Both lines speak `prefix: … -> <model>` so the readout parses.
+        ticket_map = tickets_by_model(rows, assign=assign, local=local_ids)
+        for model, ids in ticket_map.items():
+            print(f"ticket ids: {', '.join(str(i) for i in ids)} -> {model}")
+        lane = deal_lane(assign, local=local_ids)
+        if lane:
+            print("lane: strict — one local run at a time (grouped by model)")
+            for group in lane:
+                print(f"lane: {', '.join(str(i) for i in group['tickets'])} "
+                      f"-> {group['model']}")
+        else:
+            print("lane: none — no local-dealt tickets")
         for row in rows:
             mid = row["mid"]
             readout = ledger.readout(mid)
@@ -4657,6 +5632,19 @@ def main() -> None:
                            if is_plan_route(row["mid"],
                                             local=row["mid"] in local_ids))
         print(share_line("plan share", plan_tickets, dealt_tickets))
+        # The local share (issue #69): the third readout line, beside free
+        # and plan — how many of the batch's tickets never leave the
+        # machine. It always prints; zero is an answer, not an absence.
+        local_tickets, local_dealt = deal_local_share(rows, local=local_ids)
+        print(share_line("local share", local_tickets, local_dealt))
+        local_share = {"tickets": local_tickets, "dealt": local_dealt,
+                       "percent": (100.0 * local_tickets / local_dealt
+                                   if local_dealt else 0.0)}
+        if sensitive_shape(shape):
+            # Standing contract marker for a deal touching Sensitive
+            # material (ADR 0008): the harness applies it at prompt time —
+            # the prompt itself stays the harness's to author.
+            print(NON_LEAK_NOTE)
     else:
         total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "
@@ -4667,8 +5655,10 @@ def main() -> None:
         if args.json:
             # The budget verdict is this run's answer, in place of the human
             # line; the ranking table above stays line output (never
-            # JSON-ized — issue #41).
-            emit_json({"mode": "budget", "ok": True,
+            # JSON-ized — issue #41). A dealt run also carries its local
+            # share (issue #69): the machine-readable twin of the printed
+            # readout's third share line, present only when a deal ran.
+            payload = {"mode": "budget", "ok": True,
                        "over_budget": over_budget,
                        "budget": args.budget,
                        "projection": {"tickets": args.tickets,
@@ -4676,7 +5666,25 @@ def main() -> None:
                                       "floor": floor_total,
                                       "baseline": (base_per * args.tickets
                                                    if base_per else None)},
-                       "zone": zone_payload(zone)})
+                       "zone": zone_payload(zone)}
+            if local_share is not None:
+                payload["local_share"] = local_share
+                # The Spares twin of the readout's spare column (issue #71):
+                # one entry per dealt model, keyed by provider-qualified id;
+                # null records the exhausted row the column shows as `none`.
+                payload["spares"] = {
+                    qualified_id(mid, local=mid in local_ids):
+                        (qualified_id(spare, local=spare in local_ids)
+                         if spare else None)
+                    for mid, spare in spares.items()}
+                # The lane twin of the readout's lane block (issue #72):
+                # groups of mutually exclusive local-dealt ticket ids per
+                # served model (grouped-by-model order), plus the full
+                # ticket id -> model map the readout's `ticket ids:` lines
+                # carry — empty lane when no local row drew.
+                payload["lane"] = lane
+                payload["tickets_by_model"] = ticket_map
+            emit_json(payload)
         else:
             verdict = "under" if not over_budget else "OVER"
             print(f"budget: ${args.budget:.2f} -> {verdict}")

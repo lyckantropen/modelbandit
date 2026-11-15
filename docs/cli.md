@@ -78,10 +78,30 @@ and reproducible per project seed:
 python3 skills/modelbandit/scripts/modelbandit.py --domain writing --tickets 12 --deal --seed my-project
 ```
 
+When a dealt model cannot serve, record its Spare taking the ticket over
+whole — re-run the deal's own flags plus `--substitute`, so the same seed
+re-derives the same deal. `--reason mechanical` (the default) covers
+unreachable, out-of-quota or unloadable; a quality failure substitutes only
+on an explicit dead-attempt report (`--reason dead-attempt`). Either way the
+record — takeover, reason, restated fence — exits 0:
+
+```bash
+python3 skills/modelbandit/scripts/modelbandit.py --domain writing --tickets 12 --deal --seed my-project --substitute openrouter/deepseek/deepseek-v4-pro-0813 --reason mechanical
+```
+
 The agent's task-fit judgments (0-5) compose as score * fit/5:
 
 ```bash
 python3 skills/modelbandit/scripts/modelbandit.py --domain writing --fit "z-ai/glm-5.3=4.5,openai/gpt-6-luna=1"
+```
+
+Local candidates come from the harness listing — pass the `lmstudio/*`
+ids exactly as the harness dispatches them (e.g. from `opencode models`),
+comma-separated and repeatable; without the flag the run claims no local
+candidate:
+
+```bash
+python3 skills/modelbandit/scripts/modelbandit.py --domain writing --local-listing "lmstudio/qwen/qwen3.6-35b-a3b,lmstudio/zai-org/glm-4.7-flash"
 ```
 
 Price at the floor instead of the budget-safe worst endpoint:

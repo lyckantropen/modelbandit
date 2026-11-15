@@ -143,14 +143,24 @@ class PickTwinCliTests(unittest.TestCase):
         self.assertIn("default pick (top of task order): "
                       f"{PLAN} ($0.0000/ticket; Draw $0.01/ticket)", printed)
 
-    def test_a_twin_that_is_excluded_is_not_a_twin(self):
-        # The declared link names a row this run has, but admission shuts it
-        # out: the pick falls through to the next admitted row, as before.
+    def test_a_twin_cannot_rescue_a_sensitive_run_of_non_local_rows(self):
+        # The declared link can never bypass the Sensitive gate (ADR 0008):
+        # under --sensitive every non-local row — the at-cap plan row, its
+        # metered Twin and the fallback alike — is excluded, so nothing may
+        # serve and the run stops with the blocked report instead of
+        # picking. (The fall-through branch this test used to exercise — an
+        # admission-excluded Twin resolving nothing while other rows are
+        # admitted — is pinned at the deal seam by
+        # test_allowance_ledger.test_an_ineligible_twin_is_no_twin; ADR 0008
+        # makes the pick-side scenario unreachable with cloud rows only.)
         self.with_policy({PLAN: plan_entry(five_hour=0.005)},
                          exposure={TWIN: "trains"})
         printed, _ = self.run_pick(self.twin_world(), "--sensitive")
-        self.assertIn(f"default pick (top of task order): openrouter/{OTHER}",
-                      printed)
+        self.assertNotIn("default pick", printed)
+        self.assertIn("blocked: no eligible local candidate", printed)
+        twin_row = next(ln for ln in printed.splitlines()
+                        if ln.startswith("|") and f"{TWIN} |" in ln)
+        self.assertIn("exposed (trains)", twin_row)
 
     def test_a_twin_the_run_does_not_play_resolves_nothing(self):
         # The declaration points at a market-shaped id the ranking never

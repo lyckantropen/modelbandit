@@ -63,7 +63,8 @@ def policy_for(prefix: str, exposure: str) -> dict:
 class EgressVerdictMixin:
     """Read the pre-flight's verdict at its egress — never from a status."""
 
-    def preflight_answer(self, mid, zone, policy, *, sensitive_preflight):
+    def preflight_answer(self, mid, zone, policy, *, sensitive_preflight,
+                         endpoint=None):
         """The pre-flight's verdict for one cell.
 
         Runs `run_assert_allowed` for the cell's zone and policy (both
@@ -71,13 +72,19 @@ class EgressVerdictMixin:
         verdict lines: exactly one of `allowed: <id>` or `blocked by the
         free-use zone` must come back, and the exit contract v2 pins the
         status to 0 for either answer — the status never carries the
-        verdict.
+        verdict. The harness endpoint is pinned to the fixture machine's
+        loopback default (a `local` Exposure's condition), so the verdict
+        never depends on this machine's real config; `endpoint` states
+        another serving for the loopback cells.
         """
         printed = io.StringIO()
         with mock.patch.object(modelbandit, "effective_zone",
                                return_value=zone), \
                 mock.patch.object(modelbandit, "policy_facts",
                                   return_value=policy), \
+                mock.patch.object(modelbandit, "harness_serving_endpoint",
+                                  return_value=endpoint or
+                                  modelbandit.DEFAULT_LOCAL_ENDPOINT), \
                 redirect_stdout(printed):
             code = modelbandit.run_assert_allowed(
                 model=mid, plain=not sensitive_preflight)
@@ -180,6 +187,77 @@ class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
                     policy, sensitive_preflight=True)
                 self.assertFalse(allowed)
                 self.assertIn("exposed (trains)", printed)
+
+
+class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
+                                         unittest.TestCase):
+    """ADR 0008 at the pre-flight: a Sensitive-shape answer blocks every
+    non-local route, no-retention alike — a vendor promise about storage is
+    not containment in transit — and both gates judge the same route the
+    same way, whether Sensitive came from material (`--sensitive`, or the
+    assumed default) or from place (a `sensitive`/`closed` regime)."""
+
+    def test_a_no_retention_route_is_blocked_for_a_sensitive_shape(self):
+        policy = policy_for("vendor/paid", "no-retention")
+        for zone, sensitive_preflight in (
+                (modelbandit.Zone(path="z", regime="open"), True),
+                (modelbandit.Zone(path="z", regime="closed"), False)):
+            with self.subTest(regime=zone.regime,
+                              sensitive_preflight=sensitive_preflight):
+                allowed, printed = self.preflight_answer(
+                    "vendor/paid", zone, policy,
+                    sensitive_preflight=sensitive_preflight)
+                self.assertFalse(allowed)
+                self.assertIn("exposed (no-retention)", printed)
+                # The plan's admission refuses the same route for the same
+                # shape: the pre-flight never answers looser than the plan.
+                shape = modelbandit.Shape(
+                    sensitive=sensitive_preflight,
+                    regime=modelbandit.shape_regime(
+                        zone, sensitive=sensitive_preflight))
+                plan = modelbandit.admit(
+                    shape, modelbandit.candidate_for("vendor/paid", policy,
+                                                     local=False))
+                self.assertFalse(plan.admitted)
+                self.assertEqual(plan.reason, "exposed (no-retention)")
+
+    def test_plain_states_the_shape_and_the_route_is_allowed(self):
+        # The one deliberate exception: `--plain` vouches the material is
+        # not Sensitive, and an open zone judges the route as stated.
+        policy = policy_for("vendor/paid", "no-retention")
+        allowed, _ = self.preflight_answer(
+            "vendor/paid", modelbandit.Zone(path="z", regime="open"),
+            policy, sensitive_preflight=False)
+        self.assertTrue(allowed)
+
+
+class LoopbackServingTests(EgressVerdictMixin, unittest.TestCase):
+    """`local` Exposure's loopback rule at the pre-flight: the harness's
+    `lmstudio/*` namespace classifies local, but only a loopback endpoint
+    makes the serving this machine's — a LAN-served instance is refused as
+    exposed until the policy's exposure-override map declares it."""
+
+    LAN = "http://desktop-rme135a.tail409f29.ts.net:1234/v1"
+
+    def test_local_exposure_survives_the_pre_flight_only_on_loopback(self):
+        zone = modelbandit.Zone(path="z", regime="sensitive")
+        policy = policy_for("lmstudio/qwen", "local")
+
+        allowed, printed = self.preflight_answer(
+            "lmstudio/qwen/qwen3-4b", zone, policy,
+            sensitive_preflight=True, endpoint=self.LAN)
+        self.assertFalse(allowed)
+        self.assertIn("exposed (trains)", printed)
+
+        allowed, _ = self.preflight_answer(
+            "lmstudio/qwen/qwen3-4b", zone, policy, sensitive_preflight=True)
+        self.assertTrue(allowed)
+
+        declared = dict(policy, exposure={"lmstudio/qwen": "local"})
+        allowed, _ = self.preflight_answer(
+            "lmstudio/qwen/qwen3-4b", zone, declared,
+            sensitive_preflight=True, endpoint=self.LAN)
+        self.assertTrue(allowed)
 
 
 if __name__ == "__main__":

@@ -252,11 +252,33 @@ class CliTests(unittest.TestCase):
             json.dump({"zones": list(zones or []), "default": default}, f)
         return config_home
 
-    def run_cli(self, *argv, world=None, local_models=None, key_payload=None,
+    def roster_file(self, entries):
+        """This fixture machine's Local roster, beside its zones.json: the
+        band + prose keyed by harness id, exactly as the contract spells it."""
+        config_home = os.path.join(self._tmp.name, "config")
+        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
+        with open(os.path.join(config_home, "modelbandit",
+                               "local-roster.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "entries": entries}, f)
+        return config_home
+
+    def run_cli(self, *argv, world=None, local_models=None, local_listing=None,
+                listing_absent=False, serving_endpoint=None, key_payload=None,
                 zones=None, zones_default="open", policy_path=None,
                 zones_absent=False, real_benchmarks=False):
         world = world if world is not None else build_world()
         local_models = local_models if local_models is not None else {}
+        # The harness passes its local universe in with --local-listing: a
+        # fixture's served ids are exactly what this fixture machine's
+        # harness lists, `listing_absent` models a harness that never spoke,
+        # and a present flag with no ids is a listing that runs nothing.
+        if listing_absent:
+            listing_flag = []
+        elif local_listing is None:
+            listing_flag = ["--local-listing", ",".join(sorted(local_models))]
+        else:
+            listing_flag = ["--local-listing", ",".join(sorted(local_listing))]
         if zones_absent:
             # A fresh install: no zones.json exists anywhere the loader
             # looks, so the config root falls back to ~/.config against a
@@ -298,9 +320,13 @@ class CliTests(unittest.TestCase):
 
         out, err = io.StringIO(), io.StringIO()
         code = None
-        argv = ["modelbandit", "--policy", policy_path or self.policy_path, *argv]
+        argv = ["modelbandit", "--policy", policy_path or self.policy_path,
+                *listing_flag, *argv]
         with mock.patch("modelbandit.fetch_json", side_effect=fake_fetch), \
                 mock.patch("modelbandit.probe_local_models", return_value=local_models), \
+                mock.patch("modelbandit.harness_serving_endpoint",
+                           return_value=serving_endpoint or
+                           modelbandit.DEFAULT_LOCAL_ENDPOINT), \
                 mock.patch.object(modelbandit, "CACHE_DIR",
                                   os.path.join(self._tmp.name, "cache")), \
                 mock.patch.dict(os.environ, env), \
@@ -447,8 +473,9 @@ class CliTests(unittest.TestCase):
         # (family-share inheritance would otherwise give them real rotation).
         pol["summaries"]["ghost/family"] = "family summary"
         pol["free_models"] = {
-            "local-coder": {"context_length": 262_144, "exposure": "local",
-                            "summary_ref": "ghost/family"},
+            "lmstudio/local-coder": {"context_length": 262_144,
+                                      "exposure": "local",
+                                      "summary_ref": "ghost/family"},
             "opencode/free-coder": {
                 "context_length": 262_144, "exposure": "no-retention",
                 "summary_ref": "ghost/family"},
@@ -456,8 +483,8 @@ class CliTests(unittest.TestCase):
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
 
-        local = {"local-coder": {"id": "local-coder",
-                                 "context_length": 262_144}}
+        local = {"lmstudio/local-coder": {"id": "lmstudio/local-coder",
+                                           "context_length": 262_144}}
         world = build_world()
         world["classifications"]["classifications"] = [{
             "tag": "content_writing", "usage_share": 1.0,
@@ -1111,32 +1138,48 @@ class CliTests(unittest.TestCase):
             json.dump(pol, f)
 
     def test_sensitive_marks_the_exposed_row_and_keeps_it_visible(self):
+        # ADR 0008: every non-local Exposure is marked with its reason on a
+        # Sensitive shape — `trains` and `no-retention` alike — the rows
+        # stay visible, and with no local candidate the run stops blocked.
         self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
         out, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)
         self.assertIn("| admit |", out)
         row = next(ln for ln in out.splitlines()
                    if "deepseek/deepseek-v4-flash |" in ln)
         self.assertIn("exposed (trains)", row)      # visible with a reason
         other = next(ln for ln in out.splitlines()
                      if "deepseek/deepseek-v4-pro |" in ln)
-        self.assertNotIn("exposed", other)
+        self.assertIn("exposed (no-retention)", other)
+        self.assertIn("blocked: no eligible local candidate", out)
 
     def test_sensitive_pick_shuns_the_exposed_top_row(self):
-        # v4-pro tops the task order at alpha .7 / beta 1 (0.005^... priced at
-        # $0.0077), but exposure excludes it: the pick falls to the best
-        # admitted row and the exclusion is stated.
+        # v4-pro tops the cloud rows at alpha .7 / beta 1, but exposure
+        # excludes it: with an eligible local candidate in the run the pick
+        # is the local row — the exposed top row is marked in the table,
+        # never picked — and the same run without the flag picks the top
+        # row, as today.
         pol = json.loads(json.dumps(POLICY))
         pol["scoring"].update(alpha=0.7, beta=1.0)
         pol["exposure"] = {"deepseek/deepseek-v4-pro": "trains"}
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
-        out, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
         self.assertIsNone(code)
-        self.assertIn("top of task order deepseek/deepseek-v4-pro is excluded",
-                      out)
-        self.assertIn("default pick (top of task order): "
-                      "openrouter/deepseek/deepseek-v4-flash", out)
+        top_row = next(ln for ln in out.splitlines()
+                        if "deepseek/deepseek-v4-pro |" in ln)
+        self.assertIn("exposed (trains)", top_row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        self.assertNotIn("default pick (top of task order): "
+                         "openrouter/deepseek/deepseek-v4-pro", out)
         # the same run without the flag picks the top row, as today
         out, _, _, _ = self.run_cli("--domain", "writing")
         self.assertIn("default pick (top of task order): "
@@ -1221,26 +1264,148 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("vendor/model:free", deal)
 
     def test_sensitive_deal_never_draws_an_exposed_candidate(self):
-        self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
-        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
-                                       "--deal", "--seed", "proj",
-                                       "--sensitive")
+        # The exposed candidate stays out of the deal even when it is the
+        # only free cloud route left: the eligible local candidate takes
+        # every ticket (ADR 0008).
+        pol = json.loads(json.dumps(POLICY))
+        pol["exposure"] = {"deepseek/deepseek-v4-flash": "trains"}
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12",
+            "--deal", "--seed", "proj", "--sensitive",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
         self.assertIsNone(code)
         block = out[out.index("deal (seed"):out.index("projection at")]
         self.assertNotIn("deepseek/deepseek-v4-flash", block)
+        self.assertIn(f"| {mid} |", block)
         self.assertEqual(sum(int(ln.split("|")[7].strip())
                              for ln in block.splitlines()
                              if ln.startswith("| ")
                              and ln.split("|")[1].strip().isdigit()), 12)
 
     def test_sensitive_shape_with_no_admitted_candidate_stops_with_zero(self):
-        # A completed run with no pick: the answer is the message on stderr
-        # (byte-identical to v1), and the status stays 0 (issue #41).
+        # ADR 0008: no eligible local candidate is the Sensitive run's own
+        # stop — the blocked report on stdout, status 0 (US13) — replacing
+        # the generic all-excluded answer on stderr.
         self.sensitive_policy({"deepseek/": "trains"})
         out, err, code, _ = self.run_cli("--domain", "writing", "--sensitive")
         self.assertEqual(code, 0)
-        self.assertIn("no candidate admitted", err)
-        self.assertNotIn("no candidate admitted", out)
+        self.assertIn("blocked: no eligible local candidate", out)
+        self.assertNotIn("no candidate admitted", err)
+
+    # --- Sensitive is local-only (ADR 0008) ------------------------------
+
+    def sensitive_local_policy(self, exposure=None):
+        """The fixture machine's policy carrying one harness-listed local
+        candidate (no roster: the band gate has nothing to judge), plus an
+        optional exposure override for the cloud rows."""
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        if exposure:
+            pol["exposure"] = exposure
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        return "lmstudio/qwen/qwen3-coder-30b"
+
+    def test_sensitive_admits_only_local_and_marks_every_non_local_row(self):
+        # ADR 0008: a Sensitive shape (material) admits only Exposure
+        # `local` — no-retention leaves the machine like trains does, so it
+        # is excluded alike, marked with its reason in the table and never
+        # hidden. The pick and the deal take the local candidate alone: the
+        # invariant pinned at the output seam.
+        mid = self.sensitive_local_policy(
+            {"deepseek/deepseek-v4-flash": "trains"})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", "--deal", "--seed",
+            "local-only", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertIn("| admit |", out)
+        flash = next(ln for ln in out.splitlines()
+                     if "deepseek/deepseek-v4-flash |" in ln)
+        self.assertIn("exposed (trains)", flash)
+        for cloud in ("deepseek/deepseek-v4-pro |",
+                      "deepseek/deepseek-v4-pro-0813 |"):
+            row = next(ln for ln in out.splitlines() if cloud in ln)
+            self.assertIn("exposed (no-retention)", row)
+        local_row = next(ln for ln in out.splitlines() if f"{mid} |" in ln)
+        self.assertNotIn("exposed (", local_row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn(f"| {mid} |", deal)
+        self.assertNotIn("deepseek/", deal)      # never a cloud row
+
+    def test_a_sensitive_regime_triggers_local_only_without_the_flag(self):
+        # Place, not material (US3): the zone alone makes the shape
+        # Sensitive — a vault folder is protected even when its material
+        # does not trip the secrets gate — and such a deal carries the
+        # standing non-leak note too.
+        mid = self.sensitive_local_policy()
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            "--deal", "--seed", "place",
+            zones=self.zone_of("sensitive"),
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if "deepseek/deepseek-v4-pro |" in ln)
+        self.assertIn("exposed (no-retention)", row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn(f"| {mid} |", deal)
+        self.assertNotIn("deepseek/", deal)
+        self.assertIn("non-leak note:", out)
+
+    def test_sensitive_with_no_eligible_local_candidate_blocks_and_stops(self):
+        # Deal-time emptiness is a report, never a re-gate (US13): the run
+        # stops with the blocked line on stdout and exits 0 like every
+        # other verdict — in pick mode and deal mode alike.
+        for extra in ((), ("--deal", "--seed", "blocked")):
+            with self.subTest(extra=extra):
+                out, err, code, _ = self.run_cli(
+                    "--domain", "writing", "--sensitive", *extra)
+
+                self.assertEqual(code, 0)
+                self.assertIn("blocked: no eligible local candidate", out)
+                self.assertNotIn("no candidate admitted", err)
+                self.assertNotIn("deal (seed", out)
+
+    def test_a_sensitive_deal_carries_the_standing_non_leak_note(self):
+        # The note is a contract marker for the harness to apply at prompt
+        # time — prompt authoring itself stays with the harness (US14);
+        # an ordinary deal prints no such note.
+        mid = self.sensitive_local_policy()
+
+        sensitive, _, _, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", "--deal", "--seed", "note",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+        ordinary, _, _, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "note",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        note = next(ln for ln in sensitive.splitlines()
+                    if ln.startswith("non-leak note:"))
+        self.assertIn("contract marker", note)
+        self.assertLess(sensitive.index("non-leak note:"),
+                        sensitive.index("projection at"))
+        self.assertNotIn("non-leak note:", ordinary)
 
     def test_missing_scoring_block_exits_with_key(self):
         pol = json.loads(json.dumps(POLICY))
@@ -1367,39 +1532,42 @@ class CliTests(unittest.TestCase):
     def test_served_cataloged_local_candidate_uses_local_exposure_and_window(self):
         policy = json.loads(json.dumps(POLICY))
         policy["free_models"] = {
-            "qwen/qwen3-coder": {"context_length": 65_536,
-                                  "exposure": "local",
-                                  "summary_ref": "deepseek/deepseek-v4-pro"}}
+            "lmstudio/qwen/qwen3-coder": {"context_length": 65_536,
+                                          "exposure": "local",
+                                          "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(policy, f)
-        served = {"qwen/qwen3-coder-30b": {
-            "id": "qwen/qwen3-coder-30b", "context_length": 32_768}}
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        served = {mid: {"id": mid, "context_length": 32_768}}
 
         out, _, code, calls = self.run_cli(
             "--domain", "writing", local_models=served)
 
         self.assertIsNone(code)
         row = next(line for line in out.splitlines()
-                   if line.startswith("|") and "qwen/qwen3-coder-30b" in line)
+                   if line.startswith("|") and mid in line)
         self.assertIn("64K | local |", row)
-        self.assertIn("qwen/qwen3-coder-30b: eol summary", out)
+        self.assertIn(f"{mid}: eol summary", out)
+        self.assertFalse(any(url.endswith("/endpoints") and mid in url
+                             for url, *_ in calls))
         self.assertFalse(any(url.endswith("/endpoints")
                              and "qwen/qwen3-coder" in url for url, *_ in calls))
 
     def test_served_local_candidate_without_summary_is_visible_but_not_admitted(self):
         policy = json.loads(json.dumps(POLICY))
         policy["free_models"] = {
-            "local/qwen": {"context_length": 262_144, "exposure": "local"}}
+            "lmstudio/local/qwen": {"context_length": 262_144, "exposure": "local"}}
         with open(self.policy_path, "w") as f:
             json.dump(policy, f)
+        mid = "lmstudio/local/qwen-30b"
 
         out, _, code, _ = self.run_cli(
             "--domain", "writing",
-            local_models={"local/qwen-30b": {"id": "local/qwen-30b"}})
+            local_models={mid: {"id": mid}})
 
         self.assertIsNone(code)
         row = next(line for line in out.splitlines()
-                   if line.startswith("|") and "local/qwen-30b" in line)
+                   if line.startswith("|") and mid in line)
         self.assertIn("local |", row)
         self.assertIn("free route requires a catalog entry and summary", row)
 
@@ -1415,6 +1583,734 @@ class CliTests(unittest.TestCase):
                               local_models=absent_models)
 
         self.assertEqual(absent, baseline)
+
+    # --- harness listing: local existence and identity --------------------
+
+    def test_check_policy_cannot_judge_local_models_without_a_listing(self):
+        # The flag omitted means the harness never spoke: the report says
+        # so rather than claiming every rostered model is unrunnable.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/dead/model": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+
+        out, _, code, _ = self.run_cli("--check-policy", listing_absent=True)
+
+        self.assertIsNone(code)
+        section = out[out.index("## Local models the harness cannot run"):
+                      out.index("## Free-share trends")]
+        self.assertIn("not provided", section)
+
+    def test_check_policy_reports_local_models_the_harness_cannot_run(self):
+        # A local entry ahead of the harness: named by the policy check,
+        # and never dealt — the listing is the only existence there is, so
+        # the same fixture's ranking run carries no row for it while the
+        # entry the harness does run stays.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {
+            "lmstudio/dead/model": {
+                "context_length": 262_144, "exposure": "local",
+                "summary_ref": "deepseek/deepseek-v4-pro"},
+            "lmstudio/live/model": {
+                "context_length": 262_144, "exposure": "local",
+                "summary_ref": "deepseek/deepseek-v4-pro"},
+        }
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        live = "lmstudio/live/model"
+        listing = {live}
+
+        checked, _, code, _ = self.run_cli(
+            "--check-policy", local_listing=listing,
+            local_models={live: {"id": live, "context_length": 262_144}})
+        ranked, _, r_code, _ = self.run_cli(
+            "--domain", "writing", local_listing=listing,
+            local_models={live: {"id": live, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertIsNone(r_code)
+        section = checked[checked.index("## Local models the harness cannot run"):
+                          checked.index("## Free-share trends")]
+        self.assertIn("lmstudio/dead/model", section)
+        self.assertIn("never dealt", section)
+        self.assertNotIn(live, section)
+        self.assertNotIn("lmstudio/dead/model", ranked)
+        self.assertIn(f"{live} |", ranked)
+
+    def test_a_local_entry_the_harness_cannot_run_is_never_dealt(self):
+        # Deal-shaped run of the same rule: no listing match, no row, no
+        # pick, no deal — reported, never dealt.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/dead/model": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        other = "lmstudio/other/model"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "stranded",
+            local_listing={other},
+            local_models={other: {"id": other, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertNotIn("lmstudio/dead/model", out)
+
+    def test_a_harness_listed_local_candidate_is_dealt_as_the_harness_dispatches_it(self):
+        # The listing the harness passes in is the candidate's existence and
+        # identity: the row, the pick and the deal all name the id verbatim,
+        # provider-qualified — never re-prefixed with `openrouter/`, exactly
+        # what the harness dispatches.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "listing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("256K | local |", row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        deal_block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn(f"| {mid} |", deal_block)
+
+    def test_local_rows_are_absent_without_a_harness_listing(self):
+        # No flag means the harness never spoke: the run cannot invent local
+        # candidates from the probe alone, whatever the catalog declares.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 65_536, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", listing_absent=True,
+            local_models={mid: {"id": mid, "context_length": 65_536}})
+
+        self.assertIsNone(code)
+        # Neither the probe's ids nor the catalog's own prefix may stand up
+        # a local row: no listing, no local existence at all.
+        self.assertNotIn("lmstudio", out)
+
+    def listed_local_policy(self, window=262_144):
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": window, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        return "lmstudio/qwen/qwen3-coder-30b"
+
+    def test_the_probed_window_backs_the_context_gate(self):
+        # The probe's one narrow fact: the window the live serving reports
+        # is what the Context gate judges. The curated 256K cannot rescue a
+        # candidate whose serving states an 8K window — the row is excluded
+        # with the gate's named reason, not picked.
+        mid = self.listed_local_policy()
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 8_192}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("over window", row)
+        self.assertIn("4,096 tokens", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def test_the_probed_window_can_widen_admission_to_the_live_capacity(self):
+        # The other direction of the same fact: a serving that reports a
+        # wider window than the curated one admits the shape the live
+        # capacity can actually take.
+        mid = self.listed_local_policy(window=8_192)
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertNotIn("over window", row)
+
+    # --- Local roster: the binding Capability band ------------------------
+
+    def test_the_band_excludes_a_local_candidate_with_a_named_reason(self):
+        # The roster's Capability band is binding: a ticket domain outside
+        # the band is hard-excluded at admission with the band's own named
+        # reason — visible in the admit column, never picked.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["coding"], "difficulty": "measured",
+                     "context_demand": 65_536},
+            "prose": "Serviceable prose, weak for writing."}})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("outside band", row)
+        self.assertIn("domain 'writing'", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def test_the_difficulty_ceiling_excludes_only_above_the_rung(self):
+        # The band's difficulty is a ceiling on the effort rung: a ticket
+        # at or below the ceiling admits (the ceiling costs no reach),
+        # a rung above it is excluded with the named reason.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "measured",
+                     "context_demand": 65_536},
+            "prose": "Fine for measured writing, not for deep runs."}})
+
+        at_ceiling, _, code, _ = self.run_cli(
+            "--domain", "writing", "--effort", "measured",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+        over_ceiling, _, o_code, _ = self.run_cli(
+            "--domain", "writing", "--effort", "thorough",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertIsNone(o_code)
+        admitted_row = next(ln for ln in at_ceiling.splitlines()
+                            if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertNotIn("over difficulty ceiling", admitted_row)
+        excluded_row = next(ln for ln in over_ceiling.splitlines()
+                            if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("over difficulty ceiling", excluded_row)
+        self.assertIn("thorough > measured", excluded_row)
+        self.assertNotIn(f"default pick (top of task order): {mid}",
+                         over_ceiling)
+
+    def test_the_context_demand_ceiling_is_enforced_from_the_footprint(self):
+        # The band ceiling is judged against the shape's Footprint (input x
+        # growth headroom from the token profile) — never against the
+        # window: the serving reports 256K, the footprint of an authoring
+        # ticket (20,000 x 2.0 = 40,000) is over the roster's 8K ceiling,
+        # and the exclusion says so in the band's own terms.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "exhaustive",
+                     "context_demand": 8_192},
+            "prose": "Small-context model; short tickets only."}})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("context-demand ceiling 8,192", row)
+        self.assertNotIn("over window", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def test_the_probed_window_still_backs_the_context_gate_with_a_roster(self):
+        # A generous band does not stand in for capacity: the roster's
+        # ceiling passes (footprint under 1M), but the serving reports an
+        # 8K window and the Context gate still excludes it — the probed
+        # window remains the Context gate's own number.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "exhaustive",
+                     "context_demand": 1_048_576},
+            "prose": "Enormous appetite, whatever the serving reports."}})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 8_192}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("over window", row)
+        self.assertNotIn("context-demand ceiling", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def band_entry(self, domains, prose):
+        return {"band": {"domains": domains, "difficulty": "measured",
+                         "context_demand": 65_536},
+                "prose": prose}
+
+    def test_one_admission_verdict_serves_both_the_table_and_the_deal(self):
+        # The band's verdict is the admission decision itself: the table
+        # marks the excluded local row with the band's reason and the deal
+        # draws from the admitted set — same fixture the deal previously
+        # dealt, now rostered out, so the two surfaces cannot disagree.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        self.roster_file({mid: self.band_entry(
+            ["coding"], "A coder, not a writer.")})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "listing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("outside band", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+        deal_block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn(f"| {mid} |", deal_block)
+
+    def test_a_band_passing_rostered_candidate_keeps_both_surfaces_unchanged(self):
+        # The other half of one verdict: a band the ticket fits costs
+        # nothing — with the roster present and the band passing, the readout
+        # is byte-identical to the run without one (understating a band
+        # costs reach; a passing band costs nothing).
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        args = ("--domain", "writing", "--deal", "--seed", "listing")
+        listing = {mid}
+        models = {mid: {"id": mid, "context_length": 262_144}}
+
+        unrostered = self.run_cli(*args, local_listing=listing,
+                                  local_models=models)
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        rostered = self.run_cli(*args, local_listing=listing,
+                                local_models=models)
+
+        self.assertIsNone(unrostered[2])
+        self.assertIsNone(rostered[2])
+        self.assertEqual(unrostered, rostered)
+        deal_block = rostered[0][rostered[0].index("deal (seed"):
+                                 rostered[0].index("projection at")]
+        self.assertIn(f"| {mid} |", deal_block)
+
+    def test_check_policy_reports_rostered_models_the_harness_cannot_run(self):
+        # The roster is the rostered source the section names: its keys
+        # ahead of the harness listing land there — reported, never dealt —
+        # while a roster key the harness actually runs stays out.
+        mid = self.listed_local_policy()
+        stranded = "lmstudio/qwen/bench-only-30b"
+        self.roster_file({
+            mid: self.band_entry(["writing", "coding"], "Servable today."),
+            stranded: self.band_entry(["writing", "coding"],
+                                      "Bench-only; not enabled in the harness."),
+        })
+
+        out, _, code, _ = self.run_cli(
+            "--check-policy", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        section = out[out.index("## Local models the harness cannot run"):
+                      out.index("## Free-share trends")]
+        self.assertIn(stranded, section)
+        self.assertIn("not in the harness listing; never dealt", section)
+        self.assertNotIn(mid, section)
+
+    def test_check_policy_names_unconfirmed_roster_bands(self):
+        # US8's second half: exporter-stamped `suspected` bands are visible
+        # to the operator on the diagnostic surface — a count and the ids
+        # only, never a prose dump — while admission stays untouched (a
+        # suspected band binds exactly like a confirmed one, ADR-0009).
+        mid = self.listed_local_policy()
+        seeded = "lmstudio/qwen/bench-only-30b"
+        stamp = {"source": "local-llm-bench", "dossier": "qwen", "evidence":
+                 "suspected", "seeded": True, "date": "2026-11-15"}
+        self.roster_file({
+            mid: {**self.band_entry(["writing", "coding"], "Servable today."),
+                  "provenance": dict(stamp, dossier="qwen")},
+            seeded: {**self.band_entry(["writing"], "Seeded, unconfirmed."),
+                     "provenance": dict(stamp, dossier="bench-only")},
+        })
+
+        out, _, code, _ = self.run_cli(
+            "--check-policy", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        section = out[out.index("## Roster bands awaiting confirmation"):
+                      out.index("## Local models the harness cannot run")]
+        self.assertIn("2 suspected", section)
+        self.assertIn(mid, section)
+        self.assertIn(seeded, section)
+        # Ids and the count only: the roster's prose never rides along.
+        self.assertNotIn("Servable", section)
+        self.assertNotIn("unconfirmed.", section)
+
+    def test_check_policy_says_none_when_every_band_is_confirmed(self):
+        # The other half of the seam: a roster whose entries the exporter
+        # never stamped (hand-authored, or edited to evidence validated)
+        # reports zero unconfirmed bands rather than a section that reads
+        # as if something were pending.
+        mid = self.listed_local_policy()
+        self.roster_file({
+            mid: self.band_entry(["writing", "coding"], "Hand-confirmed."),
+            **{"lmstudio/qwen/other-30b": {
+                **self.band_entry(["writing"], "Edited after seeding."),
+                "provenance": {"source": "local-llm-bench",
+                               "evidence": "validated", "seeded": True,
+                               "date": "2026-11-15"}}},
+        })
+
+        out, _, code, _ = self.run_cli(
+            "--check-policy", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        section = out[out.index("## Roster bands awaiting confirmation"):
+                      out.index("## Local models the harness cannot run")]
+        self.assertIn("- — none", section)
+        self.assertNotIn("suspected", section)
+
+    def test_a_malformed_roster_stops_the_run_with_status_4(self):
+        # Loud validation reaches the CLI: a band the loader cannot trust
+        # stops the run at the rules/config status with a message naming
+        # the entry — on the ranking path and the policy check alike,
+        # never a traceback and never a silently guessed band.
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "brutal",
+                     "context_demand": 65_536},
+            "prose": "Everything, allegedly."}})
+
+        for argv in (["--domain", "writing"], ["--check-policy"]):
+            with self.subTest(argv=argv):
+                out, err, code, _ = self.run_cli(*argv)
+                self.assertEqual(code, 4)
+                self.assertIn(f"entries.{mid}.band.difficulty", err)
+                self.assertIn("local roster", err)
+
+    def test_a_never_deal_band_excludes_every_ticket(self):
+        # The empty domain list is the valid never-deal band: the model
+        # stays rostered (visible, reported) but admits no ticket — the
+        # unusable-verdict seed the contract describes.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            [], "Bench verdict: unusable for agent work.")})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("the band admits no domain", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    # --- Standing favor for band-passing locals + local share (issue #69) --
+
+    def test_a_band_passing_local_row_carries_the_standing_favor(self):
+        # The favor enters through the hint/affinity machinery: on a
+        # qualifying shape (the deal holds an admitted local row) that
+        # row's pref reads the affinity factors' validated favor (3.0),
+        # while every cloud row keeps exactly the pref its own hint earns —
+        # score, Nominal floor and paid-pool balance untouched. Hand-
+        # computed (blend 0.6, bases = share at alpha 1 / beta 0:
+        # 0.06/0.0425/0.005, prefs 1/3/3): draws 30.90% / 41.53% / 27.57%
+        # — the favor tilts the seeded draw toward the local row without
+        # deciding it, and the same seed replays the same deal.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        args = ("--domain", "writing", "--tickets", "12", "--deal",
+                "--seed", "listing")
+        models = {mid: {"id": mid, "context_length": 262_144}}
+
+        out, _, code, _ = self.run_cli(*args, local_listing={mid},
+                                       local_models=models)
+        replay = self.run_cli(*args, local_listing={mid},
+                              local_models=models)
+
+        self.assertIsNone(code)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        rows = [ln for ln in deal.splitlines()
+                if ln.startswith("| ") and ln.split("|")[1].strip().isdigit()]
+        self.assertEqual(len(rows), 3)
+        local_row = next(ln for ln in rows if mid in ln)
+        self.assertEqual(local_row.split("|")[5].strip(), "3.0")
+        self.assertEqual(local_row.split("|")[6].strip(), "41.53%")
+        flash_row = next(ln for ln in rows if "deepseek-v4-flash" in ln)
+        self.assertEqual(flash_row.split("|")[5].strip(), "3.0")  # its hint
+        pro_row = next(ln for ln in rows if "deepseek-v4-pro-0813" in ln)
+        self.assertEqual(pro_row.split("|")[5].strip(), "1.0")  # no hint
+        self.assertEqual(pro_row.split("|")[6].strip(), "30.90%")
+        self.assertEqual(flash_row.split("|")[6].strip(), "27.57%")
+        # Exact seeded draw for seed 'listing': 3 / 3 / 6 tickets in pool
+        # order (the local row lands three of the twelve).
+        self.assertEqual([int(ln.split("|")[7].strip()) for ln in rows],
+                         [3, 3, 6])
+        # Deterministic in the seed: the same invocation replays the deal.
+        again = replay[0]
+        self.assertEqual(out[out.index("deal (seed"):],
+                         again[again.index("deal (seed"):])
+
+    def test_the_deal_prints_the_local_share_beside_free_and_plan(self):
+        # The readout gains a third share line (issue #69): how much of the
+        # deal stays on this machine, printed beside the free and plan
+        # shares with the same `<label>: N/M tickets (P%)` shape — and the
+        # line always prints, a run with no local row reading 0 rather
+        # than vanishing (as the plan share already does).
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        models = {mid: {"id": mid, "context_length": 262_144}}
+
+        dealt, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "listing", local_listing={mid}, local_models=models)
+        cloud, _, c_code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "listing", local_listing=set(), local_models={})
+
+        self.assertIsNone(code)
+        self.assertIsNone(c_code)
+        block = dealt[dealt.index("deal (seed"):dealt.index("projection at")]
+        lines = [ln for ln in block.splitlines() if " share:" in ln]
+        self.assertEqual(lines, ["free share: 3/12 tickets (25%)",
+                                 "plan share: 0/12 tickets (0%)",
+                                 "local share: 3/12 tickets (25%)"])
+        c_block = cloud[cloud.index("deal (seed"):cloud.index("projection at")]
+        self.assertIn("local share: 0/12 tickets (0%)", c_block)
+
+    def test_the_standing_favor_never_reaches_a_row_the_band_excluded(self):
+        # The band ceilings are what make this "small tickets": a shape
+        # outside the band loses its local row at admission, so there is
+        # no admitted row to favor — the draw runs the cloud pool alone
+        # and the local share reads zero. The favor rides the admit chain,
+        # never bypasses it.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["coding"], "A coder, not a writer.")})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "listing", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("outside band", row)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn(f"| {mid} |", deal)
+        self.assertIn("local share: 0/12 tickets (0%)", deal)
+
+    def test_the_budget_json_run_carries_the_local_share(self):
+        # The machine-readable half of the readout (issue #69): a dealt
+        # budgeted run's verdict object carries the same figures the
+        # printed `local share:` line shows — and a budgeted run without
+        # --deal carries no share at all (no deal to count).
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        models = {mid: {"id": mid, "context_length": 262_144}}
+        args = ("--domain", "writing", "--tickets", "12", "--budget", "100",
+                "--json", "--seed", "listing")
+
+        out, _, code, _ = self.run_cli(*args, "--deal",
+                                       local_listing={mid}, local_models=models)
+        plain, _, p_code, _ = self.run_cli(*args,
+                                           local_listing={mid},
+                                           local_models=models)
+
+        self.assertIsNone(code)
+        self.assertIsNone(p_code)
+        self.assertIn("local share: 3/12 tickets (25%)", out)
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(payload["local_share"],
+                         {"tickets": 3, "dealt": 12, "percent": 25.0})
+        self.assertEqual(json.loads(plain.strip().splitlines()[-1]).get(
+            "local_share"), None)
+
+    def test_probe_identity_never_reaches_the_readout(self):
+        # The probe reports what serves; the listing says what exists. An id
+        # the harness never listed is not adopted, however loudly the probe
+        # names it — and the listed candidate still stands on the catalog's
+        # own facts when the probe knows nothing about it.
+        listed_mid = self.listed_local_policy()
+        foreign_mid = "lmstudio/other/unlisted-model"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={listed_mid},
+            local_models={foreign_mid: {"id": foreign_mid,
+                                        "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertNotIn(foreign_mid, out)
+        self.assertIn(f"{listed_mid} |", out)
+
+    def test_the_budget_json_run_shares_the_table_with_local_candidates(self):
+        # The deal/pick seam has two halves: this pins the machine-readable
+        # verdict object beside the printed readout that carries the local
+        # row — same run, both surfaces.
+        mid = self.listed_local_policy()
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--budget", "100", "--json",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["over_budget"])
+        self.assertIn(f"{mid} |", out)
+
+    def test_a_missing_serving_stack_has_no_effect_on_output(self):
+        # Listing present, server down: the candidates, their facts and the
+        # whole readout are what a serving that reports its window would
+        # have produced - the probe adds no identity and, when it has
+        # nothing new to say, no difference.
+        mid = self.listed_local_policy()
+
+        down = self.run_cli("--domain", "writing",
+                            local_listing={mid}, local_models={})
+        serving = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIn(f"{mid} |", down[0])
+        self.assertEqual(down, serving)
+
+    LAN_ENDPOINT = "http://desktop-rme135a.tail409f29.ts.net:1234/v1"
+
+    def test_a_non_loopback_serving_fails_closed_as_exposed(self):
+        # `local` Exposure resolves only for loopback on this machine: a
+        # LAN-served instance is exposed (`trains`, the unknown-free
+        # default), so Sensitive excludes it with the named reason and the
+        # pick never names it — nothing about it may masquerade as local.
+        mid = self.listed_local_policy()
+
+        plain, _, code, _ = self.run_cli(
+            "--domain", "writing", serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+        sensitive, _, s_code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive",
+            serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertEqual(s_code, 0)   # blocked stop: nothing local may serve
+        plain_row = next(ln for ln in plain.splitlines()
+                         if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("256K | trains |", plain_row)
+        sensitive_row = next(ln for ln in sensitive.splitlines()
+                             if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("exposed (trains)", sensitive_row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", sensitive)
+        self.assertIn("blocked: no eligible local candidate", sensitive)
+
+    def test_one_loopback_fact_agrees_across_both_surfaces(self):
+        # One serving fact, one answer, whichever surface asks (ADR-0003,
+        # ADR-0008): with the serving off this machine and a Sensitive or
+        # closed regime, `local` Exposure resolves nowhere. The ranking
+        # run marks the row exposed and never serves it; --check-policy
+        # admits it into its diagnostic deal neither — the free-share
+        # measurement record (the one place that surface reports what its
+        # deal admitted) stays unwritten, where the loopback control
+        # writes it. Both halves matter: without the control the fixture
+        # could simply never have measured.
+        mid = self.listed_local_policy()
+        models = {mid: {"id": mid, "context_length": 262_144}}
+        history = os.path.join(self._tmp.name, "cache",
+                               "free-share-history.json")
+
+        for zone_name, argv, zones_kw in (
+                ("sensitive", ["--sensitive"], {"zones_default": "open"}),
+                ("closed", [], {"zones_default": "closed"})):
+            with self.subTest(zone=zone_name):
+                if os.path.exists(history):
+                    os.remove(history)
+                ranked, _, code, _ = self.run_cli(
+                    "--domain", "writing", *argv,
+                    serving_endpoint=self.LAN_ENDPOINT,
+                    local_listing={mid}, local_models=models, **zones_kw)
+                checked, _, check_code, _ = self.run_cli(
+                    "--check-policy", *argv,
+                    serving_endpoint=self.LAN_ENDPOINT,
+                    local_listing={mid}, local_models=models, **zones_kw)
+
+                row = next(ln for ln in ranked.splitlines()
+                           if ln.startswith("|") and f"{mid} |" in ln)
+                self.assertIn("exposed (trains)", row)
+                self.assertNotIn(f"default pick (top of task order): {mid}",
+                                 ranked)
+                self.assertEqual(code, 0)
+                self.assertIsNone(check_code)
+                self.assertFalse(
+                    os.path.exists(history),
+                    "check-policy measured a free share from a deal that "
+                    f"admitted a row the ranking run excludes:\n{checked}")
+
+                self.run_cli("--check-policy", *argv,
+                             local_listing={mid}, local_models=models,
+                             **zones_kw)
+                self.assertTrue(os.path.exists(history),
+                                "the loopback control never measured — the "
+                                "fixture cannot tell the surfaces apart")
+
+    def test_the_exposure_override_can_declare_a_non_loopback_local_serving(self):
+        # The one escape hatch: the policy's exposure-override map declares
+        # the serving local explicitly, and it is then judged local — the
+        # operator's statement, not the catalogue's or the namespace's.
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        pol["exposure"] = {"lmstudio/qwen": "local"}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        sensitive, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive",
+            serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in sensitive.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("256K | local |", row)
+        self.assertNotIn("exposed", row)
 
     def test_ranked_free_slug_is_not_replaced_by_paid_family(self):
         policy = json.loads(json.dumps(POLICY))
@@ -1493,21 +2389,36 @@ class CliTests(unittest.TestCase):
         open_run, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name, world=world)
         self.assertIsNone(code)
+        self.assertNotIn("| admit |", open_run)
         self.assertIn("default pick (top of task order): openrouter/vendor/model:free",
                       open_run)
 
         closed, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             world=world, zones=self.zone_of("closed"))
-        self.assertIsNone(code)
-        # Never ranked, never listed: the zone's prohibition removes the
-        # candidate before the table is built, so there is no row to mark.
+        # ADR 0008: with no eligible local candidate the closed run stops
+        # blocked (exit 0) — and the source filter still removed the remote
+        # free route before the table was built.
+        self.assertEqual(code, 0)
         self.assertNotIn("vendor/model:free", closed)
-        self.assertNotIn("| admit |", closed)
+        self.assertIn("| admit |", closed)   # the non-local rows are marked
         self.assertIn(f"zone: {self._tmp.name} (closed)", closed)
+        self.assertIn("blocked: no eligible local candidate", closed)
 
     def test_a_closed_zone_keeps_remote_free_out_of_the_deal(self):
-        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        # The deal still runs in a closed zone once an eligible local
+        # candidate serves it (ADR 0008), and the source filter keeps the
+        # remote free route out of the whole output.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0, free_risk=0.35)
+        pol["free_models"] = {
+            "vendor/model": self.FREE_CATALOG["vendor/model"],
+            "lmstudio/qwen": {"context_length": 262_144,
+                              "exposure": "local",
+                              "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
         world = self.free_world(("vendor/model:free", 1.0))
         world["classifications"]["classifications"] = [{
             "tag": "content_writing", "usage_share": 1.0,
@@ -1519,11 +2430,14 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--tickets", "12", "--deal", "--seed", "proj",
             "--working-dir", self._tmp.name, world=world,
-            zones=self.zone_of("closed"))
+            zones=self.zone_of("closed"),
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
 
         self.assertIsNone(code)
+        self.assertNotIn("vendor/model:free", out)
         deal = out[out.index("deal (seed"):out.index("projection at")]
-        self.assertNotIn("vendor/model:free", deal)
+        self.assertIn(f"| {mid} |", deal)
         self.assertEqual(sum(int(ln.split("|")[7].strip())
                              for ln in deal.splitlines()
                              if ln.startswith("| ")
@@ -1532,25 +2446,26 @@ class CliTests(unittest.TestCase):
     def test_a_closed_zone_still_admits_a_locally_served_model(self):
         pol = json.loads(json.dumps(POLICY))
         pol["scoring"].update(alpha=1.0, beta=1.0, free_risk=0.35)
-        pol["free_models"] = {"qwen/qwen3-coder": {
+        pol["free_models"] = {"lmstudio/qwen/qwen3-coder": {
             "context_length": 262_144, "exposure": "local",
             "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
         world = build_world()
         world["classifications"]["classifications"][0]["models"].append(
-            {"id": "qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+            {"id": "lmstudio/qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+        mid = "lmstudio/qwen/qwen3-coder-30b"
 
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             world=world, zones=self.zone_of("closed"),
-            local_models={"qwen/qwen3-coder-30b": {"id": "qwen/qwen3-coder-30b"}})
+            local_models={mid: {"id": mid}})
 
         self.assertIsNone(code)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and "qwen/qwen3-coder-30b |" in ln)
         self.assertNotIn("remote free route is prohibited", row)
-        self.assertIn("default pick (top of task order): qwen/qwen3-coder-30b",
+        self.assertIn(f"default pick (top of task order): {mid}",
                       out)
 
     def test_the_sensitive_flag_cannot_loosen_a_closed_zone(self):
@@ -1561,38 +2476,47 @@ class CliTests(unittest.TestCase):
             "--domain", "writing", "--sensitive", "--working-dir",
             self._tmp.name, world=world, zones=self.zone_of("closed"))
 
-        self.assertIsNone(code)
-        # Still closed, not merely sensitive: the remote free route is absent.
+        # Still closed, not merely sensitive: the remote free route is
+        # absent at source, and with no eligible local candidate the run
+        # stops blocked (exit 0).
+        self.assertEqual(code, 0)
         self.assertNotIn("vendor/model:free", out)
         self.assertNotIn("default pick (top of task order): vendor/model:free",
                          out)
+        self.assertIn("blocked: no eligible local candidate", out)
 
-    def test_a_sensitive_zone_keeps_todays_sensitive_behaviour(self):
-        # No --sensitive flag: the zone alone excludes the exposed free route.
+    def test_a_sensitive_zone_triggers_local_only_like_the_flag(self):
+        # Place or material, whichever is stricter (ADR 0008): the zone
+        # alone excludes every non-local candidate exactly as --sensitive
+        # does, both rows stay marked, and with no eligible local candidate
+        # both runs stop with the blocked report (exit 0).
         self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/other"]})
         world = self.free_world(("vendor/model:free", 0.5))
 
-        zone_only, _, code, _ = self.run_cli(
+        zone_only, _, z_code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             world=world, zones=self.zone_of("sensitive"))
-        flagged, _, _, _ = self.run_cli(
+        flagged, _, f_code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", world=world)
 
-        self.assertIsNone(code)
+        self.assertEqual(z_code, 0)
+        self.assertEqual(f_code, 0)
         self.assertIn("exposed (trains)",
                       next(ln for ln in zone_only.splitlines()
                            if ln.startswith("|") and "vendor/model:free |" in ln))
-        self.assertEqual(self.pick_of(zone_only), self.pick_of(flagged))
-
-    def pick_of(self, out):
-        tail = out.split("default pick", 1)[1]
-        return tail.splitlines()[0]
+        self.assertIn("exposed (trains)",
+                      next(ln for ln in flagged.splitlines()
+                           if ln.startswith("|") and "vendor/model:free |" in ln))
+        self.assertIn("blocked: no eligible local candidate", zone_only)
+        self.assertIn("blocked: no eligible local candidate", flagged)
+        self.assertNotIn("default pick", zone_only)
+        self.assertNotIn("default pick", flagged)
 
     def test_the_run_header_names_the_zone_and_its_regime(self):
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             zones=self.zone_of("sensitive"))
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # no eligible local candidate: blocked
         self.assertIn(f"zone: {self._tmp.name} (sensitive)", out)
 
     def test_sensitive_flag_is_shown_as_the_effective_posture_in_every_header(self):
@@ -1600,7 +2524,7 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", "--working-dir",
             self._tmp.name, zones=zones)
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # blocked stop still prints the header
         expected = f"zone: {self._tmp.name} (open; sensitive via --sensitive)"
         self.assertIn(expected, out)
 
@@ -1619,7 +2543,7 @@ class CliTests(unittest.TestCase):
     def test_an_undeclared_folder_reports_undeclared_and_closed(self):
         out, _, code, _ = self.run_cli("--domain", "writing",
                                        zones_default="closed")
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed implies sensitive: blocked stop
         self.assertIn("zone: undeclared (closed)", out)
 
     # --- Header truth: the quota line answers to the zone (issue #38) ----
@@ -1636,7 +2560,7 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli("--domain", "writing", world=world,
                                        zones_absent=True)
 
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed default: no local candidate, blocked
         lines = out.splitlines()
         zone_line = next(ln for ln in lines if ln.startswith("zone: "))
         quota_line = next(ln for ln in lines if ln.startswith("free quota: "))
@@ -1655,7 +2579,7 @@ class CliTests(unittest.TestCase):
         # machine spells it (~/.config against the config-dir constants).
         out, _, code, _ = self.run_cli("--domain", "writing", zones_absent=True)
 
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed default: blocked stop, exit 0
         lines = out.splitlines()
         zone_at = next(i for i, ln in enumerate(lines)
                        if ln.startswith("zone: "))
@@ -1706,18 +2630,20 @@ class CliTests(unittest.TestCase):
 
     def test_a_closed_zone_excludes_an_exposed_paid_route(self):
         # closed implies sensitive: Exposure is the shape's exclusion and
-        # stays marked in the table, never hidden.
+        # stays marked in the table, never hidden — and with no eligible
+        # local candidate the run stops blocked (exit 0).
         self.sensitive_policy({"deepseek/deepseek-v4-pro-0813": "trains"})
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             zones=self.zone_of("closed"))
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)
         self.assertIn("| admit |", out)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and "deepseek/deepseek-v4-pro-0813 |" in ln)
         self.assertIn("exposed (trains)", row)
         self.assertNotIn("default pick (top of task order): "
                          "deepseek/deepseek-v4-pro-0813", out)
+        self.assertIn("blocked: no eligible local candidate", out)
 
     # --- pre-flight: --assert-allowed -----------------------------------
 
@@ -1732,12 +2658,17 @@ class CliTests(unittest.TestCase):
         return self.run_cli(*argv, zones=zones, zones_default=zones_default,
                             policy_path=policy_path)
 
-    def test_assert_allowed_admits_a_paid_route_in_a_closed_zone(self):
+    def test_assert_allowed_blocks_a_paid_route_in_a_closed_zone(self):
+        # ADR 0008: closed implies sensitive, so only a local serving may
+        # serve here — the block comes from the Exposure clause (the zone
+        # clause alone never refuses an accountable market route), and it
+        # exits 0 like every verdict.
         out, _, code, calls = self.guard("deepseek/deepseek-v4-pro",
                                          zones=self.zone_of("closed"))
         self.assertEqual(code, 0)
         self.assertIn(f"zone: {self._tmp.name} (closed)", out)
-        self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
+        self.assertIn("blocked by the free-use zone", out)
+        self.assertIn("reason: exposed (no-retention)", out)
         self.assertEqual(calls, [])          # no board, no classification fetch
 
     def test_assert_allowed_blocks_a_remote_free_route_in_a_closed_zone(self):
@@ -1835,11 +2766,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
         out, err, code, calls = self.guard("deepseek/deepseek-v4-pro",
-                                           zones=self.zone_of("closed"),
-                                           policy_path=absent)
+                                           zones=self.zone_of("open"),
+                                           plain=True, policy_path=absent)
         self.assertEqual(code, 0)
         self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
         self.assertEqual(err, "")
+        self.assertEqual(calls, [])
+
+        # ...and without a policy file the assumed-Sensitive shape still
+        # blocks a non-local route on the default no-retention assumption
+        # (ADR 0008).
+        guarded, _, code, calls = self.guard("deepseek/deepseek-v4-pro",
+                                             zones=self.zone_of("closed"),
+                                             policy_path=absent)
+        self.assertEqual(code, 0)
+        self.assertIn("reason: exposed (no-retention)", guarded)
         self.assertEqual(calls, [])
 
     def test_assert_allowed_reports_a_broken_zones_file_as_a_config_error(self):
@@ -1998,10 +2939,11 @@ class CliTests(unittest.TestCase):
             zones=[{"path": open_dir, "free": "open"},
                    {"path": closed_dir, "free": "closed"}])
 
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed through the link: blocked stop
         self.assertIn(f"zone: {closed_dir} (closed)", out)
         self.assertNotIn("vendor/model:free", out)
-        self.assertNotIn("| admit |", out)
+        self.assertIn("| admit |", out)   # the non-local rows are marked
+        self.assertIn("blocked: no eligible local candidate", out)
 
     def test_free_risk_price_is_uniform_across_exposure(self):
         # Same share, different Exposure, same risk-derived price and score.
@@ -2047,18 +2989,19 @@ class CliTests(unittest.TestCase):
         # its id: Free risk applies to it like any other Free route.
         pol = json.loads(json.dumps(POLICY))
         pol["scoring"].update(alpha=1.0, beta=1.0, free_risk=0.35)
-        pol["free_models"] = {"qwen/qwen3-coder": {
+        pol["free_models"] = {"lmstudio/qwen/qwen3-coder": {
             "context_length": 262_144, "exposure": "local",
             "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
         world = build_world()
         world["classifications"]["classifications"][0]["models"].append(
-            {"id": "qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+            {"id": "lmstudio/qwen/qwen3-coder-30b", "tag_usage_share": 0.5})
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
         out, _, code, _ = self.run_cli(
             "--domain", "writing", world=world,
-            local_models={"qwen/qwen3-coder-30b":
-                          {"id": "qwen/qwen3-coder-30b"}})
+            local_models={mid: {"id": mid}})
         self.assertIsNone(code)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and "qwen/qwen3-coder-30b |" in ln)
@@ -2521,23 +3464,36 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("free quota", err)
 
     def test_deal_can_send_all_tickets_to_free_when_paid_candidates_are_inadmissible(self):
+        # The deal's free share survives the ADR 0008 rule: paid candidates
+        # are inadmissible (trains), the no-retention cloud free route is
+        # excluded alike but stays marked, and the eligible local candidate
+        # — itself a Free route — takes every ticket.
         pol = json.loads(json.dumps(POLICY))
         pol["exposure"] = {"deepseek/": "trains"}
-        pol["free_models"] = {"vendor/model": {
-            "context_length": 262_144, "exposure": "no-retention",
-            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        pol["free_models"] = {
+            "vendor/model": {"context_length": 262_144,
+                             "exposure": "no-retention",
+                             "summary_ref": "deepseek/deepseek-v4-pro"},
+            "lmstudio/qwen": {"context_length": 262_144, "exposure": "local",
+                              "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
 
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", "--tickets", "12",
             "--deal", "--seed", "all-free-valid",
-            world=self.free_world(("vendor/model:free", 0.5)))
+            world=self.free_world(("vendor/model:free", 0.5)),
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
 
         self.assertIsNone(code)
-        self.assertIn("vendor/model:free", out)
+        row = next(ln for ln in out.splitlines()
+                   if "vendor/model:free |" in ln)
+        self.assertIn("exposed (no-retention)", row)   # marked, never dealt
         deal = out[out.index("deal (seed"):out.index("projection at")]
-        self.assertIn("vendor/model:free", deal)
+        self.assertIn(f"| {mid} |", deal)
+        self.assertNotIn("vendor/model:free", deal)
         self.assertIn("free share: 12/12 tickets (100%)", out)
         self.assertNotIn("deepseek/deepseek-v4-pro |", deal)
 

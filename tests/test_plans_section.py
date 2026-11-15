@@ -297,8 +297,11 @@ class PlansStatus4MatrixTests(unittest.TestCase):
         expectations = (
             (["--domain", "writing"], "# Popularity ranking"),
             (["--status"], "policy: "),
-            (["--assert-allowed", "--model", "deepseek/deepseek-v4-pro"],
-             "allowed: deepseek/deepseek-v4-pro"),
+            # --plain states the shape: under ADR 0008 the default
+            # (Sensitive) shape would block this non-local route, which is
+            # a verdict rather than a load failure either way.
+            (["--assert-allowed", "--model", "deepseek/deepseek-v4-pro",
+              "--plain"], "allowed: deepseek/deepseek-v4-pro"),
             (["--check-secrets", "--model", "deepseek/deepseek-v4-pro"],
              "secrets gate: not certified"),
         )

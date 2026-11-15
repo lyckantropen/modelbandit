@@ -15,6 +15,7 @@ the free-slug family the catalog has always accepted.
 """
 
 import os
+import re
 import sys
 import unittest
 
@@ -74,6 +75,24 @@ class FreeCatalogKindTests(unittest.TestCase):
         catalog = {"qwen/qwen3-4b": entry("local", summary_ref="family/qwen")}
         self.assertEqual(modelbandit.load_free_models({"free_models": catalog}),
                          catalog)
+
+    def test_the_local_namespace_is_local_whatever_its_exposure(self):
+        # Namespace first, like the plan namespace: `lmstudio/*` is the
+        # harness's own local serving whatever the entry annotates, so it
+        # loads as a Free route — and a malformed local namespace fails
+        # closed at the boundary, whatever the annotation says.
+        for exposure in ("no-retention", "trains", "local"):
+            with self.subTest(exposure=exposure):
+                catalog = {"lmstudio/qwen/qwen3-4b":
+                           entry(exposure, summary_ref="family/qwen")}
+                self.assertEqual(
+                    modelbandit.load_free_models({"free_models": catalog}),
+                    catalog)
+        for prefix in ("lmstudio/", "lmstudio//x"):
+            with self.subTest(prefix=prefix), self.assertRaisesRegex(
+                    SystemExit, f"free_models\\.{re.escape(prefix)}"):
+                modelbandit.load_free_models({"free_models": {
+                    prefix: entry("local")}})
 
     def test_a_refused_entry_after_a_good_one_stops_the_whole_load(self):
         # Nothing half-loaded: a later bad entry still stops the run, so the
