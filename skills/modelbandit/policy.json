@@ -76,6 +76,9 @@
       "avoid_suspected": 0.5
     }
   },
+  "exposure": {
+    "lmstudio/": "local"
+  },
   "free_models": {
     "opencode/deepseek-v4.1-flash-free": {
       "context_length": 1048576,
@@ -111,6 +114,51 @@
       "context_length": 262144,
       "exposure": "trains",
       "summary_ref": "recursive/flint-v1.0:free"
+    },
+    "lmstudio/abliterated-mimo-v2.6-distill-qwen-9b": {
+      "context_length": 160000,
+      "exposure": "local",
+      "summary_ref": "lmstudio/abliterated-mimo-v2.6-distill-qwen-9b"
+    },
+    "lmstudio/deepseek-v4-pro-qwen3.5-9b-uncensored-heretic-mtp": {
+      "context_length": 262144,
+      "exposure": "local",
+      "summary_ref": "lmstudio/deepseek-v4-pro-qwen3.5-9b-uncensored-heretic-mtp"
+    },
+    "lmstudio/gemma-4-12b-it-qat": {
+      "context_length": 262144,
+      "exposure": "local",
+      "summary_ref": "lmstudio/gemma-4-12b-it-qat"
+    },
+    "lmstudio/mimo-v2.6-distill-qwen-9b": {
+      "context_length": 262144,
+      "exposure": "local",
+      "summary_ref": "lmstudio/mimo-v2.6-distill-qwen-9b"
+    },
+    "lmstudio/ornith-1.5-9b": {
+      "context_length": 200000,
+      "exposure": "local",
+      "summary_ref": "lmstudio/ornith-1.5-9b"
+    },
+    "lmstudio/qwen/qwen3.5-9b": {
+      "context_length": 262144,
+      "exposure": "local",
+      "summary_ref": "lmstudio/qwen/qwen3.5-9b"
+    },
+    "lmstudio/qwen/qwen3.6-35b-a3b": {
+      "context_length": 262144,
+      "exposure": "local",
+      "summary_ref": "lmstudio/qwen/qwen3.6-35b-a3b"
+    },
+    "lmstudio/qwen36-35b-a3b-distill": {
+      "context_length": 262144,
+      "exposure": "local",
+      "summary_ref": "lmstudio/qwen36-35b-a3b-distill"
+    },
+    "lmstudio/zai-org/glm-4.7-flash": {
+      "context_length": 202752,
+      "exposure": "local",
+      "summary_ref": "lmstudio/zai-org/glm-4.7-flash"
     }
   },
   "context_gate": {
