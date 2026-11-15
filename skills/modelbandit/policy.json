@@ -95,11 +95,6 @@
       "exposure": "trains",
       "summary_ref": "xiaomi/mimo-v2.6-flash"
     },
-    "opencode/nemotron-3-ultra-free": {
-      "context_length": 1000000,
-      "exposure": "trains",
-      "summary_ref": "nvidia/nemotron-3-ultra-550b-a55b"
-    },
     "opencode/nemotron-3.5-lightning-free": {
       "context_length": 1000000,
       "exposure": "trains",
@@ -159,6 +154,31 @@
       "context_length": 202752,
       "exposure": "local",
       "summary_ref": "lmstudio/zai-org/glm-4.7-flash"
+    },
+    "opencode/beam-free": {
+      "context_length": 1048576,
+      "exposure": "trains",
+      "summary_ref": "reflection/beam"
+    },
+    "opencode/iceman-free": {
+      "context_length": 262144,
+      "exposure": "trains",
+      "summary_ref": "opencode/iceman-free"
+    },
+    "opencode/inkling-2-small-free": {
+      "context_length": 1048576,
+      "exposure": "trains",
+      "summary_ref": "thinkingmachines/inkling-2-small"
+    },
+    "opencode/longcat-2.5-free": {
+      "context_length": 1000000,
+      "exposure": "no-retention",
+      "summary_ref": "meituan/longcat-2.5"
+    },
+    "opencode/minimax-m3.1-flash-free": {
+      "context_length": 1048576,
+      "exposure": "no-retention",
+      "summary_ref": "minimax/minimax-m3.1-flash"
     }
   },
   "context_gate": {
