@@ -82,9 +82,11 @@ the place's regime; never a mood declared mid-run.
 _Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
 
 **Local roster**
-The author-owned record of the local models on this machine: each one's
-identity, serving facts and Capability band. Hand-maintained — the only
-source a local candidate may enter the pool from.
+The author-owned record of the local models' judgment, keyed by the harness's
+own model id: each model's Capability band and its prose — and only that.
+What exists and how it is served belongs to the harness that serves it;
+the roster never restates it. Hand-maintained — the only source a local
+candidate's band may come from.
 _Avoid_: registry, catalogue, inventory
 
 **Zone**
