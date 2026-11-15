@@ -174,11 +174,22 @@ class VerdictMatrixTests(ModelbanditCli):
     # --- --assert-allowed: two verdicts, one status ----------------------
 
     def test_allowed_is_a_completed_run_not_a_status(self):
+        # ADR 0008 moved the default: the assumed-Sensitive shape now blocks
+        # every non-local route, so the allowed verdict comes from the
+        # stated-plain shape — either way the answer is a completed run.
         out, err, code = self.run_cli("--assert-allowed", "--model",
-                                      "deepseek/deepseek-v4-pro",
+                                      "deepseek/deepseek-v4-pro", "--plain",
                                       "--working-dir", self.root)
         self.assertEqual(code, 0)
         self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
+        self.assertEqual(err, "")
+
+        blocked, err, code = self.run_cli("--assert-allowed", "--model",
+                                          "deepseek/deepseek-v4-pro",
+                                          "--working-dir", self.root)
+        self.assertEqual(code, 0)
+        self.assertIn("blocked by the free-use zone", blocked)
+        self.assertIn("reason: exposed (no-retention)", blocked)
         self.assertEqual(err, "")
 
     def test_blocked_is_a_completed_run_not_a_status(self):
@@ -212,17 +223,17 @@ class VerdictMatrixTests(ModelbanditCli):
         self.assertIn(code, (None, 0))
         self.assertIn("budget: $1000.00 -> under", out)
 
-    def test_no_candidate_admitted_stops_on_stderr_with_zero(self):
+    def test_a_sensitive_stop_reports_blocked_on_stdout_with_zero(self):
+        # ADR 0008: a Sensitive shape with no eligible local candidate stops
+        # with the blocked report on stdout — the report is the human
+        # escalation, never a re-gate — and exits 0 like every verdict.
         self.write_policy(policy_with(exposure={"deepseek/": "trains"}))
 
         out, err, code = self.run_cli("--domain", "writing", "--sensitive")
 
         self.assertEqual(code, 0)
-        self.assertIn(
-            "shape: no candidate admitted — every ranked candidate is "
-            "excluded (deepseek/deepseek-v4-flash, deepseek/deepseek-v4-pro, "
-            "deepseek/deepseek-v4-pro-0813); drop the restrictive shape "
-            "setting or pick another domain", err)
+        self.assertIn("blocked: no eligible local candidate", out)
+        self.assertNotIn("no candidate admitted", err)
         self.assertNotIn("no candidate admitted", out)
 
     def test_no_ranked_candidates_stops_on_stderr_with_zero(self):
@@ -296,13 +307,27 @@ class LineOutputParityTests(ModelbanditCli):
                  "regime\n")
 
     def test_assert_allowed_allowed_lines_are_byte_identical(self):
+        # ADR 0008 moved the default: the assumed-Sensitive shape blocks
+        # every non-local route (the block's lines are byte-pinned too), and
+        # the allowed verdict is the stated-plain shape's.
         out, _, code = self.run_cli("--assert-allowed", "--model",
-                                    "deepseek/deepseek-v4-pro",
+                                    "deepseek/deepseek-v4-pro", "--plain",
                                     "--working-dir", self.root)
         self.assertEqual(code, 0)
         self.assertEqual(out, "zone: undeclared (open)\n"
-                              "shape: sensitive (assumed)\n"
+                              "shape: plain (via --plain)\n"
                               "allowed: deepseek/deepseek-v4-pro\n")
+
+        blocked, _, code = self.run_cli("--assert-allowed", "--model",
+                                        "deepseek/deepseek-v4-pro",
+                                        "--working-dir", self.root)
+        self.assertEqual(code, 0)
+        self.assertEqual(blocked,
+                         "zone: undeclared (open)\n"
+                         "shape: sensitive (assumed)\n"
+                         "blocked by the free-use zone\n"
+                         "model: deepseek/deepseek-v4-pro\n"
+                         "reason: exposed (no-retention)\n")
 
     def test_assert_allowed_blocked_lines_are_byte_identical(self):
         out, _, code = self.run_cli("--assert-allowed", "--model",
@@ -444,7 +469,8 @@ class JsonModeTests(ModelbanditCli):
         # Build 2 (review concession): one object per invocation - the
         # ranking's own stop included. The table stays lines; the object is
         # the last and only JSON line; stderr stays empty (json replaces the
-        # stop message).
+        # stop message). Under ADR 0008 the Sensitive stop is the blocked
+        # report, carried in the object as everywhere else.
         self.write_policy(policy_with(exposure={"deepseek/": "trains"}))
         out, err, code = self.run_cli("--domain", "writing", "--sensitive",
                                       "--budget", "1000", "--json")
@@ -455,8 +481,8 @@ class JsonModeTests(ModelbanditCli):
         payload = self.last_json_line_is_the_only_json_line(out)
         self.assertEqual(payload["mode"], "budget")
         self.assertIs(payload["ok"], True)
-        self.assertEqual(payload["verdict"], "no-candidate-admitted")
-        self.assertIn("no candidate admitted", payload["reason"])
+        self.assertEqual(payload["verdict"], "blocked")
+        self.assertEqual(payload["reason"], "no eligible local candidate")
         self.zone_of(payload)
 
     def test_an_empty_pool_stop_still_answers_with_one_object(self):
@@ -491,7 +517,10 @@ class JsonModeTests(ModelbanditCli):
                 self.assertIn("--json", err)
 
     def test_assert_allowed_allowed_is_one_object(self):
-        out, err, code = self.run_cli("--assert-allowed", "--json",
+        # The allowed verdict now belongs to the stated-plain shape (ADR
+        # 0008 makes the assumed-Sensitive default local-only); the object
+        # carries it with the shape it was judged under.
+        out, err, code = self.run_cli("--assert-allowed", "--json", "--plain",
                                       "--model", "deepseek/deepseek-v4-pro",
                                       "--working-dir", self.root)
         self.assertEqual(code, 0)
@@ -500,7 +529,7 @@ class JsonModeTests(ModelbanditCli):
         self.assertEqual(payload["mode"], "assert-allowed")
         self.assertIs(payload["allowed"], True)
         self.assertEqual(payload["model"], "deepseek/deepseek-v4-pro")
-        self.assertEqual(payload["shape"], "sensitive")  # the assumed shape
+        self.assertEqual(payload["shape"], "plain")
         self.assertEqual(self.zone_of(payload)["regime"], "open")
         self.assertIsNone(payload["reason"])
 

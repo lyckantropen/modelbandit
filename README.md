@@ -199,8 +199,10 @@ everything: eligibility stays popularity, the deal tilts by preference
 `modelbandit.py --deal` invocation deals one ticket shape — a run's domain,
 effort, token profile, `--fit` and `--sensitive` combination — so tickets of
 the same shape share one task-fit assessment. A Sensitive shape is dealt with
-`--sensitive`: exposed candidates are excluded from its pick and deal, marked
-in the table, never hidden. Mechanics:
+`--sensitive`: only candidates whose Exposure is `local` are admitted (ADR
+0008 — no-retention leaves the machine too), the rest marked in the table
+with their reason, never hidden, and a run with no eligible local candidate
+stops with `blocked: no eligible local candidate` (exit 0). Mechanics:
 [SKILL.md](skills/modelbandit/SKILL.md#reference).
 
 One task? See [Quick start](#quick-start).

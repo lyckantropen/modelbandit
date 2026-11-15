@@ -189,6 +189,48 @@ class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
                 self.assertIn("exposed (trains)", printed)
 
 
+class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
+                                         unittest.TestCase):
+    """ADR 0008 at the pre-flight: a Sensitive-shape answer blocks every
+    non-local route, no-retention alike — a vendor promise about storage is
+    not containment in transit — and both gates judge the same route the
+    same way, whether Sensitive came from material (`--sensitive`, or the
+    assumed default) or from place (a `sensitive`/`closed` regime)."""
+
+    def test_a_no_retention_route_is_blocked_for_a_sensitive_shape(self):
+        policy = policy_for("vendor/paid", "no-retention")
+        for zone, sensitive_preflight in (
+                (modelbandit.Zone(path="z", regime="open"), True),
+                (modelbandit.Zone(path="z", regime="closed"), False)):
+            with self.subTest(regime=zone.regime,
+                              sensitive_preflight=sensitive_preflight):
+                allowed, printed = self.preflight_answer(
+                    "vendor/paid", zone, policy,
+                    sensitive_preflight=sensitive_preflight)
+                self.assertFalse(allowed)
+                self.assertIn("exposed (no-retention)", printed)
+                # The plan's admission refuses the same route for the same
+                # shape: the pre-flight never answers looser than the plan.
+                shape = modelbandit.Shape(
+                    sensitive=sensitive_preflight,
+                    regime=modelbandit.shape_regime(
+                        zone, sensitive=sensitive_preflight))
+                plan = modelbandit.admit(
+                    shape, modelbandit.candidate_for("vendor/paid", policy,
+                                                     local=False))
+                self.assertFalse(plan.admitted)
+                self.assertEqual(plan.reason, "exposed (no-retention)")
+
+    def test_plain_states_the_shape_and_the_route_is_allowed(self):
+        # The one deliberate exception: `--plain` vouches the material is
+        # not Sensitive, and an open zone judges the route as stated.
+        policy = policy_for("vendor/paid", "no-retention")
+        allowed, _ = self.preflight_answer(
+            "vendor/paid", modelbandit.Zone(path="z", regime="open"),
+            policy, sensitive_preflight=False)
+        self.assertTrue(allowed)
+
+
 class LoopbackServingTests(EgressVerdictMixin, unittest.TestCase):
     """`local` Exposure's loopback rule at the pre-flight: the harness's
     `lmstudio/*` namespace classifies local, but only a loopback endpoint

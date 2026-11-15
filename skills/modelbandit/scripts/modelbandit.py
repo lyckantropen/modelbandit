@@ -1686,8 +1686,9 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
     Exposure facts plus the serving endpoint's loopback status (an empty
     policy and an undeclared endpoint keep the safe defaults). Blocked
     means a prohibition the regime states outright — a remote free route in a
-    closed zone, an exposed route at a sensitive regime or stricter — never a
-    Footprint, catalog or quota exclusion.
+    closed zone, a non-local route at a sensitive regime or stricter (ADR
+    0008: only Exposure `local` serves Sensitive work) — never a Footprint,
+    catalog or quota exclusion.
 
     The candidate is judged by its serving identity alone: localness is a
     serving fact, never a catalogue claim, and this guard observes no serving
@@ -1730,9 +1731,10 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     """Pre-flight: may this model serve in this folder's zone?
 
     The dispatch contract fails closed: an unstated shape is **Sensitive**,
-    and the output states the assumption (`shape: sensitive (assumed)`) — a
-    route that retains training data is refused by default, never allowed
-    because nobody said otherwise. A caller that knows the material is not
+    and the output states the assumption (`shape: sensitive (assumed)`) —
+    only a route whose Exposure is `local` is allowed by default (ADR 0008:
+    Sensitive material leaves the machine on any remote route, no-retention
+    alike), never allowed because nobody said otherwise. A caller that knows the material is not
     Sensitive must say so explicitly (`--plain`, printed as
     `shape: plain (via --plain)`); `--sensitive` restates the default and is
     accepted with the same verdict.
@@ -3160,6 +3162,16 @@ def share_line(label: str, tickets: int, dealt: int) -> str:
     return f"{label}: {tickets}/{dealt} tickets ({share:.0%})"
 
 
+# The standing non-leak contract marker (ADR 0008): every deal touching
+# Sensitive material carries this line in its output, for the harness to
+# apply at prompt time. Prompt authoring itself stays with the harness —
+# this line is the marker, never the prompt.
+NON_LEAK_NOTE = (
+    "non-leak note: Sensitive material never leaves the machine "
+    "(standing contract marker — apply at prompt time; the harness "
+    "authors the prompt)")
+
+
 @dataclasses.dataclass(frozen=True)
 class Decision:
     """An admission verdict: admitted, or excluded with a visible reason.
@@ -3174,18 +3186,32 @@ class Decision:
 ADMITTED = Decision(True)
 
 
-def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
-    """The Exposure clause: why an exposed candidate may not serve, or None.
+def sensitive_shape(shape: Shape) -> bool:
+    """Whether the shape is Sensitive: material (`--sensitive`, or the
+    pre-flight's assumed default) or place (an effective regime at least as
+    strict as `sensitive`), whichever is stricter — a flag may only tighten
+    the zone's regime, never loosen it (shape_regime), so either trigger
+    firing is enough (ADR 0008)."""
+    return shape.sensitive or regime_at_least(shape.regime, "sensitive")
 
-    Exposed — `trains` — candidates never serve a Sensitive shape, whether
-    free or paid; no-retention and local candidates stay — Exposure, not
-    price, decides. A `sensitive` zone is the flag by another name, and a
-    `closed` zone is at least that strict (see regime_at_least), so it refuses
-    the same exposed routes on top of every remote free one.
+
+def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
+    """The Exposure clause: why a non-local candidate may not serve a
+    Sensitive shape, or None.
+
+    Only Exposure `local` may serve Sensitive work, whether Sensitive came
+    from place or material (ADR 0008): `no-retention` is a vendor promise
+    about storage, not about transit — Sensitive material leaves the
+    machine on any remote route — so it is excluded alike with `trains`.
+    Exposure, never price, decides; an excluded candidate is marked with
+    its Exposure in the table and never hidden. A `sensitive` zone is the
+    flag by another name, and a `closed` zone is at least that strict (see
+    regime_at_least), so it refuses every non-local route on top of every
+    remote free one.
     """
-    if candidate.exposure != "trains":
+    if not sensitive_shape(shape):
         return None
-    if not (shape.sensitive or regime_at_least(shape.regime, "sensitive")):
+    if candidate.exposure == "local":
         return None
     return f"exposed ({candidate.exposure})"
 
@@ -3344,10 +3370,11 @@ def regime_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     """What the shape's regime forbids outright, or None.
 
     The pre-flight's yardstick, and the only two clauses a zone states: no
-    remote free route in a closed zone, no exposed route at a regime at least
-    as strict as `sensitive`. Everything else — Footprint, quota, an
-    uncataloged Free route — is a shape-level exclusion the table marks, so it
-    is not a zone block.
+    remote free route in a closed zone, no non-local route at a regime at
+    least as strict as `sensitive` (ADR 0008 — the closed regime implies
+    sensitive). Everything else — Footprint, quota, an uncataloged Free
+    route — is a shape-level exclusion the table marks, so it is not a zone
+    block.
     """
     return zone_prohibition(shape, candidate) \
         or exposed_prohibition(shape, candidate)
@@ -4544,9 +4571,12 @@ def main() -> None:
                          "the run claims no local candidate at all")
     ap.add_argument("--sensitive", action="store_true",
                     help="Sensitive ticket shape (the Secrets gate's verdict): "
-                         "exposed candidates — trains — are excluded from the "
-                         "pick and the deal, and marked with a reason in the "
-                         "table; no-retention free and local routes stay in")
+                         "only Exposure 'local' candidates are admitted — every "
+                         "non-local route (no-retention and trains alike) is "
+                         "excluded from the pick and the deal, marked with a "
+                         "reason in the table; no eligible local candidate "
+                         "stops the run with 'blocked: no eligible local "
+                         "candidate' (exit 0)")
     ap.add_argument("--budget", type=float, help="run budget in USD")
     ap.add_argument("--top", type=int, default=8, help="ranking rows to show")
     ap.add_argument("--policy", default=DEFAULT_POLICY,
@@ -4876,7 +4906,7 @@ def main() -> None:
     ledger = AllowanceLedger(policy["plans"], local=local_ids)
 
     if shape.sensitive:
-        print("shape: sensitive — exposed candidates are excluded from the "
+        print("shape: sensitive — non-local candidates are excluded from the "
               "pick and the deal (marked below, never hidden)\n")
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")
           + " 30d tokens | $/1M out (floor–worst) | $/ticket | Δ baseline | "
@@ -5051,6 +5081,20 @@ def main() -> None:
                 print(f"  {mid}: {note}")
 
     if pick is None:
+        if sensitive_shape(shape):
+            # ADR 0008: a Sensitive shape with no eligible local candidate
+            # stops with the blocked report — the report is the human
+            # escalation, never a re-gate — and, like every verdict, exits
+            # 0 (the table above has already marked every exclusion's
+            # reason, so nothing is hidden by the stop).
+            if args.json:
+                emit_json({"mode": "budget", "ok": True,
+                           "verdict": "blocked",
+                           "reason": "no eligible local candidate",
+                           "rule": None, "zone": zone_payload(zone)})
+            else:
+                print("blocked: no eligible local candidate")
+            raise SystemExit(0)
         # A completed run that found nothing to pick: the answer (why there
         # is no pick) goes to stderr on its own line — byte-identical to the
         # v1 message — and the status stays 0 (exit contract v2, ADR-0004).
@@ -5149,6 +5193,11 @@ def main() -> None:
                            if is_plan_route(row["mid"],
                                             local=row["mid"] in local_ids))
         print(share_line("plan share", plan_tickets, dealt_tickets))
+        if sensitive_shape(shape):
+            # Standing contract marker for a deal touching Sensitive
+            # material (ADR 0008): the harness applies it at prompt time —
+            # the prompt itself stays the harness's to author.
+            print(NON_LEAK_NOTE)
     else:
         total = pick[1] * args.tickets
     print(f"projection at {args.tickets} ticket(s): ${total:.2f} "

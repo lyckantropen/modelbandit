@@ -187,14 +187,22 @@ class AdmissionTests(unittest.TestCase):
         decision = modelbandit.admit(SENSITIVE, candidate("z-ai/glm-5.3:free", "trains"))
         self.assertIn("trains", decision.reason)
 
-    def test_no_retention_free_candidate_admitted_to_sensitive_shape(self):
+    def test_no_retention_free_candidate_is_excluded_from_sensitive_shape(self):
+        # ADR 0008: no-retention is a promise about storage, not about
+        # transit — it leaves the machine like trains does, so Sensitive
+        # refuses it alike, marked with the named reason.
         decision = modelbandit.admit(SENSITIVE,
                               candidate("opencode/glm-5.3-flash", "no-retention"))
-        self.assertTrue(decision.admitted)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "exposed (no-retention)")
 
-    def test_paid_candidate_admitted_to_sensitive_shape(self):
-        self.assertTrue(modelbandit.admit(
-            SENSITIVE, candidate("deepseek/deepseek-v4-pro", "no-retention")))
+    def test_paid_no_retention_candidate_is_excluded_from_sensitive_shape(self):
+        # ADR 0008 applies to paid routes too: Exposure decides, never
+        # price, and only `local` may serve a Sensitive shape.
+        decision = modelbandit.admit(
+            SENSITIVE, candidate("deepseek/deepseek-v4-pro", "no-retention"))
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "exposed (no-retention)")
 
     def test_local_candidate_admitted_to_sensitive_shape(self):
         self.assertTrue(modelbandit.admit(
@@ -344,10 +352,16 @@ class CandidateFactsTests(unittest.TestCase):
         self.assertEqual(facts.exposure, "trains")
         self.assertFalse(modelbandit.admit(SENSITIVE, facts).admitted)
 
-    def test_curated_no_retention_route_binds_admitted(self):
+    def test_curated_no_retention_route_is_excluded_from_sensitive(self):
+        # The binding still resolves the curated fact — and under ADR 0008
+        # that fact is exactly what a Sensitive shape refuses: no local
+        # Exposure, no admission. An ordinary shape admits it as before.
         facts = modelbandit.candidate_for("opencode/glm-5.3-flash", self.POLICY)
         self.assertEqual(facts.exposure, "no-retention")
-        self.assertTrue(modelbandit.admit(SENSITIVE, facts).admitted)
+        self.assertFalse(modelbandit.admit(SENSITIVE, facts).admitted)
+        self.assertEqual(modelbandit.admit(SENSITIVE, facts).reason,
+                         "exposed (no-retention)")
+        self.assertTrue(modelbandit.admit(ORDINARY, facts).admitted)
 
     def test_candidate_binds_free_serving_and_catalog_window(self):
         facts = modelbandit.candidate_for("opencode/glm-5.3-flash", self.POLICY)

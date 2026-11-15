@@ -597,12 +597,17 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertIn(f"zone: {self.closed} (closed)", out)
         self.assertIn("remote free route is prohibited", out)
 
-    def test_a_paid_model_in_a_closed_zone_is_not_blocked(self):
+    def test_a_paid_model_in_a_closed_zone_is_blocked_as_non_local(self):
+        # ADR 0008 reaches the secrets gate's zone check through the same
+        # shape rule: a closed regime is Sensitive, and only a local serving
+        # may serve it — the block comes from the Exposure clause (the zone
+        # clause alone never refuses an accountable market route).
         out, _, code = self.run_check("--working-dir", self.closed,
                                       "--model", "deepseek/deepseek-v4-pro",
                                       stdin="Summarize the public API.")
         self.assertEqual(code, 0)
-        self.assertIn("secrets gate: safe", out)
+        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn("reason: exposed (no-retention)", out)
 
     def test_a_blocked_shape_is_not_certified_either(self):
         # The zone answers before the content does: an empty shape in a

@@ -660,8 +660,10 @@ def shape(regime, *, sensitive=False):
 
 
 class ClosedZoneGateTests(unittest.TestCase):
-    """closed: no remote free route at all, and everything sensitive refuses —
-    locally served models stay. open and sensitive behave exactly as today."""
+    """closed: no remote free route at all, and everything sensitive refuses
+    — locally served models stay. Under ADR 0008 `sensitive` means local-only
+    (every non-local Exposure excluded alike); `closed` implies it, `open`
+    admits every Exposure."""
 
     def test_closed_excludes_an_openrouter_free_route(self):
         decision = modelbandit.admit(shape("closed"),
@@ -681,10 +683,14 @@ class ClosedZoneGateTests(unittest.TestCase):
                                         is_free=True, local=True))
         self.assertTrue(decision.admitted)
 
-    def test_closed_admits_a_paid_no_retention_route(self):
-        self.assertTrue(modelbandit.admit(
+    def test_closed_excludes_a_paid_no_retention_route(self):
+        # closed implies sensitive: ADR 0008's local-only rule reaches it,
+        # so a paid no-retention route is out here too — marked, not hidden.
+        decision = modelbandit.admit(
             shape("closed"),
-            candidate("deepseek/deepseek-v4-pro", exposure="no-retention")).admitted)
+            candidate("deepseek/deepseek-v4-pro", exposure="no-retention"))
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "exposed (no-retention)")
 
     def test_closed_excludes_an_exposed_paid_route(self):
         # closed implies sensitive: the exposed route a sensitive zone refuses
@@ -699,16 +705,21 @@ class ClosedZoneGateTests(unittest.TestCase):
         self.assertTrue(modelbandit.admit(
             shape("open"), candidate("opencode/x-free", is_free=True)).admitted)
 
-    def test_sensitive_is_todays_sensitive(self):
-        # Exposure decides, as it does for --sensitive today: exposed routes
-        # out, no-retention free routes in — no zone exclusion on top.
+    def test_sensitive_excludes_every_non_local_route(self):
+        # ADR 0008: on a Sensitive shape only Exposure `local` may serve —
+        # trains out, no-retention out alike, local in — and no zone
+        # exclusion layers on top of that rule at the sensitive regime.
         self.assertFalse(modelbandit.admit(
             shape("sensitive"),
             candidate("z-ai/glm-5.4:free", exposure="trains", is_free=True)
         ).admitted)
-        self.assertTrue(modelbandit.admit(
+        self.assertFalse(modelbandit.admit(
             shape("sensitive"),
             candidate("opencode/x-free", is_free=True)).admitted)
+        self.assertTrue(modelbandit.admit(
+            shape("sensitive"),
+            candidate("qwen3-coder-30b", exposure="local",
+                      is_free=True, local=True)).admitted)
 
     def test_sensitive_zone_matches_the_sensitive_flag(self):
         self.assertEqual(modelbandit.admit(shape("sensitive"),
@@ -716,10 +727,17 @@ class ClosedZoneGateTests(unittest.TestCase):
                          modelbandit.admit(shape("open", sensitive=True),
                                     candidate("a/b:free", is_free=True)))
 
-    def test_closed_excludes_free_that_sensitive_would_admit(self):
+    def test_closed_and_sensitive_alike_exclude_the_free_no_retention_route(self):
+        # ADR 0008: Sensitive excludes the no-retention free route (the
+        # Exposure clause), and the closed regime — stricter still — refuses
+        # it on top of that, whether through the zone clause or the same
+        # Exposure clause.
         no_retention_free = candidate("opencode/x-free", is_free=True)
-        self.assertTrue(modelbandit.admit(shape("sensitive"), no_retention_free).admitted)
-        self.assertFalse(modelbandit.admit(shape("closed"), no_retention_free).admitted)
+        sensitive = modelbandit.admit(shape("sensitive"), no_retention_free)
+        self.assertFalse(sensitive.admitted)
+        self.assertEqual(sensitive.reason, "exposed (no-retention)")
+        self.assertFalse(
+            modelbandit.admit(shape("closed"), no_retention_free).admitted)
 
     def test_the_shape_defaults_to_open(self):
         self.assertEqual(modelbandit.Shape(), modelbandit.Shape(sensitive=False, regime="open"))
@@ -797,8 +815,9 @@ class RegimeOrderingTests(unittest.TestCase):
                     shape(regime), candidate("a/b:free", is_free=True)))
 
     def test_the_regime_prohibition_is_the_pre_flight_yardstick(self):
-        # What the guard refuses: the zone's free clause and the Exposure
-        # clause a regime at least as strict as sensitive states.
+        # What the guard refuses: the zone's free clause (closed alone) and
+        # the Exposure clause — every non-local route — a regime at least as
+        # strict as sensitive states (ADR 0008).
         exposed_paid = candidate("deepseek/x", exposure="trains")
         remote_free = candidate("a/b:free", is_free=True)
         self.assertIsNone(modelbandit.regime_prohibition(shape("open"), exposed_paid))
@@ -808,8 +827,9 @@ class RegimeOrderingTests(unittest.TestCase):
                       modelbandit.regime_prohibition(shape("closed"), exposed_paid))
         self.assertIn("remote free route is prohibited",
                       modelbandit.regime_prohibition(shape("closed"), remote_free))
-        self.assertIsNone(modelbandit.regime_prohibition(shape("sensitive"),
-                                                  remote_free))
+        self.assertIn("exposed (no-retention)",
+                      modelbandit.regime_prohibition(shape("sensitive"),
+                                                    remote_free))
 
 
 class ZonesWriterCliTests(TempDirMixin):

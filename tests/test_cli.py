@@ -1138,32 +1138,48 @@ class CliTests(unittest.TestCase):
             json.dump(pol, f)
 
     def test_sensitive_marks_the_exposed_row_and_keeps_it_visible(self):
+        # ADR 0008: every non-local Exposure is marked with its reason on a
+        # Sensitive shape — `trains` and `no-retention` alike — the rows
+        # stay visible, and with no local candidate the run stops blocked.
         self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
         out, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)
         self.assertIn("| admit |", out)
         row = next(ln for ln in out.splitlines()
                    if "deepseek/deepseek-v4-flash |" in ln)
         self.assertIn("exposed (trains)", row)      # visible with a reason
         other = next(ln for ln in out.splitlines()
                      if "deepseek/deepseek-v4-pro |" in ln)
-        self.assertNotIn("exposed", other)
+        self.assertIn("exposed (no-retention)", other)
+        self.assertIn("blocked: no eligible local candidate", out)
 
     def test_sensitive_pick_shuns_the_exposed_top_row(self):
-        # v4-pro tops the task order at alpha .7 / beta 1 (0.005^... priced at
-        # $0.0077), but exposure excludes it: the pick falls to the best
-        # admitted row and the exclusion is stated.
+        # v4-pro tops the cloud rows at alpha .7 / beta 1, but exposure
+        # excludes it: with an eligible local candidate in the run the pick
+        # is the local row — the exposed top row is marked in the table,
+        # never picked — and the same run without the flag picks the top
+        # row, as today.
         pol = json.loads(json.dumps(POLICY))
         pol["scoring"].update(alpha=0.7, beta=1.0)
         pol["exposure"] = {"deepseek/deepseek-v4-pro": "trains"}
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
-        out, _, code, _ = self.run_cli("--domain", "writing", "--sensitive")
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
         self.assertIsNone(code)
-        self.assertIn("top of task order deepseek/deepseek-v4-pro is excluded",
-                      out)
-        self.assertIn("default pick (top of task order): "
-                      "openrouter/deepseek/deepseek-v4-flash", out)
+        top_row = next(ln for ln in out.splitlines()
+                        if "deepseek/deepseek-v4-pro |" in ln)
+        self.assertIn("exposed (trains)", top_row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        self.assertNotIn("default pick (top of task order): "
+                         "openrouter/deepseek/deepseek-v4-pro", out)
         # the same run without the flag picks the top row, as today
         out, _, _, _ = self.run_cli("--domain", "writing")
         self.assertIn("default pick (top of task order): "
@@ -1248,26 +1264,148 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("vendor/model:free", deal)
 
     def test_sensitive_deal_never_draws_an_exposed_candidate(self):
-        self.sensitive_policy({"deepseek/deepseek-v4-flash": "trains"})
-        out, _, code, _ = self.run_cli("--domain", "writing", "--tickets", "12",
-                                       "--deal", "--seed", "proj",
-                                       "--sensitive")
+        # The exposed candidate stays out of the deal even when it is the
+        # only free cloud route left: the eligible local candidate takes
+        # every ticket (ADR 0008).
+        pol = json.loads(json.dumps(POLICY))
+        pol["exposure"] = {"deepseek/deepseek-v4-flash": "trains"}
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12",
+            "--deal", "--seed", "proj", "--sensitive",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
         self.assertIsNone(code)
         block = out[out.index("deal (seed"):out.index("projection at")]
         self.assertNotIn("deepseek/deepseek-v4-flash", block)
+        self.assertIn(f"| {mid} |", block)
         self.assertEqual(sum(int(ln.split("|")[7].strip())
                              for ln in block.splitlines()
                              if ln.startswith("| ")
                              and ln.split("|")[1].strip().isdigit()), 12)
 
     def test_sensitive_shape_with_no_admitted_candidate_stops_with_zero(self):
-        # A completed run with no pick: the answer is the message on stderr
-        # (byte-identical to v1), and the status stays 0 (issue #41).
+        # ADR 0008: no eligible local candidate is the Sensitive run's own
+        # stop — the blocked report on stdout, status 0 (US13) — replacing
+        # the generic all-excluded answer on stderr.
         self.sensitive_policy({"deepseek/": "trains"})
         out, err, code, _ = self.run_cli("--domain", "writing", "--sensitive")
         self.assertEqual(code, 0)
-        self.assertIn("no candidate admitted", err)
-        self.assertNotIn("no candidate admitted", out)
+        self.assertIn("blocked: no eligible local candidate", out)
+        self.assertNotIn("no candidate admitted", err)
+
+    # --- Sensitive is local-only (ADR 0008) ------------------------------
+
+    def sensitive_local_policy(self, exposure=None):
+        """The fixture machine's policy carrying one harness-listed local
+        candidate (no roster: the band gate has nothing to judge), plus an
+        optional exposure override for the cloud rows."""
+        pol = json.loads(json.dumps(POLICY))
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        if exposure:
+            pol["exposure"] = exposure
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        return "lmstudio/qwen/qwen3-coder-30b"
+
+    def test_sensitive_admits_only_local_and_marks_every_non_local_row(self):
+        # ADR 0008: a Sensitive shape (material) admits only Exposure
+        # `local` — no-retention leaves the machine like trains does, so it
+        # is excluded alike, marked with its reason in the table and never
+        # hidden. The pick and the deal take the local candidate alone: the
+        # invariant pinned at the output seam.
+        mid = self.sensitive_local_policy(
+            {"deepseek/deepseek-v4-flash": "trains"})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", "--deal", "--seed",
+            "local-only", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertIn("| admit |", out)
+        flash = next(ln for ln in out.splitlines()
+                     if "deepseek/deepseek-v4-flash |" in ln)
+        self.assertIn("exposed (trains)", flash)
+        for cloud in ("deepseek/deepseek-v4-pro |",
+                      "deepseek/deepseek-v4-pro-0813 |"):
+            row = next(ln for ln in out.splitlines() if cloud in ln)
+            self.assertIn("exposed (no-retention)", row)
+        local_row = next(ln for ln in out.splitlines() if f"{mid} |" in ln)
+        self.assertNotIn("exposed (", local_row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn(f"| {mid} |", deal)
+        self.assertNotIn("deepseek/", deal)      # never a cloud row
+
+    def test_a_sensitive_regime_triggers_local_only_without_the_flag(self):
+        # Place, not material (US3): the zone alone makes the shape
+        # Sensitive — a vault folder is protected even when its material
+        # does not trip the secrets gate — and such a deal carries the
+        # standing non-leak note too.
+        mid = self.sensitive_local_policy()
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            "--deal", "--seed", "place",
+            zones=self.zone_of("sensitive"),
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if "deepseek/deepseek-v4-pro |" in ln)
+        self.assertIn("exposed (no-retention)", row)
+        self.assertIn(f"default pick (top of task order): {mid}", out)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertIn(f"| {mid} |", deal)
+        self.assertNotIn("deepseek/", deal)
+        self.assertIn("non-leak note:", out)
+
+    def test_sensitive_with_no_eligible_local_candidate_blocks_and_stops(self):
+        # Deal-time emptiness is a report, never a re-gate (US13): the run
+        # stops with the blocked line on stdout and exits 0 like every
+        # other verdict — in pick mode and deal mode alike.
+        for extra in ((), ("--deal", "--seed", "blocked")):
+            with self.subTest(extra=extra):
+                out, err, code, _ = self.run_cli(
+                    "--domain", "writing", "--sensitive", *extra)
+
+                self.assertEqual(code, 0)
+                self.assertIn("blocked: no eligible local candidate", out)
+                self.assertNotIn("no candidate admitted", err)
+                self.assertNotIn("deal (seed", out)
+
+    def test_a_sensitive_deal_carries_the_standing_non_leak_note(self):
+        # The note is a contract marker for the harness to apply at prompt
+        # time — prompt authoring itself stays with the harness (US14);
+        # an ordinary deal prints no such note.
+        mid = self.sensitive_local_policy()
+
+        sensitive, _, _, _ = self.run_cli(
+            "--domain", "writing", "--sensitive", "--deal", "--seed", "note",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+        ordinary, _, _, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "note",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        note = next(ln for ln in sensitive.splitlines()
+                    if ln.startswith("non-leak note:"))
+        self.assertIn("contract marker", note)
+        self.assertLess(sensitive.index("non-leak note:"),
+                        sensitive.index("projection at"))
+        self.assertNotIn("non-leak note:", ordinary)
 
     def test_missing_scoring_block_exits_with_key(self):
         pol = json.loads(json.dumps(POLICY))
@@ -1910,7 +2048,7 @@ class CliTests(unittest.TestCase):
             local_models={mid: {"id": mid, "context_length": 262_144}})
 
         self.assertIsNone(code)
-        self.assertIsNone(s_code)
+        self.assertEqual(s_code, 0)   # blocked stop: nothing local may serve
         plain_row = next(ln for ln in plain.splitlines()
                          if ln.startswith("|") and f"{mid} |" in ln)
         self.assertIn("256K | trains |", plain_row)
@@ -1918,6 +2056,7 @@ class CliTests(unittest.TestCase):
                              if ln.startswith("|") and f"{mid} |" in ln)
         self.assertIn("exposed (trains)", sensitive_row)
         self.assertNotIn(f"default pick (top of task order): {mid}", sensitive)
+        self.assertIn("blocked: no eligible local candidate", sensitive)
 
     def test_the_exposure_override_can_declare_a_non_loopback_local_serving(self):
         # The one escape hatch: the policy's exposure-override map declares
@@ -2021,21 +2160,36 @@ class CliTests(unittest.TestCase):
         open_run, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name, world=world)
         self.assertIsNone(code)
+        self.assertNotIn("| admit |", open_run)
         self.assertIn("default pick (top of task order): openrouter/vendor/model:free",
                       open_run)
 
         closed, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             world=world, zones=self.zone_of("closed"))
-        self.assertIsNone(code)
-        # Never ranked, never listed: the zone's prohibition removes the
-        # candidate before the table is built, so there is no row to mark.
+        # ADR 0008: with no eligible local candidate the closed run stops
+        # blocked (exit 0) — and the source filter still removed the remote
+        # free route before the table was built.
+        self.assertEqual(code, 0)
         self.assertNotIn("vendor/model:free", closed)
-        self.assertNotIn("| admit |", closed)
+        self.assertIn("| admit |", closed)   # the non-local rows are marked
         self.assertIn(f"zone: {self._tmp.name} (closed)", closed)
+        self.assertIn("blocked: no eligible local candidate", closed)
 
     def test_a_closed_zone_keeps_remote_free_out_of_the_deal(self):
-        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
+        # The deal still runs in a closed zone once an eligible local
+        # candidate serves it (ADR 0008), and the source filter keeps the
+        # remote free route out of the whole output.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0, free_risk=0.35)
+        pol["free_models"] = {
+            "vendor/model": self.FREE_CATALOG["vendor/model"],
+            "lmstudio/qwen": {"context_length": 262_144,
+                              "exposure": "local",
+                              "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
         world = self.free_world(("vendor/model:free", 1.0))
         world["classifications"]["classifications"] = [{
             "tag": "content_writing", "usage_share": 1.0,
@@ -2047,11 +2201,14 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--tickets", "12", "--deal", "--seed", "proj",
             "--working-dir", self._tmp.name, world=world,
-            zones=self.zone_of("closed"))
+            zones=self.zone_of("closed"),
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
 
         self.assertIsNone(code)
+        self.assertNotIn("vendor/model:free", out)
         deal = out[out.index("deal (seed"):out.index("projection at")]
-        self.assertNotIn("vendor/model:free", deal)
+        self.assertIn(f"| {mid} |", deal)
         self.assertEqual(sum(int(ln.split("|")[7].strip())
                              for ln in deal.splitlines()
                              if ln.startswith("| ")
@@ -2090,38 +2247,47 @@ class CliTests(unittest.TestCase):
             "--domain", "writing", "--sensitive", "--working-dir",
             self._tmp.name, world=world, zones=self.zone_of("closed"))
 
-        self.assertIsNone(code)
-        # Still closed, not merely sensitive: the remote free route is absent.
+        # Still closed, not merely sensitive: the remote free route is
+        # absent at source, and with no eligible local candidate the run
+        # stops blocked (exit 0).
+        self.assertEqual(code, 0)
         self.assertNotIn("vendor/model:free", out)
         self.assertNotIn("default pick (top of task order): vendor/model:free",
                          out)
+        self.assertIn("blocked: no eligible local candidate", out)
 
-    def test_a_sensitive_zone_keeps_todays_sensitive_behaviour(self):
-        # No --sensitive flag: the zone alone excludes the exposed free route.
+    def test_a_sensitive_zone_triggers_local_only_like_the_flag(self):
+        # Place or material, whichever is stricter (ADR 0008): the zone
+        # alone excludes every non-local candidate exactly as --sensitive
+        # does, both rows stay marked, and with no eligible local candidate
+        # both runs stop with the blocked report (exit 0).
         self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/other"]})
         world = self.free_world(("vendor/model:free", 0.5))
 
-        zone_only, _, code, _ = self.run_cli(
+        zone_only, _, z_code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             world=world, zones=self.zone_of("sensitive"))
-        flagged, _, _, _ = self.run_cli(
+        flagged, _, f_code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", world=world)
 
-        self.assertIsNone(code)
+        self.assertEqual(z_code, 0)
+        self.assertEqual(f_code, 0)
         self.assertIn("exposed (trains)",
                       next(ln for ln in zone_only.splitlines()
                            if ln.startswith("|") and "vendor/model:free |" in ln))
-        self.assertEqual(self.pick_of(zone_only), self.pick_of(flagged))
-
-    def pick_of(self, out):
-        tail = out.split("default pick", 1)[1]
-        return tail.splitlines()[0]
+        self.assertIn("exposed (trains)",
+                      next(ln for ln in flagged.splitlines()
+                           if ln.startswith("|") and "vendor/model:free |" in ln))
+        self.assertIn("blocked: no eligible local candidate", zone_only)
+        self.assertIn("blocked: no eligible local candidate", flagged)
+        self.assertNotIn("default pick", zone_only)
+        self.assertNotIn("default pick", flagged)
 
     def test_the_run_header_names_the_zone_and_its_regime(self):
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             zones=self.zone_of("sensitive"))
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # no eligible local candidate: blocked
         self.assertIn(f"zone: {self._tmp.name} (sensitive)", out)
 
     def test_sensitive_flag_is_shown_as_the_effective_posture_in_every_header(self):
@@ -2129,7 +2295,7 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", "--working-dir",
             self._tmp.name, zones=zones)
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # blocked stop still prints the header
         expected = f"zone: {self._tmp.name} (open; sensitive via --sensitive)"
         self.assertIn(expected, out)
 
@@ -2148,7 +2314,7 @@ class CliTests(unittest.TestCase):
     def test_an_undeclared_folder_reports_undeclared_and_closed(self):
         out, _, code, _ = self.run_cli("--domain", "writing",
                                        zones_default="closed")
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed implies sensitive: blocked stop
         self.assertIn("zone: undeclared (closed)", out)
 
     # --- Header truth: the quota line answers to the zone (issue #38) ----
@@ -2165,7 +2331,7 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.run_cli("--domain", "writing", world=world,
                                        zones_absent=True)
 
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed default: no local candidate, blocked
         lines = out.splitlines()
         zone_line = next(ln for ln in lines if ln.startswith("zone: "))
         quota_line = next(ln for ln in lines if ln.startswith("free quota: "))
@@ -2184,7 +2350,7 @@ class CliTests(unittest.TestCase):
         # machine spells it (~/.config against the config-dir constants).
         out, _, code, _ = self.run_cli("--domain", "writing", zones_absent=True)
 
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed default: blocked stop, exit 0
         lines = out.splitlines()
         zone_at = next(i for i, ln in enumerate(lines)
                        if ln.startswith("zone: "))
@@ -2235,18 +2401,20 @@ class CliTests(unittest.TestCase):
 
     def test_a_closed_zone_excludes_an_exposed_paid_route(self):
         # closed implies sensitive: Exposure is the shape's exclusion and
-        # stays marked in the table, never hidden.
+        # stays marked in the table, never hidden — and with no eligible
+        # local candidate the run stops blocked (exit 0).
         self.sensitive_policy({"deepseek/deepseek-v4-pro-0813": "trains"})
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
             zones=self.zone_of("closed"))
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)
         self.assertIn("| admit |", out)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and "deepseek/deepseek-v4-pro-0813 |" in ln)
         self.assertIn("exposed (trains)", row)
         self.assertNotIn("default pick (top of task order): "
                          "deepseek/deepseek-v4-pro-0813", out)
+        self.assertIn("blocked: no eligible local candidate", out)
 
     # --- pre-flight: --assert-allowed -----------------------------------
 
@@ -2261,12 +2429,17 @@ class CliTests(unittest.TestCase):
         return self.run_cli(*argv, zones=zones, zones_default=zones_default,
                             policy_path=policy_path)
 
-    def test_assert_allowed_admits_a_paid_route_in_a_closed_zone(self):
+    def test_assert_allowed_blocks_a_paid_route_in_a_closed_zone(self):
+        # ADR 0008: closed implies sensitive, so only a local serving may
+        # serve here — the block comes from the Exposure clause (the zone
+        # clause alone never refuses an accountable market route), and it
+        # exits 0 like every verdict.
         out, _, code, calls = self.guard("deepseek/deepseek-v4-pro",
                                          zones=self.zone_of("closed"))
         self.assertEqual(code, 0)
         self.assertIn(f"zone: {self._tmp.name} (closed)", out)
-        self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
+        self.assertIn("blocked by the free-use zone", out)
+        self.assertIn("reason: exposed (no-retention)", out)
         self.assertEqual(calls, [])          # no board, no classification fetch
 
     def test_assert_allowed_blocks_a_remote_free_route_in_a_closed_zone(self):
@@ -2364,11 +2537,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
         out, err, code, calls = self.guard("deepseek/deepseek-v4-pro",
-                                           zones=self.zone_of("closed"),
-                                           policy_path=absent)
+                                           zones=self.zone_of("open"),
+                                           plain=True, policy_path=absent)
         self.assertEqual(code, 0)
         self.assertIn("allowed: deepseek/deepseek-v4-pro", out)
         self.assertEqual(err, "")
+        self.assertEqual(calls, [])
+
+        # ...and without a policy file the assumed-Sensitive shape still
+        # blocks a non-local route on the default no-retention assumption
+        # (ADR 0008).
+        guarded, _, code, calls = self.guard("deepseek/deepseek-v4-pro",
+                                             zones=self.zone_of("closed"),
+                                             policy_path=absent)
+        self.assertEqual(code, 0)
+        self.assertIn("reason: exposed (no-retention)", guarded)
         self.assertEqual(calls, [])
 
     def test_assert_allowed_reports_a_broken_zones_file_as_a_config_error(self):
@@ -2527,10 +2710,11 @@ class CliTests(unittest.TestCase):
             zones=[{"path": open_dir, "free": "open"},
                    {"path": closed_dir, "free": "closed"}])
 
-        self.assertIsNone(code)
+        self.assertEqual(code, 0)   # closed through the link: blocked stop
         self.assertIn(f"zone: {closed_dir} (closed)", out)
         self.assertNotIn("vendor/model:free", out)
-        self.assertNotIn("| admit |", out)
+        self.assertIn("| admit |", out)   # the non-local rows are marked
+        self.assertIn("blocked: no eligible local candidate", out)
 
     def test_free_risk_price_is_uniform_across_exposure(self):
         # Same share, different Exposure, same risk-derived price and score.
@@ -3051,23 +3235,36 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("free quota", err)
 
     def test_deal_can_send_all_tickets_to_free_when_paid_candidates_are_inadmissible(self):
+        # The deal's free share survives the ADR 0008 rule: paid candidates
+        # are inadmissible (trains), the no-retention cloud free route is
+        # excluded alike but stays marked, and the eligible local candidate
+        # — itself a Free route — takes every ticket.
         pol = json.loads(json.dumps(POLICY))
         pol["exposure"] = {"deepseek/": "trains"}
-        pol["free_models"] = {"vendor/model": {
-            "context_length": 262_144, "exposure": "no-retention",
-            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        pol["free_models"] = {
+            "vendor/model": {"context_length": 262_144,
+                             "exposure": "no-retention",
+                             "summary_ref": "deepseek/deepseek-v4-pro"},
+            "lmstudio/qwen": {"context_length": 262_144, "exposure": "local",
+                              "summary_ref": "deepseek/deepseek-v4-pro"}}
         with open(self.policy_path, "w") as f:
             json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
 
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", "--tickets", "12",
             "--deal", "--seed", "all-free-valid",
-            world=self.free_world(("vendor/model:free", 0.5)))
+            world=self.free_world(("vendor/model:free", 0.5)),
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
 
         self.assertIsNone(code)
-        self.assertIn("vendor/model:free", out)
+        row = next(ln for ln in out.splitlines()
+                   if "vendor/model:free |" in ln)
+        self.assertIn("exposed (no-retention)", row)   # marked, never dealt
         deal = out[out.index("deal (seed"):out.index("projection at")]
-        self.assertIn("vendor/model:free", deal)
+        self.assertIn(f"| {mid} |", deal)
+        self.assertNotIn("vendor/model:free", deal)
         self.assertIn("free share: 12/12 tickets (100%)", out)
         self.assertNotIn("deepseek/deepseek-v4-pro |", deal)
 

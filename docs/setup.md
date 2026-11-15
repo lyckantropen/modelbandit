@@ -38,10 +38,12 @@ worked example lives in the [README](../README.md#zonesjson).
 ### The three regimes
 
 - **`open`** — free models may run on content here, whatever a route retains.
-- **`sensitive`** — a free route that may retain what you send (`trains`) is
-  excluded; no-retention free routes and models served on this machine stay.
+- **`sensitive`** — nothing may leave the machine: only models served on this
+  machine run here, every non-local route excluded (`no-retention` alike with
+  `trains` — a vendor promise about storage is not containment in transit).
 - **`closed`** — no remote free route may run here at all; models served on
-  this machine never leave it and stay in.
+  this machine never leave it and, `closed` implying `sensitive`, they are the
+  only routes that stay in.
 
 The regimes order **`open` < `sensitive` < `closed`**, and a stricter regime
 dominates every milder one in every dimension — `closed` implies

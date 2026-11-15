@@ -253,8 +253,9 @@ area:
    <id>`, `blocked by the free-use zone`, or `blocked: unknown serving
    namespace` — with effective posture and regime named (never content) —
    status says the pre-flight ran, the lines say what's true. The dispatch fails closed: with no shape stated the pre-flight assumes the
-   material is Sensitive and says so (`shape: sensitive (assumed)`), so a
-   route that retains training data is refused by default; when you know the
+   material is Sensitive and says so (`shape: sensitive (assumed)`), so only
+   a route whose Exposure is `local` is allowed by default — `no-retention`
+   leaves the machine too (ADR 0008) — when you know the
    material is not Sensitive, say so explicitly with `--plain`
    (`shape: plain (via --plain)`), and `--sensitive` merely restates the
    default. The pre-flight reads
@@ -264,7 +265,8 @@ area:
    neither launches.
 
 Exposure exclusions stay visible: in a `sensitive` or `closed` zone the table
-marks an exposed (`trains`) route with its reason and never picks or deals it,
+marks every non-local route (`exposed (no-retention)`, `exposed (trains)`) with
+its reason and never picks or deals it,
 because that is the shape's decision, not the zone's prohibition.
 
 ### Worktrees
@@ -344,11 +346,11 @@ starts closed everywhere, so this is the interview's only opening move:
    models — some of which retain what you send — run on content here?"*
    and record one of the three answers:
    - `open` — free models may run on content here, whatever a route retains.
-   - `sensitive` — a free route that may retain what you send (`trains`) is
-     excluded; no-retention free routes and models served on this machine
-     stay.
-   - `closed` — no remote free route may run here at all; models served on
-     this machine never leave it and stay in.
+   - `sensitive` — nothing may leave the machine: only models served on this
+     machine run here, every non-local route excluded (`no-retention` alike
+     with `trains`).
+   - `closed` — no remote free route may run here at all, and, stricter
+     still, only models served on this machine stay in.
 2. Carry the worktree-root rule from **Closed-zone protocol** into the
    answers: an **undeclared worktree root stays closed** however open its
    repository, so ask about the directory the worktrees live in and declare
@@ -506,13 +508,13 @@ starts closed everywhere, so this is the interview's only opening move:
   no file can open what the machine closed. The regime a run works under is
   the stricter of the working folder's zone and the origin repository's
   (`git rev-parse --git-common-dir`, its parent); git missing or failing
-  leaves the working folder's zone alone. `open` and `sensitive` are today's
-  behaviour. A `closed` zone removes every remote Free route (`:free`,
-  `opencode/*`) at source — never ranked, scored, dealt or listed — and admits
-  locally served models, which never leave the machine; a paid no-retention
-  route still serves. Exposure exclusions are the shape's, not the zone's, so
-  they mark and never hide, and because `closed` implies `sensitive` an
-  exposed *paid* route is excluded there exactly as under `sensitive`. For
+  leaves the working folder's zone alone. A `closed` zone removes every remote
+  Free route (`:free`, `opencode/*`) at source — never ranked, scored, dealt or
+  listed — and, `closed` implying `sensitive`, a `sensitive` or `closed` zone
+  admits only locally served models: every non-local route, paid included, is
+  excluded under ADR 0008. Exposure exclusions are the shape's, not the zone's,
+  so they mark and never hide: the table shows `exposed (no-retention)` or
+  `exposed (trains)` on each excluded row. For
   setup, follow **Set up the free-use zones**; `--write-zones` reads the
   interview's proposal from stdin, validates it through this loader's
   rules, and writes the file atomically — no mode needs `zones.json`
@@ -551,7 +553,8 @@ starts closed everywhere, so this is the interview's only opening move:
 
 - **Exit statuses** — **0** ran to completion: any verdict — safe,
   sensitive, not certified, allowed, blocked by the free-use zone, unknown
-  serving namespace, over-budget, empty pool, no candidate admitted. **1** carries no contract
+  serving namespace, over-budget, empty pool, no candidate admitted, blocked
+  (no eligible local candidate). **1** carries no contract
   meaning: what CPython and generic operational failures (network
   unreachable, unreadable input) produce — never an answer. **2** usage
   errors (argparse's own channel). **4** rules/config error (secrets rules,
@@ -648,14 +651,20 @@ starts closed everywhere, so this is the interview's only opening move:
   imply trains, paid does not imply no-retention, an unknown free route
   defaults to trains. Localness is a serving fact, never a catalogue claim: a
   `local` label counts only for an id the route predicate does not classify as
-  remote. On a Sensitive shape the exposed — `trains` — are
-  excluded from the pick and the deal, marked in the table with the reason
-  (`exposed (trains)`), never hidden; no-retention free routes and local
-  models stay admitted. Exposure, not price, decides — and one admission
+  remote. On a Sensitive shape only Exposure `local` may serve (ADR 0008):
+  every non-local route — `no-retention` alike with `trains`, paid included —
+  is excluded from the pick and the deal, marked in the table with the reason
+  (`exposed (no-retention)`, `exposed (trains)`), never hidden; only local
+  models stay admitted, and a Sensitive shape with no eligible local candidate
+  stops with `blocked: no eligible local candidate` (exit 0 — the report is
+  the human escalation, never a re-gate). A deal touching Sensitive material
+  carries the standing non-leak note — a contract marker for the harness to
+  apply at prompt time; the prompt itself stays the harness's to author.
+  Exposure, not price, decides — and one admission
   verdict serves both the table and the deal, so the two never disagree
   about what may serve a shape. A `sensitive` zone is the `--sensitive` flag
   by another name, and a `closed` zone is at least that strict: it refuses
-  every exposed route a sensitive zone refuses — including an exposed *paid*
+  every non-local route a sensitive zone refuses — including a *paid*
   route — on top of every remote free one. The flag can only tighten a zone;
   it can never loosen one.
 
