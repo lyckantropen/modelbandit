@@ -3666,7 +3666,8 @@ def _twin_index(mid: str, pool: list[tuple[str, float]], plans: dict,
 
 def plan_deal(share: dict, models: dict, aff: dict,
               parameters: DealParameters, local=(), plans=None,
-              ledger: AllowanceLedger | None = None) -> list[dict]:
+              ledger: AllowanceLedger | None = None,
+              assign: list | None = None) -> list[dict]:
     """Multi-ticket deal over the eligible pool: seeded, preference-tilted.
 
     Eligibility is popularity (eligibility_pool). The draw blends the task
@@ -3703,6 +3704,13 @@ def plan_deal(share: dict, models: dict, aff: dict,
     uncataloged plan id -- keep drawing and never enter the ledger.
     Returns one row per pool model:
     {"mid", "share", "base", "pref", "draw", "tickets"}.
+
+    `assign` is an optional out-list (issue #72): when the caller passes
+    one, every draw appends the mid the batch's ticket landed on — or None
+    when the draw left the ticket unassigned (every row at cap) — so
+    position i records which model took ticket i+1, the draw keyed
+    `seed::i`. The lane and the ticket map read that record; callers that
+    pass none are untouched.
     """
     blend_weight = parameters.blend_weight
     seed = parameters.seed
@@ -3759,6 +3767,8 @@ def plan_deal(share: dict, models: dict, aff: dict,
         r = random.Random(f"{seed}::{i}").random() * run
         start = next((j for j, c in enumerate(cum) if r <= c), None)
         if start is None:
+            if assign is not None:
+                assign.append(None)
             continue
         for step in range(len(cum)):
             j = (start + step) % len(cum)
@@ -3768,6 +3778,8 @@ def plan_deal(share: dict, models: dict, aff: dict,
                 k = twins[j]
                 counts[k] += 1
                 ledger.charge(pool[k][0])
+                if assign is not None:
+                    assign.append(pool[k][0])
                 break
             mid = pool[j][0]
             if ledger.crosses(mid):
@@ -3776,12 +3788,21 @@ def plan_deal(share: dict, models: dict, aff: dict,
                     twins[j] = k
                     counts[k] += 1
                     ledger.charge(pool[k][0])
+                    if assign is not None:
+                        assign.append(pool[k][0])
                     break
                 evicted[j] = True
                 continue
             counts[j] += 1
             ledger.charge(mid)
+            if assign is not None:
+                assign.append(mid)
             break
+        else:
+            # Every row evicted: the draw left this ticket unassigned, and
+            # the record keeps its position honest — None, no lane, no map.
+            if assign is not None:
+                assign.append(None)
     return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
              "tickets": n}
             for (mid, s), b, pr, d, n
@@ -3841,6 +3862,44 @@ def deal_spares(rows: list[dict], *, local=(), sensitive=False) -> dict:
             for row in rows if row["tickets"]}
 
 
+def deal_lane(assign: list, *, local=()) -> list[dict]:
+    """The single strict local lane (issue #72): one group per local-served
+    model, its dealt ticket ids in assignment order, groups ordered by each
+    model's first assignment — consecutive lane members share a served
+    model, so the batch runs one model load at a time with minimal
+    load/unload churn (spec US25).
+
+    `assign` is plan_deal's out-record: position i is the mid that took
+    ticket i+1 (the draw keyed `seed::i`), None when a draw went
+    unassigned. Membership follows the served model alone — the harness's
+    local facts, never an id's spelling (the ADR-0005 invariant), so a
+    cloud ticket is absent from the lane whatever it draws. The result is
+    stable for a fixed roster, listing, shape and seed.
+    """
+    groups: dict[str, list[int]] = {}
+    local = set(local)
+    for i, mid in enumerate(assign, 1):
+        if mid is None or mid not in local:
+            continue
+        groups.setdefault(mid, []).append(i)
+    return [{"model": qualified_id(mid, local=True), "tickets": ids}
+            for mid, ids in groups.items()]
+
+
+def tickets_by_model(rows: list[dict], *, assign: list, local=()) -> dict:
+    """The batch's ticket id → model map, keyed by provider-qualified id in
+    deal-row order: the ids each dealt row actually drew (issue #72). Rows
+    that missed the draw key nothing; together with the lane — which names
+    the local ids per model — the map makes every ticket id's model
+    recoverable from the deal output. Unassigned draws (None in `assign`)
+    name no model and so appear under no key."""
+    dealt = [row for row in rows if row["tickets"]]
+    local = set(local)
+    return {qualified_id(row["mid"], local=row["mid"] in local):
+            [i for i, mid in enumerate(assign, 1) if mid == row["mid"]]
+            for row in dealt}
+
+
 def spare_exhaustion_text(mid: str, *, sensitive: bool) -> str:
     """Why a ticket has no Spare left — the one sentence the readout's
     `spare:` note and a substitution's `blocked:` report share (issue #71).
@@ -3887,9 +3946,14 @@ def band_line(mid: str, band: dict | None) -> str:
 
 def run_substitution(target: str, reason: str, rows: list[dict], *,
                      local=(), sensitive: bool = False, roster=None,
-                     zone=None, as_json: bool = False) -> int:
+                     zone=None, as_json: bool = False,
+                     assign: list | None = None) -> int:
     """The substitution record (issue #71): the named model's Spare takes
-    the ticket over whole, the fence restated, the reason recorded.
+    the ticket over whole, the fence restated, the reason recorded — and
+    the lane effect stated (issue #72): lane membership follows the served
+    model, so a cloud Spare's tickets exit the strict lane, a local one's
+    join it, and the record carries the post-substitution lane computed
+    from the same seeded deal with this serve swapped in.
 
     Stateless by construction — the caller has re-derived the same seeded
     deal from the same flags, so this only reports the takeover the draw
@@ -3926,6 +3990,32 @@ def run_substitution(target: str, reason: str, rows: list[dict], *,
     entry = (roster or {}).get(to_mid)
     band = entry.get("band") if isinstance(entry, dict) else None
     tickets = by_id[mid]["tickets"]
+    # The lane effect (issue #72): the ids this substitution moved are the
+    # target row's own draws from the seeded assignment, and the emitted
+    # lane is the seeded deal's lane with this serve swapped in — the same
+    # record's takeover section states the move in words. A target that
+    # missed the draw holds a ticket through an earlier substitution: no id
+    # of this deal's assignment names it, so the words say `the held
+    # ticket` and the lane (no id of it to move) stays as dealt.
+    held = [i for i, m in enumerate(assign or [], 1) if m == mid]
+    lane = deal_lane([to_mid if m == mid else m for m in (assign or [])],
+                     local=local)
+    ids = ", ".join(str(i) for i in held)
+    if held:
+        who, many = f"tickets {ids}", True
+    else:
+        who, many = "the held ticket", False
+    if mid in local and to_mid in local:
+        effect = (f"{who} {'move' if many else 'moves'} to {to} — "
+                  "membership follows the serve")
+    elif mid in local:
+        effect = (f"{who} {'exit' if many else 'exits'} the lane — "
+                  f"{to} is not local")
+    elif to_mid in local:
+        effect = (f"{who} {'join' if many else 'joins'} the lane — "
+                  f"served by {to}")
+    else:
+        effect = "unchanged — neither serve is local"
     if as_json:
         emit_json({"mode": "substitution", "ok": True,
                    "verdict": "substituted", "from": frm, "to": to,
@@ -3934,6 +4024,7 @@ def run_substitution(target: str, reason: str, rows: list[dict], *,
                                     else "automatic"),
                    "tickets": tickets, "sensitive": sensitive, "band": band,
                    "non_leak_note": (NON_LEAK_NOTE if sensitive else None),
+                   "lane": lane,
                    "zone": zone_payload(zone)})
         return 0
     print(f"substitution: {frm} -> {to}")
@@ -3946,6 +4037,7 @@ def run_substitution(target: str, reason: str, rows: list[dict], *,
         # The substituted model was itself a Spare already holding the
         # ticket (a second death): the held ticket still moves whole.
         print(f"  takeover: {to} takes the held ticket over whole")
+    print(f"  lane: {effect}")
     print(f"  fence: band — {band_line(to, band)}")
     if sensitive:
         print("  fence: sensitive — local-only (ADR 0008)")
@@ -5397,9 +5489,13 @@ def main() -> None:
             admitted=admitted,
             favor=favor,
         )
+        # plan_deal's out-record of the draw (issue #72): position i is
+        # the mid that took ticket i+1, feeding the ticket map and the
+        # lane printed below.
+        assign: list = []
         rows = plan_deal(share, models, aff, parameters=deal_parameters,
                          local=local_ids, plans=policy["plans"],
-                         ledger=ledger)
+                         ledger=ledger, assign=assign)
         if args.substitute is not None:
             # The substitution record is this invocation's whole answer
             # (issue #71): the same seed and shape flags above re-derived
@@ -5410,7 +5506,8 @@ def main() -> None:
             raise SystemExit(run_substitution(
                 args.substitute, args.reason or "mechanical", rows,
                 local=local_ids, sensitive=sensitive_shape(shape),
-                roster=roster, zone=zone, as_json=args.json))
+                roster=roster, zone=zone, as_json=args.json,
+                assign=assign))
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
@@ -5452,6 +5549,21 @@ def main() -> None:
                 print("spare: " + spare_exhaustion_text(
                     qualified_id(row["mid"], local=row["mid"] in local_ids),
                     sensitive=sensitive_shape(shape)))
+        # The batch's ticket map and the single strict lane (issue #72):
+        # every ticket id's model, then the local-dealt ids grouped by
+        # served model — one local run at a time, minimal load churn.
+        # Both lines speak `prefix: … -> <model>` so the readout parses.
+        ticket_map = tickets_by_model(rows, assign=assign, local=local_ids)
+        for model, ids in ticket_map.items():
+            print(f"ticket ids: {', '.join(str(i) for i in ids)} -> {model}")
+        lane = deal_lane(assign, local=local_ids)
+        if lane:
+            print("lane: strict — one local run at a time (grouped by model)")
+            for group in lane:
+                print(f"lane: {', '.join(str(i) for i in group['tickets'])} "
+                      f"-> {group['model']}")
+        else:
+            print("lane: none — no local-dealt tickets")
         for row in rows:
             mid = row["mid"]
             readout = ledger.readout(mid)
@@ -5514,6 +5626,13 @@ def main() -> None:
                         (qualified_id(spare, local=spare in local_ids)
                          if spare else None)
                     for mid, spare in spares.items()}
+                # The lane twin of the readout's lane block (issue #72):
+                # groups of mutually exclusive local-dealt ticket ids per
+                # served model (grouped-by-model order), plus the full
+                # ticket id -> model map the readout's `ticket ids:` lines
+                # carry — empty lane when no local row drew.
+                payload["lane"] = lane
+                payload["tickets_by_model"] = ticket_map
             emit_json(payload)
         else:
             verdict = "under" if not over_budget else "OVER"

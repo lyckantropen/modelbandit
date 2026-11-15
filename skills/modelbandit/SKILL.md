@@ -179,7 +179,14 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    dead model never strands the ticket; when the served model fails,
    re-run the deal's own flags with `--substitute <model>` to record the
    Spare taking the ticket over whole, reason and fence restated (see
-   **Spares & substitution**).
+   **Spares & substitution**). The deal also states the **lane**: one
+   strict lane, no two local runs concurrent — `ticket ids: <ids> ->
+   <model>` lines map the batch (numbered from 1 in the deal's assignment
+   order) to its models, and `lane: <ids> -> <model>` lines group the
+   local-dealt ids by served model, so execution runs one model load at
+   a time (see **Concurrency lane**). Substitution moves lane membership
+   with the serve — a cloud Spare's ids exit the lane, a local Spare's
+   join — and the record says which.
    One invocation deals one ticket shape — a run's domain, effort, token
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
@@ -647,6 +654,26 @@ starts closed everywhere, so this is the interview's only opening move:
   a non-sensitive run failing only after the no-load failover preference
   has had its pick. Blocked and substituted outcomes exit 0; a target
   outside the re-derived deal is a usage error (2).
+
+- **Concurrency lane** — the deal's statement of mutual exclusion: one
+  strict lane of the local-dealt ticket ids, no two local runs concurrent,
+  same model or not (the single lane is the whole answer; load management
+  stays with the serving stack). Ticket ids number the batch from 1 in the
+  deal's assignment order — ticket i+1 is the draw keyed `seed::i`. The
+  readout maps every dealt id with `ticket ids: <ids> -> <model>` lines
+  (deal-row order) and prints the lane: `lane: strict — one local run at a
+  time (grouped by model)` followed by one `lane: <ids> -> <model>` line per
+  local-served group — groups ordered by each model's first assignment, ids
+  ascending inside a group — or `lane: none — no local-dealt tickets`. The
+  budget `--json` carries `lane` as a list of `{model, tickets}` groups
+  (empty when no local drew) and `tickets_by_model`, the full id → model
+  map; non-local tickets never appear in the lane. Membership follows the
+  served model under substitution: a substitution record prints `lane:` —
+  ids exit when the Spare is cloud, join when it is local, move between
+  groups when both are local, `unchanged` when neither serves local — and
+  its `--json` answers with the post-substitution lane, computed from the
+  same seeded deal with the new serve swapped in. The published chain stays
+  put: the lane record is the truth that substitution follows.
 
 - **Plan readout** — a deal that drew plan tickets prints, per plan row with
   tickets, `allowance draw: <model> $X of $Y (Z% of monthly; W% of 5h)` — `$X`
