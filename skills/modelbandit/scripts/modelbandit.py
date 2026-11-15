@@ -1249,6 +1249,143 @@ def zones_absent_line(*, environ=None) -> str:
             "— undeclared paths are closed")
 
 
+# --- Local roster ----------------------------------------------------------
+# The author-owned record of judgment about this machine's local models —
+# the Capability band (domains handled, Difficulty ceiling, context-demand
+# ceiling) and prose, keyed by the harness's own model id — and only that
+# (GLOSSARY, Local roster). Existence, ids and serving facts belong to the
+# harness; the roster never restates them. It lives beside zones.json:
+# machine-global, uncommitted, hand-maintained (ADR-0009).
+ROSTER_FILE = "local-roster.json"
+ROSTER_VERSION = 1
+# The file's two top-level sections: an unknown key is a config error the
+# way the plan catalog's unknown entry keys are — read by nobody, believed
+# by somebody.
+ROSTER_KEYS = ("version", "entries")
+# An entry's three fields: band + prose is the whole judgment (spec #66,
+# "kept thin"), provenance is the exporter's optional stamp (ADR-0009).
+# Anything else — a stray `context_length`, a serving fact — would be a
+# catalog claim in a judgment file, refused loudly like the plan catalog's
+# unknown keys.
+ROSTER_ENTRY_KEYS = ("band", "prose", "provenance")
+ROSTER_BAND_KEYS = ("domains", "difficulty", "context_demand")
+# The domain names a band may state: the modelbandit domain vocabulary
+# spelled out, so a typo stops the run instead of silently never matching
+# a ticket (understating a band costs reach; a typo would cost it all
+# without a word).
+ROSTER_DOMAINS = ("research", "writing", "coding", "orchestration", "ops")
+
+
+def roster_path(*, environ=None) -> str:
+    """`local-roster.json` under the machine's config root — the same
+    directory as zones.json ($XDG_CONFIG_HOME/modelbandit/, else
+    ~/.config/modelbandit/), honouring the environment it is given."""
+    env = os.environ if environ is None else environ
+    base = (env.get("XDG_CONFIG_HOME")
+            or os.path.join(expand_path("~", environ=env), ".config"))
+    return os.path.join(base, ZONES_CONFIG_DIR, ROSTER_FILE)
+
+
+def load_local_roster(*, path: str | None = None, environ=None) -> dict:
+    """Validate the Local roster at the config boundary: its entries, or an
+    empty roster when the file is absent.
+
+    Loud in the style of `load_free_models`: an unknown key or a bad type
+    stops the run naming the entry — never a silent default, because a band
+    the reader guessed is a judgment nobody made. A missing file is absent
+    setup (the harness listing, not the roster, says what exists). The keys
+    are the harness's own model ids: a key outside the harness's local
+    namespace is refused here, so a roster entry can never speak for a
+    remote serving — judgment binds only the local row (ADR-0005).
+    """
+    roster = path if path is not None else roster_path(environ=environ)
+    if not os.path.exists(roster):
+        return {}
+    try:
+        with open(roster, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(
+            f"cannot read local roster file {roster}: {exc}") from None
+    if not isinstance(data, dict):
+        raise SystemExit(f"local roster file {roster} must be a JSON object")
+    for key in data:
+        if key not in ROSTER_KEYS:
+            raise SystemExit(
+                f"local roster: unknown top-level key '{key}' "
+                f"(expected {', '.join(ROSTER_KEYS)})")
+    if not _is_plain_int(data.get("version")) \
+            or data["version"] != ROSTER_VERSION:
+        raise SystemExit(f"local roster: version must be {ROSTER_VERSION} "
+                         f"(got {data.get('version')!r})")
+    if "entries" not in data:
+        raise SystemExit("local roster missing required key: entries")
+    entries = data["entries"]
+    if not isinstance(entries, dict):
+        raise SystemExit("local roster entries must be an object")
+    for mid in entries:
+        if not isinstance(mid, str) or classify_route(mid) != "local":
+            raise SystemExit(
+                f"local roster entries.{mid}: key must be a harness model "
+                f"id ({HARNESS_LOCAL_NAMESPACE}<model>), exactly as the "
+                f"harness invokes it")
+        entry = entries[mid]
+        where = f"entries.{mid}"
+        if not isinstance(entry, dict):
+            raise SystemExit(f"local roster {where} must be an object")
+        for key in entry:
+            if key not in ROSTER_ENTRY_KEYS:
+                raise SystemExit(
+                    f"local roster {where}: unknown key '{key}' "
+                    f"(expected {', '.join(ROSTER_ENTRY_KEYS)})")
+        if "band" not in entry:
+            raise SystemExit(f"local roster missing required key: "
+                             f"{where}.band")
+        band = entry["band"]
+        if not isinstance(band, dict):
+            raise SystemExit(f"local roster {where}.band must be an object")
+        for key in band:
+            if key not in ROSTER_BAND_KEYS:
+                raise SystemExit(
+                    f"local roster {where}.band: unknown key '{key}' "
+                    f"(expected {', '.join(ROSTER_BAND_KEYS)})")
+        for field in ROSTER_BAND_KEYS:
+            if field not in band:
+                raise SystemExit(
+                    f"local roster missing required key: {where}.band.{field}")
+        domains = band["domains"]
+        if not isinstance(domains, list) \
+                or not all(isinstance(name, str) for name in domains):
+            raise SystemExit(f"local roster {where}.band.domains must be a "
+                             f"list of domain names")
+        for name in domains:
+            if name not in ROSTER_DOMAINS:
+                raise SystemExit(
+                    f"local roster {where}.band.domains: unknown domain "
+                    f"'{name}' (known: {', '.join(ROSTER_DOMAINS)})")
+        difficulty = band["difficulty"]
+        if difficulty not in INTENTS:
+            raise SystemExit(
+                f"local roster {where}.band.difficulty must be one of "
+                f"{'|'.join(INTENTS)} (got {difficulty!r})")
+        demand = band["context_demand"]
+        if not _is_plain_int(demand) or demand <= 0:
+            raise SystemExit(f"local roster {where}.band.context_demand "
+                             f"must be a positive integer")
+        if "prose" not in entry:
+            raise SystemExit(
+                f"local roster missing required key: {where}.prose")
+        prose = entry["prose"]
+        if not isinstance(prose, str) or not prose.strip():
+            raise SystemExit(f"local roster {where}.prose must be a "
+                             f"non-empty string")
+        if "provenance" in entry and not isinstance(entry["provenance"],
+                                                    dict):
+            raise SystemExit(f"local roster {where}.provenance must be an "
+                             f"object")
+    return entries
+
+
 def expand_path(text: str, *, environ=None) -> str:
     """`~` and environment variables, against the environment it is given."""
     env = os.environ if environ is None else environ
@@ -2825,7 +2962,9 @@ class Shape:
     Sensitive is the shape's fifth element: the Secrets gate's verdict on the
     material, bound per invocation, never a mood declared mid-run. `regime` is
     the free-use zone the run works under (see shape_regime), `open` unless a
-    zone or the flag says otherwise.
+    zone or the flag says otherwise. `domain` and `intent` are the ticket
+    facts the Local roster's band judges against: which domain the run works
+    (None when nothing judges one) and which effort rung it asks for.
     """
     sensitive: bool = False
     input_tokens: int | None = None
@@ -2833,11 +2972,14 @@ class Shape:
     context_margin: float = 0.5
     output_tokens: int | None = None
     regime: str = "open"
+    domain: str | None = None
+    intent: str = "measured"
 
 
 @dataclasses.dataclass(frozen=True)
 class Candidate:
-    """The candidate facts admission judges: Exposure, serving and Footprint."""
+    """The candidate facts admission judges: Exposure, serving, Footprint
+    and — for a rostered local row — its Capability band."""
     id: str
     exposure: str
     is_free: bool = False
@@ -2846,6 +2988,7 @@ class Candidate:
     completion_cap: int | None = None
     output_multiplier: float = 1.0
     local: bool = False
+    band: dict | None = None
 
 
 def facets_for_candidate(candidate: Candidate) -> dict | None:
@@ -2930,12 +3073,16 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                   model: dict | None = None,
                   endpoints: list[dict] | None = None,
                   intent: str = "measured",
-                  loopback: bool = True) -> Candidate:
+                  loopback: bool = True,
+                  roster: dict | None = None) -> Candidate:
     """The candidate facts a policy implies for one model id: Exposure from
     the policy's `exposure` override map, `free_models` and `plans` catalogs,
     plus its Free price class (the seam's answer) and Footprint capacities.
     `loopback` is the serving fact behind `local` Exposure — see
-    resolve_exposure."""
+    resolve_exposure. `roster` is this machine's Local roster (entries keyed
+    by harness id): an exact key match attaches the entry's Capability band —
+    judgment only, it changes no serving fact, and an id the roster does not
+    carry simply has no band to judge."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
     plan_match = longest_prefix_match(mid, policy.get("plans", {}))
@@ -2966,6 +3113,8 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     needs_catalog_entry = (facets["needs_policy_catalog_entry"]
                            if facets else True)
     is_plan = is_plan_route(mid, local=local)
+    roster_entry = roster.get(mid) if roster else None
+    band = roster_entry.get("band") if isinstance(roster_entry, dict) else None
     return Candidate(id=mid,
                       exposure=resolve_exposure(
                           mid, free_models=policy.get("free_models", {}),
@@ -2974,6 +3123,7 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                           loopback=loopback),
                       is_free=is_free,
                       local=local,
+                      band=band if isinstance(band, dict) else None,
                       context_length=context_length,
                       completion_cap=completion_cap,
                       output_multiplier=(mult_for(model, intent) if model
@@ -3044,6 +3194,61 @@ def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
     """The Exposure<->Sensitive gate; see `exposed_prohibition`."""
     reason = exposed_prohibition(shape, candidate)
     return Decision(reason is None, reason or "")
+
+
+def band_gate(shape: Shape, candidate: Candidate) -> Decision:
+    """The Local roster's Capability band: hard exclusion, named per
+    dimension — the binding judgment on the local row only.
+
+    Only a rostered id carries a band (exact key match on the harness's own
+    id, attached by candidate_for), so the gate judges exactly the rows the
+    roster speaks for and never touches anyone else's admission. Each
+    dimension excludes with its own named reason, in the spirit of the
+    context gate's `over window`: the ticket's domain outside the band, the
+    effort rung over the Difficulty ceiling, the shape's Footprint over the
+    context-demand ceiling. Understating a band costs only reach;
+    overstating one fails at the ticket — and never at the window: the
+    Footprint is measured from the shape, the band ceiling is the number
+    enforced, and the probed context window stays the Context gate's own
+    (GLOSSARY, Capability band).
+    """
+    band = candidate.band
+    if not isinstance(band, dict):
+        return ADMITTED
+    reasons = []
+    domains = band.get("domains")
+    if not isinstance(domains, list):
+        domains = []
+    if shape.domain is not None and shape.domain not in domains:
+        if domains:
+            reasons.append(f"outside band (domain '{shape.domain}' not in "
+                           f"band: {', '.join(domains)})")
+        else:
+            reasons.append(f"outside band (domain '{shape.domain}' — the "
+                           f"band admits no domain)")
+    ceiling = band.get("difficulty")
+    if ceiling in INTENTS and shape.intent in INTENTS \
+            and INTENTS.index(shape.intent) > INTENTS.index(ceiling):
+        # Same ladder, one comparison: the band's ceiling and the ticket's
+        # effort rung are rungs of the one effort ladder (GLOSSARY,
+        # Difficulty — deliberation judged, never measured against a window).
+        reasons.append(f"over difficulty ceiling (effort {shape.intent} > "
+                       f"{ceiling})")
+    demand = band.get("context_demand")
+    if shape.input_tokens is not None and _is_plain_int(demand) \
+            and demand > 0:
+        # The shape's Footprint (input x growth headroom), measured from the
+        # token profile — the band ceiling is the enforced number, and no
+        # window figures in this comparison at all (the probed window stays
+        # the Context gate's own).
+        footprint = shape.input_tokens * shape.context_headroom
+        if footprint > demand:
+            reasons.append(
+                f"over band footprint (footprint {footprint:,.0f} over "
+                f"context-demand ceiling {demand:,} tokens)")
+    if not reasons:
+        return ADMITTED
+    return Decision(False, "; ".join(reasons))
 
 
 def context_gate(shape: Shape, candidate: Candidate) -> Decision:
@@ -3149,9 +3354,11 @@ def regime_prohibition(shape: Shape, candidate: Candidate) -> str | None:
 
 
 # The gates, in order, behind the one decision. The zone comes first: a route a
-# closed zone forbids outright does not need its Exposure or Footprint judged,
-# and the first failing gate is the reason the table shows.
-GATES = (zone_gate, exposure_gate, context_gate, catalog_gate)
+# closed zone forbids outright does not need its Exposure, band or Footprint
+# judged, and the first failing gate is the reason the table shows. The band
+# sits beside them: judgment about the rostered local row, after the regime
+# and Exposure facts, before the mechanical capacity checks.
+GATES = (zone_gate, exposure_gate, band_gate, context_gate, catalog_gate)
 
 
 def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
@@ -3969,7 +4176,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      local_ids=(), regime: str = "open",
                      zone: Zone | None = None,
                      sensitive: bool = False,
-                     ranks=None, local_listing=None) -> None:
+                     ranks=None, local_listing=None,
+                     roster=None) -> None:
     zone = zone if zone is not None else Zone(path=None, regime=regime)
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
@@ -4027,13 +4235,13 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         shape = Shape(sensitive=False, input_tokens=in_tok,
                       context_headroom=config.context.headroom,
                       context_margin=config.context.margin,
-                      regime=regime)
+                      regime=regime, domain=name, intent=intent)
         aff = domain_weights(signals, name, config.factors)
         admitted = frozenset(
             mid for mid in share_by_domain[name]
             if admit(shape, candidate_for(
                 mid, policy, local=mid in local_ids,
-                model=models.get(mid))).admitted)
+                model=models.get(mid), roster=roster)).admitted)
         pool = eligibility_pool(share_by_domain[name], models, aff, pool_k,
                                 admitted, local=local_ids)
         free = free_route_ids((mid for mid, _ in pool), policy,
@@ -4118,16 +4326,19 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     # Rostered ahead of the harness: a local entry no listing id reaches is
     # reported here, never dealt — existence comes from the listing alone,
     # so this is the one surface that can speak for an entry the ranking
-    # cannot show. No flag means the harness never spoke: say that instead
-    # of judging what was never given.
+    # cannot show. Both sources speak: the free catalog's local entries
+    # (a policy-side claim about existence) and the Local roster's own
+    # keys (judgment ahead of the harness). No flag means the harness
+    # never spoke: say that instead of judging what was never given.
     print("\n## Local models the harness cannot run")
     if local_listing is None:
         print("- — harness listing not provided; not judgeable")
     else:
         stranded = sorted(
-            prefix for prefix, entry in policy.get("free_models", {}).items()
-            if isinstance(entry, dict) and entry.get("exposure") == "local"
-            and not any(mid.startswith(prefix) for mid in local_listing))
+            {prefix for prefix, entry in policy.get("free_models", {}).items()
+             if isinstance(entry, dict) and entry.get("exposure") == "local"
+             and not any(mid.startswith(prefix) for mid in local_listing)}
+            | {mid for mid in (roster or {}) if mid not in local_listing})
         for prefix in stranded:
             print(f"- {prefix} — not in the harness listing; never dealt")
         if not stranded:
@@ -4431,6 +4642,14 @@ def main() -> None:
         print(f"policy/config error: {exc}", file=sys.stderr)
         raise SystemExit(RULES_CONFIG_ERROR) from None
     domains = policy.get("domains", {})
+    # The Local roster travels the same status-4 road as the policy it sits
+    # beside: a malformed entry stops the run naming it, never reaching
+    # admission as a guessed band.
+    try:
+        roster = load_local_roster()
+    except SystemExit as exc:
+        print(f"local roster/config error: {exc}", file=sys.stderr)
+        raise SystemExit(RULES_CONFIG_ERROR) from None
 
     if args.list_domains:
         for name, tags in domains.items():
@@ -4494,7 +4713,7 @@ def main() -> None:
                          args.effort, args.pricing_basis,
                          config, local_ids=local_ids, regime=regime, zone=zone,
                          sensitive=args.sensitive, ranks=ranks,
-                         local_listing=local_listing)
+                         local_listing=local_listing, roster=roster)
         return
 
     tags = domains[args.domain]
@@ -4530,7 +4749,8 @@ def main() -> None:
                   output_tokens=out_tok,
                   context_headroom=config.context.headroom,
                   context_margin=config.context.margin,
-                  regime=regime)
+                  regime=regime,
+                  domain=args.domain, intent=args.effort)
     # Zone prohibitions filter at source: a candidate the zone forbids outright
     # never enters the candidate set — not ranked, not scored, not dealt, not
     # listed, and its endpoints never priced. The header states the zone that
@@ -4637,7 +4857,7 @@ def main() -> None:
     decisions = {mid: admit(shape, candidate_for(
         mid, policy, local=mid in local_ids, model=models.get(mid),
         endpoints=endpoint_cache.get(mid, ()), intent=args.effort,
-        loopback=loopback),
+        loopback=loopback, roster=roster),
         quota=verdict)
         for mid in share}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)

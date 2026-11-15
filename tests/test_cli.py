@@ -252,6 +252,17 @@ class CliTests(unittest.TestCase):
             json.dump({"zones": list(zones or []), "default": default}, f)
         return config_home
 
+    def roster_file(self, entries):
+        """This fixture machine's Local roster, beside its zones.json: the
+        band + prose keyed by harness id, exactly as the contract spells it."""
+        config_home = os.path.join(self._tmp.name, "config")
+        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
+        with open(os.path.join(config_home, "modelbandit",
+                               "local-roster.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "entries": entries}, f)
+        return config_home
+
     def run_cli(self, *argv, world=None, local_models=None, local_listing=None,
                 listing_absent=False, serving_endpoint=None, key_payload=None,
                 zones=None, zones_default="open", policy_path=None,
@@ -1599,6 +1610,233 @@ class CliTests(unittest.TestCase):
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and f"{mid} |" in ln)
         self.assertNotIn("over window", row)
+
+    # --- Local roster: the binding Capability band ------------------------
+
+    def test_the_band_excludes_a_local_candidate_with_a_named_reason(self):
+        # The roster's Capability band is binding: a ticket domain outside
+        # the band is hard-excluded at admission with the band's own named
+        # reason — visible in the admit column, never picked.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["coding"], "difficulty": "measured",
+                     "context_demand": 65_536},
+            "prose": "Serviceable prose, weak for writing."}})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("outside band", row)
+        self.assertIn("domain 'writing'", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def test_the_difficulty_ceiling_excludes_only_above_the_rung(self):
+        # The band's difficulty is a ceiling on the effort rung: a ticket
+        # at or below the ceiling admits (the ceiling costs no reach),
+        # a rung above it is excluded with the named reason.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "measured",
+                     "context_demand": 65_536},
+            "prose": "Fine for measured writing, not for deep runs."}})
+
+        at_ceiling, _, code, _ = self.run_cli(
+            "--domain", "writing", "--effort", "measured",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+        over_ceiling, _, o_code, _ = self.run_cli(
+            "--domain", "writing", "--effort", "thorough",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        self.assertIsNone(o_code)
+        admitted_row = next(ln for ln in at_ceiling.splitlines()
+                            if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertNotIn("over difficulty ceiling", admitted_row)
+        excluded_row = next(ln for ln in over_ceiling.splitlines()
+                            if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("over difficulty ceiling", excluded_row)
+        self.assertIn("thorough > measured", excluded_row)
+        self.assertNotIn(f"default pick (top of task order): {mid}",
+                         over_ceiling)
+
+    def test_the_context_demand_ceiling_is_enforced_from_the_footprint(self):
+        # The band ceiling is judged against the shape's Footprint (input x
+        # growth headroom from the token profile) — never against the
+        # window: the serving reports 256K, the footprint of an authoring
+        # ticket (20,000 x 2.0 = 40,000) is over the roster's 8K ceiling,
+        # and the exclusion says so in the band's own terms.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "exhaustive",
+                     "context_demand": 8_192},
+            "prose": "Small-context model; short tickets only."}})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("context-demand ceiling 8,192", row)
+        self.assertNotIn("over window", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def test_the_probed_window_still_backs_the_context_gate_with_a_roster(self):
+        # A generous band does not stand in for capacity: the roster's
+        # ceiling passes (footprint under 1M), but the serving reports an
+        # 8K window and the Context gate still excludes it — the probed
+        # window remains the Context gate's own number.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "exhaustive",
+                     "context_demand": 1_048_576},
+            "prose": "Enormous appetite, whatever the serving reports."}})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 8_192}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("over window", row)
+        self.assertNotIn("context-demand ceiling", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+
+    def band_entry(self, domains, prose):
+        return {"band": {"domains": domains, "difficulty": "measured",
+                         "context_demand": 65_536},
+                "prose": prose}
+
+    def test_one_admission_verdict_serves_both_the_table_and_the_deal(self):
+        # The band's verdict is the admission decision itself: the table
+        # marks the excluded local row with the band's reason and the deal
+        # draws from the admitted set — same fixture the deal previously
+        # dealt, now rostered out, so the two surfaces cannot disagree.
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        self.roster_file({mid: self.band_entry(
+            ["coding"], "A coder, not a writer.")})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "listing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("outside band", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
+        deal_block = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn(f"| {mid} |", deal_block)
+
+    def test_a_band_passing_rostered_candidate_keeps_both_surfaces_unchanged(self):
+        # The other half of one verdict: a band the ticket fits costs
+        # nothing — with the roster present and the band passing, the readout
+        # is byte-identical to the run without one (understating a band
+        # costs reach; a passing band costs nothing).
+        pol = json.loads(json.dumps(POLICY))
+        pol["scoring"].update(alpha=1.0, beta=1.0)
+        pol["free_models"] = {"lmstudio/qwen": {
+            "context_length": 262_144, "exposure": "local",
+            "summary_ref": "deepseek/deepseek-v4-pro"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(pol, f)
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        args = ("--domain", "writing", "--deal", "--seed", "listing")
+        listing = {mid}
+        models = {mid: {"id": mid, "context_length": 262_144}}
+
+        unrostered = self.run_cli(*args, local_listing=listing,
+                                  local_models=models)
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        rostered = self.run_cli(*args, local_listing=listing,
+                                local_models=models)
+
+        self.assertIsNone(unrostered[2])
+        self.assertIsNone(rostered[2])
+        self.assertEqual(unrostered, rostered)
+        deal_block = rostered[0][rostered[0].index("deal (seed"):
+                                 rostered[0].index("projection at")]
+        self.assertIn(f"| {mid} |", deal_block)
+
+    def test_check_policy_reports_rostered_models_the_harness_cannot_run(self):
+        # The roster is the rostered source the section names: its keys
+        # ahead of the harness listing land there — reported, never dealt —
+        # while a roster key the harness actually runs stays out.
+        mid = self.listed_local_policy()
+        stranded = "lmstudio/qwen/bench-only-30b"
+        self.roster_file({
+            mid: self.band_entry(["writing", "coding"], "Servable today."),
+            stranded: self.band_entry(["writing", "coding"],
+                                      "Bench-only; not enabled in the harness."),
+        })
+
+        out, _, code, _ = self.run_cli(
+            "--check-policy", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        section = out[out.index("## Local models the harness cannot run"):
+                      out.index("## Free-share trends")]
+        self.assertIn(stranded, section)
+        self.assertIn("not in the harness listing; never dealt", section)
+        self.assertNotIn(mid, section)
+
+    def test_a_malformed_roster_stops_the_run_with_status_4(self):
+        # Loud validation reaches the CLI: a band the loader cannot trust
+        # stops the run at the rules/config status with a message naming
+        # the entry — on the ranking path and the policy check alike,
+        # never a traceback and never a silently guessed band.
+        mid = "lmstudio/qwen/qwen3-coder-30b"
+        self.roster_file({mid: {
+            "band": {"domains": ["writing"], "difficulty": "brutal",
+                     "context_demand": 65_536},
+            "prose": "Everything, allegedly."}})
+
+        for argv in (["--domain", "writing"], ["--check-policy"]):
+            with self.subTest(argv=argv):
+                out, err, code, _ = self.run_cli(*argv)
+                self.assertEqual(code, 4)
+                self.assertIn(f"entries.{mid}.band.difficulty", err)
+                self.assertIn("local roster", err)
+
+    def test_a_never_deal_band_excludes_every_ticket(self):
+        # The empty domain list is the valid never-deal band: the model
+        # stays rostered (visible, reported) but admits no ticket — the
+        # unusable-verdict seed the contract describes.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            [], "Bench verdict: unusable for agent work.")})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing",
+            local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("the band admits no domain", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", out)
 
     def test_probe_identity_never_reaches_the_readout(self):
         # The probe reports what serves; the listing says what exists. An id
