@@ -32,6 +32,15 @@ One deal deals one shape; same-shape tickets share one task-fit assessment by
 construction.
 _Avoid_: batch, group
 
+**Spare**
+A candidate the deal names but does not deal: the highest-Score eligible
+candidate that missed the draw behind a dealt model, standing by to take the
+ticket over whole when the dealt model cannot serve — unreachable, out of
+quota or allowance, unloadable, or reported dead. It inherits every
+constraint of the ticket it backs: substitution swaps the model, never the
+fence.
+_Avoid_: fallback, backup, alternate
+
 **Score**
 A model's per-task baseline value: popularity share to the α power over priced
 cost to the β power. Deterministic and taste-free; it orders candidates and
@@ -57,16 +66,26 @@ _Avoid_: estimate, quote
 **Exposure**
 A candidate's data-handling class: no-retention (input is neither stored nor
 trained on), trains (input may be stored, collected, or trained on), or local
-(runs on this machine — no training, no retention). The property that gates
-sensitive work; never inferred from price — free does not imply trains, paid
+(runs on this machine — no training, no retention) — the only class that may
+serve Sensitive work. The property that gates sensitive work; never inferred
+from price — free does not imply trains, paid
 does not imply no-retention. Unknown free defaults to trains.
 _Avoid_: privacy, data policy (an account rule, not a model property), training flag
 
 **Sensitive**
-A ticket shape whose material trips the secrets gate; exposed candidates are
-excluded from it. A join of the shape — the fifth shape element, bound per
-invocation (`--sensitive`) — never a mood declared mid-run.
+A ticket only a local candidate may serve — because its material trips the
+secrets gate, or because its place sits in a `sensitive` or `closed` zone,
+whichever is stricter. Every non-local Exposure is excluded alike:
+no-retention is a promise about storage, not about transit. A join of the
+shape — the fifth shape element, bound per invocation (`--sensitive`) — and
+the place's regime; never a mood declared mid-run.
 _Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
+
+**Local roster**
+The author-owned record of the local models on this machine: each one's
+identity, serving facts and Capability band. Hand-maintained — the only
+source a local candidate may enter the pool from.
+_Avoid_: registry, catalogue, inventory
 
 **Zone**
 The machine-wide declaration of where free models may run: a path with a
@@ -111,6 +130,14 @@ _Avoid_: complexity, size, difficulty (that is deliberation)
 How much deliberation a ticket needs: the effort intent, plus the agent's
 task-fit judgment. Judged, never measured — and never compared to a window.
 _Avoid_: complexity (it names both halves at once and so neither)
+
+**Capability band**
+What a local model's roster entry claims it may serve: the domains it handles,
+and ceilings on Difficulty and on context demand, set as a thin structured
+header beside its prose. Author-owned and binding — the gate enforces the
+band, so understating it costs only reach, while overstating it fails at the
+ticket.
+_Avoid_: description, profile, skill
 
 **Context gate**
 The mechanical exclusion of free candidates whose Footprint exceeds their
