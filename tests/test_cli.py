@@ -1838,6 +1838,131 @@ class CliTests(unittest.TestCase):
         self.assertIn("the band admits no domain", row)
         self.assertNotIn(f"default pick (top of task order): {mid}", out)
 
+    # --- Standing favor for band-passing locals + local share (issue #69) --
+
+    def test_a_band_passing_local_row_carries_the_standing_favor(self):
+        # The favor enters through the hint/affinity machinery: on a
+        # qualifying shape (the deal holds an admitted local row) that
+        # row's pref reads the affinity factors' validated favor (3.0),
+        # while every cloud row keeps exactly the pref its own hint earns —
+        # score, Nominal floor and paid-pool balance untouched. Hand-
+        # computed (blend 0.6, bases = share at alpha 1 / beta 0:
+        # 0.06/0.0425/0.005, prefs 1/3/3): draws 30.90% / 41.53% / 27.57%
+        # — the favor tilts the seeded draw toward the local row without
+        # deciding it, and the same seed replays the same deal.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        args = ("--domain", "writing", "--tickets", "12", "--deal",
+                "--seed", "listing")
+        models = {mid: {"id": mid, "context_length": 262_144}}
+
+        out, _, code, _ = self.run_cli(*args, local_listing={mid},
+                                       local_models=models)
+        replay = self.run_cli(*args, local_listing={mid},
+                              local_models=models)
+
+        self.assertIsNone(code)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        rows = [ln for ln in deal.splitlines()
+                if ln.startswith("| ") and ln.split("|")[1].strip().isdigit()]
+        self.assertEqual(len(rows), 3)
+        local_row = next(ln for ln in rows if mid in ln)
+        self.assertEqual(local_row.split("|")[5].strip(), "3.0")
+        self.assertEqual(local_row.split("|")[6].strip(), "41.53%")
+        flash_row = next(ln for ln in rows if "deepseek-v4-flash" in ln)
+        self.assertEqual(flash_row.split("|")[5].strip(), "3.0")  # its hint
+        pro_row = next(ln for ln in rows if "deepseek-v4-pro-0813" in ln)
+        self.assertEqual(pro_row.split("|")[5].strip(), "1.0")  # no hint
+        self.assertEqual(pro_row.split("|")[6].strip(), "30.90%")
+        self.assertEqual(flash_row.split("|")[6].strip(), "27.57%")
+        # Exact seeded draw for seed 'listing': 3 / 3 / 6 tickets in pool
+        # order (the local row lands three of the twelve).
+        self.assertEqual([int(ln.split("|")[7].strip()) for ln in rows],
+                         [3, 3, 6])
+        # Deterministic in the seed: the same invocation replays the deal.
+        again = replay[0]
+        self.assertEqual(out[out.index("deal (seed"):],
+                         again[again.index("deal (seed"):])
+
+    def test_the_deal_prints_the_local_share_beside_free_and_plan(self):
+        # The readout gains a third share line (issue #69): how much of the
+        # deal stays on this machine, printed beside the free and plan
+        # shares with the same `<label>: N/M tickets (P%)` shape — and the
+        # line always prints, a run with no local row reading 0 rather
+        # than vanishing (as the plan share already does).
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        models = {mid: {"id": mid, "context_length": 262_144}}
+
+        dealt, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "listing", local_listing={mid}, local_models=models)
+        cloud, _, c_code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "listing", local_listing=set(), local_models={})
+
+        self.assertIsNone(code)
+        self.assertIsNone(c_code)
+        block = dealt[dealt.index("deal (seed"):dealt.index("projection at")]
+        lines = [ln for ln in block.splitlines() if " share:" in ln]
+        self.assertEqual(lines, ["free share: 3/12 tickets (25%)",
+                                 "plan share: 0/12 tickets (0%)",
+                                 "local share: 3/12 tickets (25%)"])
+        c_block = cloud[cloud.index("deal (seed"):cloud.index("projection at")]
+        self.assertIn("local share: 0/12 tickets (0%)", c_block)
+
+    def test_the_standing_favor_never_reaches_a_row_the_band_excluded(self):
+        # The band ceilings are what make this "small tickets": a shape
+        # outside the band loses its local row at admission, so there is
+        # no admitted row to favor — the draw runs the cloud pool alone
+        # and the local share reads zero. The favor rides the admit chain,
+        # never bypasses it.
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["coding"], "A coder, not a writer.")})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "listing", local_listing={mid},
+            local_models={mid: {"id": mid, "context_length": 262_144}})
+
+        self.assertIsNone(code)
+        row = next(ln for ln in out.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("outside band", row)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn(f"| {mid} |", deal)
+        self.assertIn("local share: 0/12 tickets (0%)", deal)
+
+    def test_the_budget_json_run_carries_the_local_share(self):
+        # The machine-readable half of the readout (issue #69): a dealt
+        # budgeted run's verdict object carries the same figures the
+        # printed `local share:` line shows — and a budgeted run without
+        # --deal carries no share at all (no deal to count).
+        mid = self.listed_local_policy()
+        self.roster_file({mid: self.band_entry(
+            ["writing", "coding"], "Does everything on this machine.")})
+        models = {mid: {"id": mid, "context_length": 262_144}}
+        args = ("--domain", "writing", "--tickets", "12", "--budget", "100",
+                "--json", "--seed", "listing")
+
+        out, _, code, _ = self.run_cli(*args, "--deal",
+                                       local_listing={mid}, local_models=models)
+        plain, _, p_code, _ = self.run_cli(*args,
+                                           local_listing={mid},
+                                           local_models=models)
+
+        self.assertIsNone(code)
+        self.assertIsNone(p_code)
+        self.assertIn("local share: 3/12 tickets (25%)", out)
+        payload = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual(payload["local_share"],
+                         {"tickets": 3, "dealt": 12, "percent": 25.0})
+        self.assertEqual(json.loads(plain.strip().splitlines()[-1]).get(
+            "local_share"), None)
+
     def test_probe_identity_never_reaches_the_readout(self):
         # The probe reports what serves; the listing says what exists. An id
         # the harness never listed is not adopted, however loudly the probe

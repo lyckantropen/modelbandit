@@ -156,7 +156,15 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    never capped and never floored: a shape may be dealt entirely to Free
    routes. Beside it the deal always prints `plan share: N/M tickets (P%)`
    — the plan rows' tickets over the dealt tickets, a ticket a Twin absorbed
-   counted metered — so the market mix is visible at a glance. A plan row at
+   counted metered — so the market mix is visible at a glance, and
+   `local share: N/M tickets (P%)` — the tickets this machine's own
+   servings drew — so how much of the deal stays on local hardware reads
+   at the same glance. On a shape a band-passing local candidate fits,
+   that local row carries a **standing favor** in the draw — the affinity
+   factors' validated favor multiplied into its pref — so small tickets
+   genuinely land on local hardware instead of losing to discounted
+   popularity; the seeded draw still decides which row takes each ticket,
+   and score, Nominal floor and balance are untouched. A plan row at
    its cap hands its ticket to its family's **Twin** — the same model served
    metered, resolved through the `plans` entry's declared `family_ref` — and
    the flip is plan → metered only, never the reverse; only when no Twin
@@ -581,14 +589,20 @@ starts closed everywhere, so this is the interview's only opening move:
   for a reproducible deal. **Affinity** is derived at run time, never stored: a
   hint's fit for the domain and its evidence map through `affinity.factors`
   (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
-  avoid/suspected ×0.5). Longest prefix wins. The deal is the only place taste
-  acts — the ranking itself is never reordered. Every dealt row is named by
-  its provider-qualified id (see **Pick line**), so a row is a dispatch,
-  not an interpretation. Its Free share — the fraction
+  avoid/suspected ×0.5). Longest prefix wins. A band-passing local row
+  additionally carries a **standing favor**: the factors' validated favor
+  multiplied into its pref by the deal (the caller's local rows only —
+  never eligibility, never score), so a qualifying shape genuinely deals
+  local hardware while the seeded draw still picks the row. The deal is the
+  only place taste acts — the ranking itself is never reordered. Every dealt
+  row is named by its provider-qualified id (see **Pick line**), so a row is
+  a dispatch, not an interpretation. Its Free share — the fraction
   of tickets Free routes drew — is a report, never a cap and never a floor:
   some tickets, all of them, or none, as the draw falls. Beside it, the deal
   always prints `plan share: N/M tickets (P%)` — plan tickets over dealt
-  tickets, an absorbed ticket counted metered.
+  tickets, an absorbed ticket counted metered — and
+  `local share: N/M tickets (P%)` — this machine's own servings over dealt
+  tickets.
 
 - **Plan readout** — a deal that drew plan tickets prints, per plan row with
   tickets, `allowance draw: <model> $X of $Y (Z% of monthly; W% of 5h)` — `$X`
