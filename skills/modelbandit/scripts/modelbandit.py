@@ -2770,13 +2770,19 @@ EXPOSURES = ("no-retention", "trains", "local")
 class Shape:
     """A Ticket shape's admission-relevant elements.
 
-    Sensitive is the shape's fifth element: the Secrets gate's verdict on the
-    material, bound per invocation, never a mood declared mid-run. `posture`
-    is the free-use zone the run works under — `open` unless a closed
-    declaration covers the place. `domain` and `intent` are the ticket
-    facts the Local roster's band judges against: which domain the run works
-    (None when nothing judges one) and which effort rung it asks for.
+    Sensitive is decided here, exactly once, from the material (`--sensitive`)
+    or the place (a closed zone) - a join the run owns when its shape is built
+    and nothing downstream ever re-derives differently: gates read this object's verdict, so an exclusion prints its banner whatever made the shape Sensitive. `posture` is the free-use zone the run works under —
+    `open` unless a closed declaration covers the place (ADR 0010). `domain`
+    and `intent` are the ticket facts the Local roster's band judges against:
+    which domain the run works (None when nothing judges one) and which effort
+    rung it asks for.
     """
+
+    def __post_init__(self):
+        # The one derivation - flag or place, either firing is enough (ADR 0008). Computed here rather than per gate so a Sensitive shape behaves the same whether constructed from its stated material or from the zone that made it Sensitive.
+        object.__setattr__(self, "_sensitive", self.sensitive or self.posture == "closed")
+
     sensitive: bool = False
     input_tokens: int | None = None
     context_headroom: float = 2.0
@@ -3016,12 +3022,14 @@ class Decision:
 ADMITTED = Decision(True)
 
 
+# The one question every gate asks about a run's shape (ADR 0008): the flag or
+# a closed place makes it Sensitive. Shape decides that verdict once when the
+# shape is constructed - nothing downstream re-derives the join, so an
+# exclusion prints its banner whatever made the shape Sensitive.
+
 def sensitive_shape(shape: Shape) -> bool:
-    """Whether the shape is Sensitive: material (`--sensitive`, or the
-    pre-flight's assumed default) or place (a closed zone) — either trigger
-    firing is enough (ADR 0008: Sensitive is material that trips the checks,
-    an explicit flag, or a closed place)."""
-    return shape.sensitive or shape.posture == "closed"
+    """Whether this run's shape is Sensitive — material or place."""
+    return shape._sensitive
 
 
 def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
@@ -5028,7 +5036,7 @@ def main() -> None:
     decisions = {mid: admit(shape, candidate, quota=verdict)
                  for mid, candidate in candidates.items()}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
-    show_admission = shape.sensitive or any(
+    show_admission = sensitive_shape(shape) or any(
         not decisions[mid].admitted or decisions[mid].reason
         for mid, _ in ranked)
     # One eligibility pool: the deal plays it, and this run prices it, so a
@@ -5042,7 +5050,9 @@ def main() -> None:
     # deal draws it down (the whole batch).
     ledger = AllowanceLedger(policy["plans"], local=local_ids)
 
-    if shape.sensitive:
+    if sensitive_shape(shape):
+        # ADR 0008: a Sensitive shape with no eligible local candidate is
+        # announced up front - whatever made it Sensitive.
         print("shape: sensitive — non-local candidates are excluded from the "
               "pick and the deal (marked below, never hidden)\n")
     print("| # | model | share | score |" + (" fit | adj |" if fit_map else "")

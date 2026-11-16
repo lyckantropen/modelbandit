@@ -2652,6 +2652,35 @@ class CliTests(unittest.TestCase):
                          "deepseek/deepseek-v4-pro-0813", out)
         self.assertIn("blocked: no eligible local candidate", out)
 
+    def test_a_closed_place_makes_the_shape_sensitive_without_the_flag(self):
+        # AC/#83: Sensitivity is derived exactly once, when the run's shape
+        # is constructed — from the flag or the place. A closed place alone
+        # makes it Sensitive, so the exclusion banner prints for non-local
+        # exclusions whatever made them (pre-change the flag-only gate left a
+        # place-made Sensitive shape silent).
+        self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/other"]})
+        world = self.free_world(("vendor/model:free", 0.5))
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--working-dir", self._tmp.name,
+            world=world, zones=self.zone_of("closed"))
+
+        # Exit contract v2 (ADR-0004): a verdict is not a failure - every
+        # verdict prints and exits 0. The place alone makes the shape Sensitive;
+        # this used to print nothing, because the flag was never given.
+        self.assertEqual(code, 0)
+        zone_line = next(ln for ln in out.splitlines() if ln.startswith("zone: "))
+        self.assertIn("(closed)", zone_line)      # ...the place is closed ...
+        # ...and so Sensitive on its own - the exclusion still speaks, whatever
+        # caused it (pre-change the flag-only gate left a silent shape).
+        banner = next(ln for ln in out.splitlines() if ln.startswith("shape: "))
+        self.assertIn(
+            "non-local candidates are excluded from the pick and the deal "
+            "(marked below, never hidden)", banner)
+        # ...and every non-local route is still absent at source - an exclusion
+        # that was applied, not merely unpicked.
+        self.assertNotIn("vendor/model:free", out)
+
     # --- pre-flight: --assert-allowed -----------------------------------
 
     def guard(self, model, *, zones=None, sensitive=False,
