@@ -4,8 +4,10 @@ Everything converged on one name — `modelbandit`: the GitHub repo, the skill
 folder and its frontmatter `name:`, the script
 (`skills/modelbandit/scripts/modelbandit.py`, module `modelbandit`), the
 config prefix (`~/.config/modelbandit/`), the cache (`~/.cache/modelbandit/`)
-and the secrets filename (`modelbandit.secrets.json`). The old names —
-`openrouter-model-router`, `modelrouter`, `modelbind`, `bind.py` — are gone
+— and **the secrets file is retired**: old `modelrouter.secrets.json` /
+`modelbandit.secrets.json` files are inert weight where they exist, delete
+them. The old names — `openrouter-model-router`, `modelrouter`, `modelbind`,
+`bind.py` — are gone
 with **no compatibility fallback**: nothing reads an old path, nothing accepts
 an old invocation. This file lists the old names on purpose.
 
@@ -17,11 +19,7 @@ an old invocation. This file lists the old names on purpose.
   `closed` everywhere**. No error names the move; runs just stop at the zone
   gate with `blocked by the free-use zone` in the output — an answer, exit 0
   like any verdict, not a failure (ADR-0004).
-- **Secrets file not renamed** (`modelrouter.secrets.json` →
-  `modelbandit.secrets.json` in each project): the gate silently **falls back
-  to the built-in rules only** — the project's own phrases and patterns are
-  never read, so material the project used to catch passes as safe. Re-verify
-  every affected project with `--check-secrets` after renaming.
+- **Secrets file not renamed** (`modelrouter.secrets.json` → `modelbandit.secrets.json` in each project): delete them — the gate applies built-in credential/identifier/machine-fact/gitignored-content rules to the material a run is given, automatically at deal time and via `--check-secrets` on a single material. No project rules file participates, by design (spec #75's mode split).
 - **Skill symlink not re-pointed** (`~/.agents/skills/openrouter-model-router`
   → `~/.agents/skills/modelbandit` → the repo's `skills/modelbandit/`): the
   old link's target no longer exists, so the link **hard-breaks** — the skill
@@ -38,13 +36,7 @@ an old invocation. This file lists the old names on purpose.
 
 - [ ] Move the zones config dir: `mv ~/.config/modelrouter ~/.config/modelbandit`.
        Skipped → zones fall back to `closed` everywhere.
-- [ ] In every project that has one, rename `modelrouter.secrets.json` to
-       `modelbandit.secrets.json` (`git mv` if tracked, plain rename if
-       gitignored), then verify that project:
-       `python3 skills/modelbandit/scripts/modelbandit.py --check-secrets
-       --working-dir <project>` — the verdict reads `safe` on ordinary
-       material, and the project's own rules still trip where they used to.
-       Skipped → secrets fall back to built-in rules only.
+- [ ] Delete any secrets file: `rm -f modelrouter.secrets.json modelbandit.secrets.json`. The gate applies built-in credential/identifier/machine-fact/gitignored-content rules to the material a run is given, automatically at deal time and via `--check-secrets` on a single material. No project rules file participates, by design (spec #75's mode split).
 - [ ] Delete the stale cache: `rm -rf ~/.cache/modelbind`. Skipped → the
        orphaned directory lingers; nothing else breaks (24h TTL, refetches
        free).
@@ -79,8 +71,7 @@ an old invocation. This file lists the old names on purpose.
        `modelbandit` — the old module does not exist. Skipped → those callers
        fail with file-not-found / ImportError the next time they run.
 
-The rename changed identifiers only: same ranking, same prices, same zones
-and secrets semantics. One behavior exception — **the default deal seed**:
+The rename changed identifiers only: same ranking, same prices, same zones. Secrets rules-file semantics were RETIRED — old `modelrouter.secrets.json` / `modelbandit.secrets.json` files are inert weight; delete them where they exist. One behavior exception — **the default deal seed**:
 `--seed` used to default to `bind` and now defaults to `modelbandit`, so an
 unseeded `--deal` draws a different (equally valid) distribution than before
 the rename. To reproduce a pre-rename plan exactly, pass the old seed
