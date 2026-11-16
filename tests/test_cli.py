@@ -1541,7 +1541,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(any(url.endswith("/endpoints")
                              and "qwen/qwen3-coder" in url for url, *_ in calls))
 
-    def test_served_local_candidate_without_summary_is_visible_but_not_admitted(self):
+    def test_served_local_candidate_without_summary_is_marked_and_deal_eligible(self):
         policy = json.loads(json.dumps(POLICY))
         policy["free_models"] = {
             "lmstudio/local/qwen": {"context_length": 262_144, "exposure": "local"}}
@@ -1556,8 +1556,43 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         row = next(line for line in out.splitlines()
                    if line.startswith("|") and mid in line)
-        self.assertIn("local |", row)
-        self.assertIn("free route requires a catalog entry and summary", row)
+        self.assertIn("256K | local | default |", row)
+        self.assertIn("†", row)
+        self.assertNotIn("free route requires a catalog entry and summary", out)
+        explanation = (
+            "† missing summary: editorial completeness is not an admission verdict.")
+        self.assertEqual(out.count(explanation), 1)
+
+        # The same candidate remains in the eligible pool and can take the
+        # whole draw when it is the only ranked serving.
+        world = build_world()
+        world["classifications"]["classifications"] = [{
+            "tag": "content_writing", "usage_share": 1.0,
+            "models": [{"id": mid, "tag_usage_share": 1.0}],
+        }]
+        deal_out, _, deal_code, _ = self.run_cli(
+            "--domain", "writing", "--tickets", "12", "--deal",
+            "--seed", "missing-summary", world=world,
+            local_models={mid: {"id": mid}})
+        self.assertIsNone(deal_code)
+        deal = deal_out[deal_out.index("deal (seed"):deal_out.index("projection at")]
+        self.assertIn(f"| {mid} |", deal)
+        self.assertIn("| 12 |", deal)
+
+    def test_a_contradicting_exposure_still_stops_the_ranking(self):
+        policy = json.loads(json.dumps(POLICY))
+        policy["free_models"] = {
+            "opencode/flash-free": {"context_length": 262_144,
+                                    "exposure": "local"}}
+        with open(self.policy_path, "w") as f:
+            json.dump(policy, f)
+
+        out, err, code, _ = self.run_cli("--domain", "writing")
+
+        self.assertEqual(code, 4)
+        self.assertEqual(out, "")
+        self.assertIn("contradicts the remote serving identity", err)
+        self.assertIn("opencode/flash-free", err)
 
     def test_absent_local_server_keeps_cli_output_and_stderr_unchanged(self):
         baseline = self.run_cli("--domain", "writing")
@@ -1757,6 +1792,7 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(code)
         row = next(ln for ln in out.splitlines()
                    if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("256K | local | default |", row)
         self.assertIn("outside band", row)
         self.assertIn("domain 'writing'", row)
         self.assertNotIn(f"default pick (top of task order): {mid}", out)
@@ -3038,7 +3074,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("OUT OF BALANCE", balance)
         self.assertIn("coefficient re-tune due: no", out)
 
-    def test_uncatalogued_free_route_is_visible_but_never_picked(self):
+    def test_uncatalogued_free_route_is_visible_and_marked(self):
         world = build_world()
         world["models"].append(make_model("vendor/unknown:free", "0", "0", "0"))
         world["classifications"]["classifications"][0]["models"].append(
@@ -3047,10 +3083,11 @@ class CliTests(unittest.TestCase):
                                     "--tickets", "12", world=world)
         row = next(line for line in out.splitlines()
                    if line.startswith("|") and "vendor/unknown:free" in line)
-        self.assertIn("catalog", row)
-        self.assertNotIn("default pick (top of task order): vendor/unknown:free", out)
-        deal = out.split("\ndeal (", 1)[1]
-        self.assertNotIn("vendor/unknown:free", deal)
+        self.assertIn("† vendor/unknown:free", row)
+        self.assertNotIn("free route requires a catalog entry and summary", out)
+        self.assertEqual(
+            out.count("† missing summary: editorial completeness is not an admission verdict."),
+            1)
 
     def test_canonical_resolution_regression_prices_august_endpoints(self):
         out, _, _, _ = self.run_cli("--domain", "writing")

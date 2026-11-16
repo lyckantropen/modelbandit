@@ -224,8 +224,8 @@ class PlanPoolTests(unittest.TestCase):
         self.assertEqual([row["mid"] for row in rows], [OTHER])
 
 
-class PlanCatalogGateTests(unittest.TestCase):
-    """The catalog gate's plan branch asks the plans section."""
+class PlanCatalogFactTests(unittest.TestCase):
+    """The plans catalog controls pool membership, not admission verdicts."""
 
     def test_a_plans_cataloged_plan_row_is_admitted(self):
         candidate = modelbandit.candidate_for(
@@ -234,13 +234,11 @@ class PlanCatalogGateTests(unittest.TestCase):
         self.assertTrue(modelbandit.admit(modelbandit.Shape(),
                                           candidate).admitted)
 
-    def test_an_uncataloged_plan_row_refuses_with_the_catalog_reason(self):
+    def test_an_uncataloged_plan_row_is_not_refused_by_admission(self):
         candidate = modelbandit.candidate_for(PLAN, {})
         self.assertFalse(candidate.cataloged)
         decision = modelbandit.admit(modelbandit.Shape(), candidate)
-        self.assertFalse(decision.admitted)
-        self.assertIn("plan route requires a plans catalog entry",
-                      decision.reason)
+        self.assertTrue(decision.admitted)
 
     def test_a_plan_rows_exposure_comes_from_its_plans_entry(self):
         candidate = modelbandit.candidate_for(
@@ -344,13 +342,12 @@ class PlanRowCliTests(unittest.TestCase):
                              printed.index("projection at")]
         self.assertIn(PLAN, deal_block)
 
-    def test_an_uncataloged_plan_row_still_refuses_in_the_run(self):
+    def test_an_uncataloged_plan_row_still_stays_out_of_the_deal(self):
         self.with_policy({PLAN: plan_entry()})
         printed, err = self.run_main(self.world(
             [market_model(OTHER)], [(GHOST, 0.9), (OTHER, 0.1)]))
         self.assertIn(f" {GHOST} | 90.00% | — | 0B | "
                       "— unresolved to a priced model", printed)
-        self.assertIn("plan route requires a plans catalog entry", printed)
         deal_block = printed[printed.index("deal (seed"):
                              printed.index("projection at")]
         self.assertNotIn(GHOST, deal_block)

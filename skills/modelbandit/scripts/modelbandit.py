@@ -2800,6 +2800,7 @@ class Candidate:
     output_multiplier: float = 1.0
     local: bool = False
     band: dict | None = None
+    summary_missing: bool = False
 
 
 def facets_for_candidate(candidate: Candidate) -> dict | None:
@@ -2928,12 +2929,10 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     if (completion_cap is None and is_free
             and isinstance(catalog_entry, dict)):
         completion_cap = catalog_entry.get("max_completion_tokens")
-    # The catalog-entry facet: a harness or local serving is admitted only
-    # through its own catalog entry; a free-slug serving may ride a family
-    # summary without one; a plan serving needs its plans entry. Each
-    # catalog prices only the servings it owns (its load rule refuses every
-    # other kind), so the plan catalog satisfies the plan kind alone and the
-    # free catalog the Free kinds alone.
+    # Catalog presence remains a fact about where a serving comes from. It
+    # does not decide admission; the plans catalog's pool filters still decide
+    # which plan routes exist, while an absent Free summary is rendered as a
+    # mark below the table.
     needs_catalog_entry = (facets["needs_policy_catalog_entry"]
                            if facets else True)
     is_plan = is_plan_route(mid, local=local)
@@ -2952,14 +2951,13 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                       completion_cap=completion_cap,
                       output_multiplier=(mult_for(model, intent) if model
                                          else EFFORT_MULTIPLIERS[intent]),
-                      cataloged=((not needs_catalog_entry
-                                  or (is_free
-                                      and catalog_match is not None)
-                                  or (is_plan and plan_match is not None))
-                                 and (not is_free
-                                      or _free_summary(catalog_entry,
-                                                       policy.get("summaries",
-                                                                  {}), mid))))
+                      cataloged=(not needs_catalog_entry
+                                 or (is_free and catalog_match is not None)
+                                 or (is_plan and plan_match is not None)),
+                      summary_missing=(bool(is_free)
+                                       and not _free_summary(
+                                           catalog_entry,
+                                           policy.get("summaries", {}), mid)))
 
 
 def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
@@ -3134,26 +3132,6 @@ def context_gate(shape: Shape, candidate: Candidate) -> Decision:
     return Decision(not candidate.is_free, reason)
 
 
-def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """Only curated, summary-backed Free routes and plans-cataloged Plan
-    routes can enter the Deal.
-
-    The catalog-entry facet decides: a Free route needs its free catalog
-    entry (and its family summary where the entry rides one), and a Plan
-    route needs its plans entry — the one surface its list price, caps and
-    training/retention fact come from. A plan row the plans section does not
-    catalog stays visible and refused with this reason.
-    """
-    if candidate.is_free and not candidate.cataloged:
-        return Decision(False, "free route requires a catalog entry and "
-                        "summary where applicable (summary resolution is required)")
-    if (is_plan_route(candidate.id, local=candidate.local)
-            and not candidate.cataloged):
-        return Decision(False, "plan route requires a plans catalog entry "
-                               "(the plans section does not price this id)")
-    return ADMITTED
-
-
 def zone_prohibition(posture: str, candidate: Candidate) -> str | None:
     """Why a closed posture forbids this candidate outright, or None.
 
@@ -3207,8 +3185,10 @@ def zone_gate(shape: Shape, candidate: Candidate) -> Decision:
 # route a closed zone forbids outright does not need its Exposure, band or
 # Footprint judged, and the first failing gate is the reason the table shows.
 # The band sits beside them: judgment about the rostered local row, after the
-# zone and Exposure facts, before the mechanical capacity checks.
-GATES = (zone_gate, exposure_gate, band_gate, context_gate, catalog_gate)
+# zone and Exposure facts, before the mechanical capacity checks. Editorial
+# completeness is not an admission gate: a Free route without a resolving
+# summary remains eligible and is marked in the table (ADR-0011).
+GATES = (zone_gate, exposure_gate, band_gate, context_gate)
 
 
 def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
@@ -5040,12 +5020,13 @@ def main() -> None:
     # The one admission decision: the table marks with it, the deal draws
     # from it. Excluded rows stay visible; only the pick and the pool shun
     # them. A candidate the zone forbids never got this far.
-    decisions = {mid: admit(shape, candidate_for(
+    candidates = {mid: candidate_for(
         mid, policy, local=mid in local_ids, model=models.get(mid),
         endpoints=endpoint_cache.get(mid, ()), intent=args.effort,
-        loopback=loopback, roster=roster),
-        quota=verdict)
+        loopback=loopback, roster=roster)
         for mid in share}
+    decisions = {mid: admit(shape, candidate, quota=verdict)
+                 for mid, candidate in candidates.items()}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
     show_admission = shape.sensitive or any(
         not decisions[mid].admitted or decisions[mid].reason
@@ -5162,7 +5143,8 @@ def main() -> None:
         admit_cell = ""
         if show_admission:
             admit_cell = f" {decisions[mid].reason or '—'} |"
-        print(f"| {i} | {mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
+        shown_mid = f"{'† ' if candidates[mid].summary_missing else ''}{mid}"
+        print(f"| {i} | {shown_mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
               f"{delta} | {ctx} | {exposure} | {rung} |{admit_cell}")
         if decisions[mid].admitted:
@@ -5210,8 +5192,12 @@ def main() -> None:
                                  loopback=loopback)
                     if free_details or is_free_route(mid, local=mid in local_ids)
                     else "—")
-        print(f"| {i} | {mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
+        shown_mid = f"{'† ' if candidates[mid].summary_missing else ''}{mid}"
+        print(f"| {i} | {shown_mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
+
+    if any(candidate.summary_missing for candidate in candidates.values()):
+        print("\n† missing summary: editorial completeness is not an admission verdict.")
 
     odd = {k: v for k, v in matches.items() if v in ("heuristic", "unresolved")}
     if odd:

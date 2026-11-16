@@ -103,24 +103,11 @@ class FreeCandidateTests(unittest.TestCase):
             {"vendor/model:free": base_model})
         self.assertEqual(share, {"vendor/model:free": 0.4})
 
-    def test_uncatalogued_free_route_is_visible_but_not_admitted(self):
+    def test_uncatalogued_free_route_remains_visible(self):
         share = {"vendor/unknown:free": 0.8}
         models = {"vendor/unknown:free": {"id": "vendor/unknown:free"}}
         got_share, _ = modelbandit.merge_free_candidates(share, models, {}, SUMMARIES)
         self.assertIn("vendor/unknown:free", got_share)
-        facts = modelbandit.candidate_for("vendor/unknown:free", {})
-        decision = modelbandit.admit(modelbandit.Shape(), facts)
-        self.assertFalse(decision.admitted)
-        self.assertIn("catalog", decision.reason)
-
-    def test_catalog_entry_without_resolving_summary_is_not_admitted(self):
-        policy = {"free_models": {"vendor/model": {
-            "context_length": 65_536, "exposure": "no-retention",
-            "summary_ref": "missing"}}}
-        decision = modelbandit.admit(modelbandit.Shape(),
-                              modelbandit.candidate_for("vendor/model:free", policy))
-        self.assertFalse(decision.admitted)
-        self.assertIn("summary", decision.reason)
 
     def test_catalog_entry_without_summary_does_not_enter_candidate_set(self):
         share, models = modelbandit.merge_free_candidates(
@@ -146,12 +133,18 @@ class FreeCandidateTests(unittest.TestCase):
         self.assertEqual(facts.context_length, 1_048_576)
         self.assertTrue(modelbandit.admit(modelbandit.Shape(), facts).admitted)
 
-    def test_opencode_catalog_entry_still_requires_its_window_and_summary(self):
+    def test_opencode_catalog_entry_without_a_summary_ref_enters_nothing(self):
+        # Standing needs a summary reference: with none there is no row to
+        # rank, judge or mark — only the entry's own window and Exposure are
+        # still read by whatever does carry it. The assembly seam stays; what
+        # changed is that nothing downstream excludes on missing completeness.
         policy = {"free_models": {"opencode/model": {
             "context_length": 65_536, "exposure": "trains"}},
             "summaries": {}}
-        facts = modelbandit.candidate_for("opencode/model", policy)
-        self.assertFalse(modelbandit.admit(modelbandit.Shape(), facts).admitted)
+        share, models = modelbandit.merge_free_candidates(
+            {}, {}, policy["free_models"], policy["summaries"])
+        self.assertNotIn("opencode/model", share)
+        self.assertNotIn("opencode/model", models)
 
     def test_table_free_candidate_shows_window_and_exposure(self):
         self.assertEqual(modelbandit.free_candidate_details(

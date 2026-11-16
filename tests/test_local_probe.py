@@ -87,22 +87,5 @@ class LocalProbeTests(unittest.TestCase):
         self.assertEqual(share, {})
         self.assertEqual(models, {})
 
-    def test_served_catalog_entry_needs_summary_for_admission(self):
-        policy = {"free_models": {
-            "local/qwen": {"context_length": 65_536, "exposure": "local"}},
-            "summaries": {}}
-        listed = ["local/qwen-30b"]
-        served = {"local/qwen-30b": {"id": "local/qwen-30b"}}
-        share, models = modelbandit.merge_local_candidates(
-            {}, {}, listed, served, policy["free_models"])
-        facts = modelbandit.candidate_for("local/qwen-30b", policy,
-                                   local=True, model=models["local/qwen-30b"])
-
-        self.assertIn("local/qwen-30b", share)
-        self.assertEqual(facts.exposure, "local")
-        self.assertFalse(modelbandit.admit(modelbandit.Shape(), facts).admitted)
-        self.assertIn("catalog", modelbandit.admit(modelbandit.Shape(), facts).reason)
-
-
 if __name__ == "__main__":
     unittest.main()

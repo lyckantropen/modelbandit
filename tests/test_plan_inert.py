@@ -7,8 +7,9 @@ spells its column. Plan economics now have one facts surface — the validated
 - the assembly step joins a board-named plan id with the minimal record the
   table and the gates consume (no market models-list row exists for it), and
   the pools' plan filters release for cataloged rows;
-- the catalog gate's plan branch asks the plans section, so a plan id the
-  section does not catalog refuses with the catalog reason;
+- no plans entry still means the pools and the deal never play this id, even
+  when admit would otherwise take it — which plan routes exist is a separate
+  question from whether they are served (ADR-0011);
 - the free catalog still refuses plan-kind entries at load (pinned by
   test_free_catalog_kinds.py), and the free merge still drops a plan prefix
   even when a raw, unvalidated dict tries to feed it one;
@@ -71,8 +72,8 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
     def test_a_board_named_plan_id_reaches_the_pools_and_the_deal(self):
         # The board names the plan id with the biggest share; OpenRouter's
         # models list carries no such model, so the assembly step joins the
-        # cataloged plan row itself. The pools and the deal play it, and the
-        # catalog gate admits it.
+        # cataloged plan row itself. The assembly joins its catalog facts,
+        # so the pools and the deal can play it through the plans entry.
         plans = {PLAN: plan_entry()}
         classif = board((PLAN, 0.6), (MARKET, 0.4))
         models = {MARKET: market_model()}
@@ -93,7 +94,11 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
 
         facts = modelbandit.candidate_for(PLAN, {"plans": plans})
         self.assertTrue(facts.cataloged)
-        self.assertTrue(modelbandit.admit(modelbandit.Shape(), facts).admitted)
+        # Admit never refuses on completeness: a cataloged plan row is admitted
+        # with its reason empty, and the pools decide its play instead.
+        decision = modelbandit.admit(modelbandit.Shape(), facts)
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.reason, "")
 
     def test_the_plan_id_cannot_sneak_in_through_the_model_list(self):
         # The same assembly with the plan id absent from the board entirely:
@@ -107,8 +112,8 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
     def test_a_plan_id_the_model_list_carries_still_needs_its_plans_entry(self):
         # Belt and braces: even with the board AND the models list both
         # carrying the plan id, no plans entry means no play. The pool
-        # builders drop the plan kind, and the catalog gate refuses the plan
-        # row with the catalog reason.
+        # builders drop the plan kind — the plans catalog still decides which
+        # plan routes exist (ADR-0011), so nothing admits a row it cannot price.
         classif = board((PLAN, 0.6), (MARKET, 0.4))
         models = {MARKET: market_model(), PLAN: market_model(PLAN)}
         share, _, _ = modelbandit.domain_candidates(classif, ["content_writing"],
@@ -126,10 +131,10 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
 
         facts = modelbandit.candidate_for(PLAN, {})
         self.assertFalse(facts.cataloged)
+        # The verdict is what disappears (the gate), not the requirement — no
+        # plans entry still means the pools and the deal never play this id.
         decision = modelbandit.admit(modelbandit.Shape(), facts)
-        self.assertFalse(decision.admitted)
-        self.assertIn("plan route requires a plans catalog entry",
-                      decision.reason)
+        self.assertTrue(decision.admitted)
 
     def test_a_raw_plan_catalog_prefix_cannot_enter_the_free_merge(self):
         # The load refuses a plan-kind entry (test_free_catalog_kinds.py);
