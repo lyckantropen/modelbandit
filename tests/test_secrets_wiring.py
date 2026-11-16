@@ -268,7 +268,7 @@ class SecretsCliTests(TempDirMixin):
         os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
         with open(os.path.join(config_home, "modelbandit", "zones.json"),
                   "w", encoding="utf-8") as f:
-            json.dump({"zones": [], "default": "open"}, f)
+            json.dump({"zones": []}, f)
         with mock.patch.object(sys, "argv", ["modelbandit", *argv]), \
                 mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
                 mock.patch("modelbandit.machine_facts", return_value={"identifiers": []}), \
@@ -385,14 +385,14 @@ class JsonOutcomeVocabularyTests(TempDirMixin):
     `outcome` is the verdict word the printed `secrets gate:` line states —
     safe, sensitive, not certified, blocked — pinned at the CLI seam."""
 
-    def run_cli(self, *argv, stdin="", zones_default="open"):
+    def run_cli(self, *argv, stdin="", zones=()):
         out, err = io.StringIO(), io.StringIO()
         code = None
         config_home = os.path.join(self.root, "config")
         os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
         with open(os.path.join(config_home, "modelbandit", "zones.json"),
                   "w", encoding="utf-8") as f:
-            json.dump({"zones": [], "default": zones_default}, f)
+            json.dump({"zones": list(zones)}, f)
         with mock.patch.object(sys, "argv", ["modelbandit", *argv]), \
                 mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
                 mock.patch("modelbandit.machine_facts",
@@ -407,17 +407,15 @@ class JsonOutcomeVocabularyTests(TempDirMixin):
                 code = exc.code
         return out.getvalue(), err.getvalue(), code
 
-    def outcome_matches_the_printed_verdict(self, *argv, stdin="",
-                                            zones_default="open"):
-        plain, _, code = self.run_cli(*argv, stdin=stdin,
-                                      zones_default=zones_default)
+    def outcome_matches_the_printed_verdict(self, *argv, stdin="", zones=()):
+        plain, _, code = self.run_cli(*argv, stdin=stdin, zones=zones)
         self.assertEqual(code, 0)
         line = next(ln for ln in plain.splitlines()
                     if ln.startswith("secrets gate: "))
         printed = line[len("secrets gate: "):]
 
         payload, _, code = self.run_cli(*argv, "--json", stdin=stdin,
-                                        zones_default=zones_default)
+                                        zones=zones)
         self.assertEqual(code, 0)
         outcome = json.loads(payload)["outcome"]
 
@@ -448,9 +446,9 @@ class JsonOutcomeVocabularyTests(TempDirMixin):
             "not certified")
 
     def test_blocked_is_the_provenance_verdict(self):
-        # An outside file from an undeclared place blocks before the content
-        # verdict; the printed refusal names the zone, the outcome says
-        # `blocked` — the same word the stdout line prints.
+        # An outside file from a declared closed place blocks before the
+        # content verdict; the printed refusal names the zone, the outcome
+        # says `blocked` — the same word the stdout line prints.
         line = "ORDINARY_PRIVATE_LINE_7f2a"
         vault = os.path.join(self.root, "vault")
         os.makedirs(vault)
@@ -463,13 +461,12 @@ class JsonOutcomeVocabularyTests(TempDirMixin):
                 "--check-secrets", "--working-dir", self.root,
                 "--outside-file", path,
                 stdin="Summarize it.",
-                zones_default="closed"),
+                zones=[vault]),
             "blocked")
         payload = json.loads(
             self.run_cli("--check-secrets", "--json", "--working-dir",
                          self.root, "--outside-file", path,
-                         stdin="Summarize it.",
-                         zones_default="closed")[0])
+                         stdin="Summarize it.", zones=[vault])[0])
         self.assertEqual(payload["reason"], "material provenance from this zone")
         self.assertNotIn(line, payload["reason"])
 
@@ -484,16 +481,10 @@ class ZoneBlockedCheckTests(TempDirMixin):
         super().setUp()
         self.config = os.path.join(self.root, "config")
         self.work = os.path.join(self.root, "work")
-        self.sensitive = os.path.join(self.root, "sensitive-notes")
         self.closed = os.path.join(self.root, "closed-vault")
         os.makedirs(self.work)
-        os.makedirs(self.sensitive)
         os.makedirs(self.closed)
-        self.write_zones({"zones": [{"path": self.work, "free": "open"},
-                                    {"path": self.sensitive,
-                                     "free": "sensitive"},
-                                    {"path": self.closed, "free": "closed"}],
-                          "default": "closed"})
+        self.write_zones({"zones": [self.closed]})
 
     def write_zones(self, payload):
         os.makedirs(os.path.join(self.config, "modelbandit"), exist_ok=True)
@@ -566,20 +557,9 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
 
-    def test_a_source_in_a_sensitive_zone_keeps_the_content_verdict(self):
-        line = "SENSITIVE_ZONE_TENANT_7291"
-        path = self.source(self.sensitive, line)
-
-        out, _, code = self.run_check("--working-dir", self.work,
-                                      "--outside-file", path,
-                                      stdin=f"Use {line} in deployment.")
-
-        self.assertEqual(code, 0)
-        self.assertIn("rule: outside-file content", out)
-
-    def test_an_undeclared_source_is_blocked_by_the_closed_default(self):
-        # The machine-wide default closes undeclared paths, so provenance
-        # blocks before the Secrets gate judges the material.
+    def test_an_undeclared_source_is_open_and_keeps_the_content_verdict(self):
+        # Open unless declared: a place nobody declared is open, so
+        # provenance blocks nothing and the Secrets gate judges the material.
         other = os.path.join(self.root, "undeclared")
         os.makedirs(other)
         line = "UNDECLARED_ZONE_LINE_5c0d"
@@ -587,11 +567,10 @@ class ZoneBlockedCheckTests(TempDirMixin):
 
         out, _, code = self.run_check("--working-dir", self.work,
                                       "--outside-file", path,
-                                      stdin="Summarize it.")
+                                      stdin=f"Use {line} in deployment.")
         self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
-        self.assertIn("zone: undeclared (closed)", out)
-        self.assertNotIn(line, out)
+        self.assertIn("rule: outside-file content", out)
+        self.assertNotIn("blocked by the free-use zone", out)
 
     def test_sensitive_material_in_a_closed_folder_still_exits_zero(self):
         out, _, code = self.run_check("--working-dir", self.closed,
@@ -651,9 +630,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
         # A zone declared through a link governs the place it reaches; the
         # block names both the resolved place and the declared path.
         link = self.link(os.path.join(self.root, "closed-link"), self.closed)
-        self.write_zones({"zones": [{"path": self.work, "free": "open"},
-                                    {"path": link, "free": "closed"}],
-                          "default": "closed"})
+        self.write_zones({"zones": [link]})
         line = "DECLARED_LINK_PROVENANCE_8e4f"
         self.source(self.closed, line)
 
@@ -679,7 +656,7 @@ class SecretsEndToEndTests(TempDirMixin):
         os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
         with open(os.path.join(config_home, "modelbandit", "zones.json"),
                   "w", encoding="utf-8") as f:
-            json.dump({"zones": [], "default": "open"}, f)
+            json.dump({"zones": []}, f)
         with mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(sys, "stdin", io.StringIO(material)), \
                 mock.patch("modelbandit.machine_facts",

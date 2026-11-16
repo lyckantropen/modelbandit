@@ -73,7 +73,7 @@ class RouteKindFacetContractTests(unittest.TestCase):
     def test_every_kind_exposes_the_specified_facet_contract(self):
         expected = {
             "market": {
-                "zone_refusable_in_closed_regimes": False,
+                "zone_refusable_in_closed_zones": False,
                 "default_exposure": "no-retention",
                 "spends_free_request_counter": False,
                 "needs_policy_catalog_entry": False,
@@ -81,7 +81,7 @@ class RouteKindFacetContractTests(unittest.TestCase):
                 "standing_from": "boards",
             },
             "free-slug": {
-                "zone_refusable_in_closed_regimes": True,
+                "zone_refusable_in_closed_zones": True,
                 "default_exposure": "trains",
                 "spends_free_request_counter": True,
                 "needs_policy_catalog_entry": False,
@@ -89,7 +89,7 @@ class RouteKindFacetContractTests(unittest.TestCase):
                 "standing_from": "own board row",
             },
             "harness": {
-                "zone_refusable_in_closed_regimes": True,
+                "zone_refusable_in_closed_zones": True,
                 "default_exposure": "trains",
                 "spends_free_request_counter": False,
                 "needs_policy_catalog_entry": True,
@@ -97,7 +97,7 @@ class RouteKindFacetContractTests(unittest.TestCase):
                 "standing_from": "family share",
             },
             "plan": {
-                "zone_refusable_in_closed_regimes": False,
+                "zone_refusable_in_closed_zones": False,
                 "default_exposure": "no-retention",
                 "spends_free_request_counter": False,
                 "needs_policy_catalog_entry": True,
@@ -105,7 +105,7 @@ class RouteKindFacetContractTests(unittest.TestCase):
                 "standing_from": "deferred to plan economics",
             },
             "local": {
-                "zone_refusable_in_closed_regimes": False,
+                "zone_refusable_in_closed_zones": False,
                 "default_exposure": "local",
                 "spends_free_request_counter": False,
                 "needs_policy_catalog_entry": True,

@@ -55,14 +55,19 @@ class ModelbanditCli(unittest.TestCase):
             json.dump(policy, f)
         return self.policy_path
 
-    def run_cli(self, *argv, stdin="", world=None, zones=(),
-                zones_default="open", policy_path=None, fetch_error=False):
+    def place(self, folder=None):
+        """The judged place as the header spells it — the folder, links
+        resolved — for an undeclared open zone."""
+        return modelbandit.display_path(folder or self.root)
+
+    def run_cli(self, *argv, stdin="", world=None, zones=(), policy_path=None,
+                fetch_error=False):
         world = build_world() if world is None else world
         config_home = os.path.join(self.root, "config")
         os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
         with open(os.path.join(config_home, "modelbandit", "zones.json"), "w",
                   encoding="utf-8") as f:
-            json.dump({"zones": list(zones), "default": zones_default}, f)
+            json.dump({"zones": list(zones)}, f)
 
         def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
             if fetch_error:
@@ -142,18 +147,15 @@ class VerdictMatrixTests(ModelbanditCli):
         # usage error, exactly the refusal a silently ignored flag earns.
         out, err, code = self.run_cli("--check-secrets", "--working-dir",
                                       self.root, "--model", "vendor/model:free",
-                                      zones_default="closed",
                                       stdin="Summarize the public API")
         self.assertEqual(code, 2)
         self.assertIn("--model", err)
         self.assertNotIn("secrets gate:", out)
 
     def test_provenance_block_is_a_completed_run_not_a_status(self):
-        # The working folder is declared open; the vault beside it is
-        # undeclared, and undeclared is closed — provenance blocks before
-        # the content verdict, still a verdict: exit 0.
-        work = os.path.join(self.root, "work")
-        os.makedirs(work)
+        # The vault is declared closed; the outside file comes from it, so
+        # provenance blocks before the content verdict — still a verdict:
+        # exit 0.
         vault = os.path.join(self.root, "vault")
         os.makedirs(vault)
         path = os.path.join(vault, "notes.txt")
@@ -162,15 +164,13 @@ class VerdictMatrixTests(ModelbanditCli):
 
         out, _, code = self.run_cli("--check-secrets", "--working-dir",
                                     self.root, "--outside-file", path,
-                                    zones=[{"path": work, "free": "open"}],
-                                    zones_default="closed",
+                                    zones=[vault],
                                     stdin="Summarize it.")
 
         self.assertEqual(code, 0)
         self.assertIn("secrets gate: blocked by the free-use zone", out)
-        # The undeclared vault takes the closed default; the zone line
-        # names the regime, never the content.
-        self.assertIn("zone: undeclared (closed)", out)
+        # The zone line names the declared closed place, never the content.
+        self.assertIn(f"zone: {self.place(vault)} (closed)", out)
         self.assertIn("reason: material provenance from this zone", out)
 
     # --- --assert-allowed: two verdicts, one status ----------------------
@@ -198,7 +198,7 @@ class VerdictMatrixTests(ModelbanditCli):
         out, _, code = self.run_cli("--assert-allowed", "--model",
                                     "vendor/model:free",
                                     "--working-dir", self.root,
-                                    zones_default="closed")
+                                    zones=[self.root])
         self.assertEqual(code, 0)
         self.assertIn("blocked by the free-use zone", out)
         self.assertIn("model: vendor/model:free", out)
@@ -208,7 +208,7 @@ class VerdictMatrixTests(ModelbanditCli):
     def test_status_is_a_completed_run(self):
         out, err, code = self.run_cli("--status", "--working-dir", self.root)
         self.assertEqual(code, 0)
-        self.assertIn("zone: undeclared (open)", out)
+        self.assertIn(f"zone: {self.place()} (open)", out)
         self.assertEqual(err, "")
 
     # --- the ranking run's own verdicts ----------------------------------
@@ -275,7 +275,7 @@ class LineOutputParityTests(ModelbanditCli):
                                     self.root,
                                     stdin="Summarize the public API")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "zone: undeclared (open)\n"
+        self.assertEqual(out, f"zone: {self.place()} (open)\n"
                               "secrets gate: safe\n")
 
     def test_the_sensitive_lines_are_byte_identical(self):
@@ -283,7 +283,7 @@ class LineOutputParityTests(ModelbanditCli):
                                     self.root,
                                     stdin="api_key: sk-1234567890abcdef")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "zone: undeclared (open)\n"
+        self.assertEqual(out, f"zone: {self.place()} (open)\n"
                               "secrets gate: sensitive\n"
                               "rule: password, token or key assignment\n")
 
@@ -291,31 +291,28 @@ class LineOutputParityTests(ModelbanditCli):
         out, _, code = self.run_cli("--check-secrets", "--working-dir",
                                     self.root, stdin="")
         self.assertEqual(code, 0)
-        self.assertEqual(out, "zone: undeclared (open)\n"
+        self.assertEqual(out, f"zone: {self.place()} (open)\n"
                               "secrets gate: not certified (no material "
                               "given)\n")
 
     def test_the_provenance_block_lines_are_byte_identical(self):
-        # An outside file from an undeclared place blocks on provenance —
+        # An outside file from a declared closed place blocks on provenance —
         # the check's only zone answer (spec #75's mode split): the zone is
         # named, the material never is.
-        work = os.path.join(self.root, "work")
         vault = os.path.join(self.root, "vault")
-        os.makedirs(work)
         os.makedirs(vault)
         path = os.path.join(vault, "notes.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("ORDINARY_PRIVATE_LINE_7f2a\n")
-        out, _, code = self.run_cli("--check-secrets", "--working-dir", work,
-                                    "--outside-file", path,
-                                    zones=[{"path": work, "free": "open"}],
-                                    zones_default="closed",
+        out, _, code = self.run_cli("--check-secrets", "--working-dir",
+                                    self.root, "--outside-file", path,
+                                    zones=[vault],
                                     stdin="Summarize the public API")
         self.assertEqual(code, 0)
         self.assertEqual(
-            out, f"zone: {work} (open)\n"
+            out, f"zone: {self.place()} (open)\n"
                  "secrets gate: blocked by the free-use zone\n"
-                 "zone: undeclared (closed)\n"
+                 f"zone: {self.place(vault)} (closed)\n"
                  "reason: material provenance from this zone\n")
 
     def test_assert_allowed_allowed_lines_are_byte_identical(self):
@@ -326,7 +323,7 @@ class LineOutputParityTests(ModelbanditCli):
                                     "deepseek/deepseek-v4-pro", "--plain",
                                     "--working-dir", self.root)
         self.assertEqual(code, 0)
-        self.assertEqual(out, "zone: undeclared (open)\n"
+        self.assertEqual(out, f"zone: {self.place()} (open)\n"
                               "shape: plain (via --plain)\n"
                               "allowed: deepseek/deepseek-v4-pro\n")
 
@@ -335,7 +332,7 @@ class LineOutputParityTests(ModelbanditCli):
                                         "--working-dir", self.root)
         self.assertEqual(code, 0)
         self.assertEqual(blocked,
-                         "zone: undeclared (open)\n"
+                         f"zone: {self.place()} (open)\n"
                          "shape: sensitive (assumed)\n"
                          "blocked by the free-use zone\n"
                          "model: deepseek/deepseek-v4-pro\n"
@@ -345,15 +342,15 @@ class LineOutputParityTests(ModelbanditCli):
         out, _, code = self.run_cli("--assert-allowed", "--model",
                                     "vendor/model:free",
                                     "--working-dir", self.root,
-                                    zones_default="closed")
+                                    zones=[self.root])
         self.assertEqual(code, 0)
         self.assertEqual(
-            out, "zone: undeclared (closed)\n"
+            out, f"zone: {self.place()} (closed)\n"
                  "shape: sensitive (assumed)\n"
                  "blocked by the free-use zone\n"
                  "model: vendor/model:free\n"
-                 "reason: remote free route is prohibited by the effective "
-                 "regime\n")
+                 "reason: remote free route is prohibited by the closed "
+                 "zone\n")
 
     def test_the_budget_verdict_line_is_byte_identical(self):
         out, _, code = self.run_cli("--domain", "writing", "--tickets", "2",
@@ -398,7 +395,9 @@ class JsonModeTests(ModelbanditCli):
 
     def zone_of(self, payload):
         self.assertEqual(set(payload["zone"]),
-                         {"path", "regime", "declared", "resolved"})
+                         {"path", "posture", "declared", "resolved"})
+        self.assertIn(payload["zone"]["posture"], ("open", "closed"))
+        self.assertNotIn("regime", payload["zone"])
         return payload["zone"]
 
     def last_json_line_is_the_only_json_line(self, out):
@@ -433,7 +432,7 @@ class JsonModeTests(ModelbanditCli):
         self.assertIs(payload["verdict"], True)   # the proceed polarity
         self.assertEqual(payload["outcome"], "safe")
         self.assertEqual(self.zone_of(payload),
-                         {"path": None, "regime": "open",
+                         {"path": self.place(), "posture": "open",
                           "declared": None, "resolved": None})
         self.assertIsNone(payload["reason"])
         self.assertIsNone(payload["rule"])
@@ -471,13 +470,13 @@ class JsonModeTests(ModelbanditCli):
         out, _, code = self.run_cli("--check-secrets", "--json",
                                     "--working-dir", self.root,
                                     "--outside-file", path,
-                                    zones_default="closed",
+                                    zones=[vault],
                                     stdin="Summarize the public API")
         self.assertEqual(code, 0)
         payload = self.one_object(out)
         self.assertIs(payload["verdict"], False)
         self.assertEqual(payload["outcome"], "blocked")
-        self.assertEqual(self.zone_of(payload)["regime"], "closed")
+        self.assertEqual(self.zone_of(payload)["posture"], "closed")
         self.assertEqual(payload["reason"],
                          "material provenance from this zone")
         self.assertIsNone(payload["rule"])
@@ -549,18 +548,18 @@ class JsonModeTests(ModelbanditCli):
         self.assertIs(payload["allowed"], True)
         self.assertEqual(payload["model"], "deepseek/deepseek-v4-pro")
         self.assertEqual(payload["shape"], "plain")
-        self.assertEqual(self.zone_of(payload)["regime"], "open")
+        self.assertEqual(self.zone_of(payload)["posture"], "open")
         self.assertIsNone(payload["reason"])
 
     def test_assert_allowed_blocked_is_one_object(self):
         out, _, code = self.run_cli("--assert-allowed", "--json",
                                     "--model", "vendor/model:free",
                                     "--working-dir", self.root,
-                                    zones_default="closed")
+                                    zones=[self.root])
         self.assertEqual(code, 0)
         payload = self.one_object(out)
         self.assertIs(payload["allowed"], False)
-        self.assertEqual(self.zone_of(payload)["regime"], "closed")
+        self.assertEqual(self.zone_of(payload)["posture"], "closed")
         self.assertIn("remote free route is prohibited", payload["reason"])
 
     # --- --status ---------------------------------------------------------
@@ -572,7 +571,7 @@ class JsonModeTests(ModelbanditCli):
         self.assertEqual(err, "")
         payload = self.one_object(out)
         self.assertEqual(payload["mode"], "status")
-        self.assertEqual(self.zone_of(payload)["regime"], "open")
+        self.assertEqual(self.zone_of(payload)["posture"], "open")
         self.assertTrue(payload["zones_file"]["present"])
         self.assertTrue(payload["zones_file"]["path"].endswith(
             "/config/modelbandit/zones.json"))
@@ -600,7 +599,7 @@ class JsonModeTests(ModelbanditCli):
         for key in ("tickets", "total", "floor", "baseline"):
             self.assertIn(key, projection)
         self.assertGreater(projection["total"], 0.0)
-        self.assertEqual(self.zone_of(payload)["regime"], "open")
+        self.assertEqual(self.zone_of(payload)["posture"], "open")
 
     def test_budget_under_is_one_object_and_completes(self):
         out, _, code = self.run_cli("--domain", "writing", "--budget",

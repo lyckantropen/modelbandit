@@ -195,13 +195,14 @@ POLICY = {
 
 
 # Golden stdout for `run_cli("--domain", "writing")` on the fixture machine
-# with its zones.json present (declares the default open), captured before
+# with its zones.json present (declaring nothing closed), captured before
 # issue #38. A present zones file may not move a single byte: no advisory
-# line, and no reworded pool claim where free routes genuinely remain.
+# line, and no reworded pool claim where free routes genuinely remain. The
+# `{cwd}` slot is the working folder the header names.
 PRESENT_ZONES_GOLDEN = """\
 # Popularity ranking: writing
 
-zone: undeclared (open)
+zone: {cwd} (open)
 profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=worst | policy: 0d old | source: OpenRouter (openrouter.ai/rankings), as of 2026-10-17
 
 free quota: unavailable | :free routes stay in the pool
@@ -241,15 +242,26 @@ class CliTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def zones_file(self, zones, default="open"):
-        """This fixture machine's free-use zones. A test about pricing, quota
-        or the deal declares the machine open, so the zone gate stays out of
-        its way; the machine default (closed) is covered in test_zones.py."""
+    def zones_file(self, zones):
+        """This fixture machine's free-use zones: the bare list of paths
+        declared closed (ADR-0010). A test about pricing, quota or the deal
+        declares the machine open — an empty list — so the zone gate stays
+        out of its way; a test about the gate declares exactly the paths it
+        closes."""
+        declared = []
+        for entry in zones or []:
+            if isinstance(entry, dict):
+                # The retired per-entry form: only `closed` is a declaration
+                # under the bare list, so an `open` entry declares nothing.
+                if entry.get("free", "open") == "closed":
+                    declared.append(entry["path"])
+                continue
+            declared.append(entry)
         config_home = os.path.join(self._tmp.name, "config")
         os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
         with open(os.path.join(config_home, "modelbandit", "zones.json"),
                   "w", encoding="utf-8") as f:
-            json.dump({"zones": list(zones or []), "default": default}, f)
+            json.dump({"zones": declared}, f)
         return config_home
 
     def roster_file(self, entries):
@@ -265,7 +277,7 @@ class CliTests(unittest.TestCase):
 
     def run_cli(self, *argv, world=None, local_models=None, local_listing=None,
                 listing_absent=False, serving_endpoint=None, key_payload=None,
-                zones=None, zones_default="open", policy_path=None,
+                zones=None, policy_path=None,
                 zones_absent=False, real_benchmarks=False):
         world = world if world is not None else build_world()
         local_models = local_models if local_models is not None else {}
@@ -286,7 +298,7 @@ class CliTests(unittest.TestCase):
             home = os.path.join(self._tmp.name, "home")
             env = {"XDG_CONFIG_HOME": "", "HOME": home, "USERPROFILE": home}
         else:
-            config_home = self.zones_file(zones, default=zones_default)
+            config_home = self.zones_file(zones)
             env = {"XDG_CONFIG_HOME": config_home}
         calls = []
         real_fetch = modelbandit.fetch_json  # captured before the mock patches it
@@ -1347,30 +1359,6 @@ class CliTests(unittest.TestCase):
         self.assertIn(f"| {mid} |", deal)
         self.assertNotIn("deepseek/", deal)      # never a cloud row
 
-    def test_a_sensitive_regime_triggers_local_only_without_the_flag(self):
-        # Place, not material (US3): the zone alone makes the shape
-        # Sensitive — a vault folder is protected even when its material
-        # does not trip the secrets gate — and such a deal carries the
-        # standing non-leak note too.
-        mid = self.sensitive_local_policy()
-
-        out, _, code, _ = self.run_cli(
-            "--domain", "writing", "--working-dir", self._tmp.name,
-            "--deal", "--seed", "place",
-            zones=self.zone_of("sensitive"),
-            local_listing={mid},
-            local_models={mid: {"id": mid, "context_length": 262_144}})
-
-        self.assertIsNone(code)
-        row = next(ln for ln in out.splitlines()
-                   if "deepseek/deepseek-v4-pro |" in ln)
-        self.assertIn("exposed (no-retention)", row)
-        self.assertIn(f"default pick (top of task order): {mid}", out)
-        deal = out[out.index("deal (seed"):out.index("projection at")]
-        self.assertIn(f"| {mid} |", deal)
-        self.assertNotIn("deepseek/", deal)
-        self.assertIn("non-leak note:", out)
-
     def test_sensitive_with_no_eligible_local_candidate_blocks_and_stops(self):
         # Deal-time emptiness is a report, never a re-gate (US13): the run
         # stops with the blocked line on stdout and exits 0 like every
@@ -2240,52 +2228,45 @@ class CliTests(unittest.TestCase):
 
     def test_one_loopback_fact_agrees_across_both_surfaces(self):
         # One serving fact, one answer, whichever surface asks (ADR-0003,
-        # ADR-0008): with the serving off this machine and a Sensitive or
-        # closed regime, `local` Exposure resolves nowhere. The ranking
-        # run marks the row exposed and never serves it; --check-policy
-        # admits it into its diagnostic deal neither — the free-share
-        # measurement record (the one place that surface reports what its
-        # deal admitted) stays unwritten, where the loopback control
-        # writes it. Both halves matter: without the control the fixture
-        # could simply never have measured.
+        # ADR-0008): with the serving off this machine, a Sensitive shape
+        # resolves `local` Exposure nowhere. The ranking run marks the row
+        # exposed and never serves it; --check-policy admits it into its
+        # diagnostic deal neither — the free-share measurement record (the
+        # one place that surface reports what its deal admitted) stays
+        # unwritten, where the loopback control writes it. Both halves
+        # matter: without the control the fixture could simply never have
+        # measured.
         mid = self.listed_local_policy()
         models = {mid: {"id": mid, "context_length": 262_144}}
         history = os.path.join(self._tmp.name, "cache",
                                "free-share-history.json")
+        if os.path.exists(history):
+            os.remove(history)
+        ranked, _, code, _ = self.run_cli(
+            "--domain", "writing", "--sensitive",
+            serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid}, local_models=models)
+        checked, _, check_code, _ = self.run_cli(
+            "--check-policy", "--sensitive",
+            serving_endpoint=self.LAN_ENDPOINT,
+            local_listing={mid}, local_models=models)
 
-        for zone_name, argv, zones_kw in (
-                ("sensitive", ["--sensitive"], {"zones_default": "open"}),
-                ("closed", [], {"zones_default": "closed"})):
-            with self.subTest(zone=zone_name):
-                if os.path.exists(history):
-                    os.remove(history)
-                ranked, _, code, _ = self.run_cli(
-                    "--domain", "writing", *argv,
-                    serving_endpoint=self.LAN_ENDPOINT,
-                    local_listing={mid}, local_models=models, **zones_kw)
-                checked, _, check_code, _ = self.run_cli(
-                    "--check-policy", *argv,
-                    serving_endpoint=self.LAN_ENDPOINT,
-                    local_listing={mid}, local_models=models, **zones_kw)
+        row = next(ln for ln in ranked.splitlines()
+                   if ln.startswith("|") and f"{mid} |" in ln)
+        self.assertIn("exposed (trains)", row)
+        self.assertNotIn(f"default pick (top of task order): {mid}", ranked)
+        self.assertEqual(code, 0)
+        self.assertIsNone(check_code)
+        self.assertFalse(
+            os.path.exists(history),
+            "check-policy measured a free share from a deal that "
+            f"admitted a row the ranking run excludes:\n{checked}")
 
-                row = next(ln for ln in ranked.splitlines()
-                           if ln.startswith("|") and f"{mid} |" in ln)
-                self.assertIn("exposed (trains)", row)
-                self.assertNotIn(f"default pick (top of task order): {mid}",
-                                 ranked)
-                self.assertEqual(code, 0)
-                self.assertIsNone(check_code)
-                self.assertFalse(
-                    os.path.exists(history),
-                    "check-policy measured a free share from a deal that "
-                    f"admitted a row the ranking run excludes:\n{checked}")
-
-                self.run_cli("--check-policy", *argv,
-                             local_listing={mid}, local_models=models,
-                             **zones_kw)
-                self.assertTrue(os.path.exists(history),
-                                "the loopback control never measured — the "
-                                "fixture cannot tell the surfaces apart")
+        self.run_cli("--check-policy", "--sensitive",
+                     local_listing={mid}, local_models=models)
+        self.assertTrue(os.path.exists(history),
+                        "the loopback control never measured — the "
+                        "fixture cannot tell the surfaces apart")
 
     def test_the_exposure_override_can_declare_a_non_loopback_local_serving(self):
         # The one escape hatch: the policy's exposure-override map declares
@@ -2377,10 +2358,12 @@ class CliTests(unittest.TestCase):
                          "default pick (top of task order): "
                          "openrouter/vendor/model:free")
 
-    # --- free-use zones: main wires the regime into admission --------
+    # --- free-use zones: main wires the posture into admission --------
 
-    def zone_of(self, free):
-        return [{"path": self._tmp.name, "free": free}]
+    def zone_of(self, posture):
+        """The fixture's own folder, declared closed or left open. A closed
+        declaration is the bare path; `sensitive` was never a place."""
+        return [self._tmp.name] if posture == "closed" else []
 
     def test_a_closed_zone_filters_remote_free_routes_at_source(self):
         self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
@@ -2486,46 +2469,43 @@ class CliTests(unittest.TestCase):
         self.assertIn("blocked: no eligible local candidate", out)
 
     def test_a_sensitive_zone_triggers_local_only_like_the_flag(self):
-        # Place or material, whichever is stricter (ADR 0008): the zone
-        # alone excludes every non-local candidate exactly as --sensitive
-        # does, both rows stay marked, and with no eligible local candidate
-        # both runs stop with the blocked report (exit 0).
+        # Place and material are separate facts now (ADR-0010): a closed
+        # place drops remote Free routes at source, while only `--sensitive`
+        # (or the material's own verdict) makes every non-local row exposed.
+        # Both runs mark the rows; the flag alone excludes them.
         self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/other"]})
         world = self.free_world(("vendor/model:free", 0.5))
 
         zone_only, _, z_code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
-            world=world, zones=self.zone_of("sensitive"))
+            world=world, zones=self.zone_of("closed"))
         flagged, _, f_code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", world=world)
 
         self.assertEqual(z_code, 0)
         self.assertEqual(f_code, 0)
         self.assertIn("exposed (trains)",
-                      next(ln for ln in zone_only.splitlines()
-                           if ln.startswith("|") and "vendor/model:free |" in ln))
-        self.assertIn("exposed (trains)",
                       next(ln for ln in flagged.splitlines()
                            if ln.startswith("|") and "vendor/model:free |" in ln))
-        self.assertIn("blocked: no eligible local candidate", zone_only)
+        self.assertNotIn("vendor/model:free", zone_only)
         self.assertIn("blocked: no eligible local candidate", flagged)
-        self.assertNotIn("default pick", zone_only)
+        self.assertIn(f"zone: {self._tmp.name} (closed)", zone_only)
         self.assertNotIn("default pick", flagged)
 
-    def test_the_run_header_names_the_zone_and_its_regime(self):
+    def test_the_run_header_names_the_zone_and_its_posture(self):
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", self._tmp.name,
-            zones=self.zone_of("sensitive"))
+            zones=self.zone_of("closed"))
         self.assertEqual(code, 0)   # no eligible local candidate: blocked
-        self.assertIn(f"zone: {self._tmp.name} (sensitive)", out)
+        self.assertIn(f"zone: {self._tmp.name} (closed)", out)
 
-    def test_sensitive_flag_is_shown_as_the_effective_posture_in_every_header(self):
+    def test_sensitive_flag_is_shown_as_the_shape_in_every_header(self):
         zones = self.zone_of("open")
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--sensitive", "--working-dir",
             self._tmp.name, zones=zones)
         self.assertEqual(code, 0)   # blocked stop still prints the header
-        expected = f"zone: {self._tmp.name} (open; sensitive via --sensitive)"
+        expected = f"zone: {self._tmp.name} (open)"
         self.assertIn(expected, out)
 
         checked, _, check_code, _ = self.run_cli(
@@ -2540,63 +2520,54 @@ class CliTests(unittest.TestCase):
         self.assertEqual(guard_code, 0)
         self.assertIn(expected, guarded)
 
-    def test_an_undeclared_folder_reports_undeclared_and_closed(self):
+    def test_an_undeclared_folder_reports_open(self):
         out, _, code, _ = self.run_cli("--domain", "writing",
-                                       zones_default="closed")
-        self.assertEqual(code, 0)   # closed implies sensitive: blocked stop
-        self.assertIn("zone: undeclared (closed)", out)
+                                       "--working-dir", self._tmp.name)
+        self.assertIsNone(code)   # open zone: the run completes
+        self.assertIn(f"zone: {self._tmp.name} (open)", out)
 
     # --- Header truth: the quota line answers to the zone (issue #38) ----
 
-    def test_a_fresh_world_header_never_claims_free_routes_stayed(self):
-        # AC1: no key and no zones file - the closed default has already
-        # removed every remote Free route at source, so the quota line must
-        # not say they stayed in the pool. Both header lines are pinned
-        # together: the zone states the judgement, the pool clause answers
-        # for it instead of contradicting it.
+    def test_a_fresh_world_header_states_the_open_zone_and_keeps_free_routes(self):
+        # An absent zones file is open (ADR-0010): the header says so and
+        # the quota line agrees — remote Free routes genuinely stay in the
+        # pool, so the run must not claim a closed zone removed them.
         self.free_risk_policy({"vendor/model": self.FREE_CATALOG["vendor/model"]})
         world = self.free_world(("vendor/model:free", 0.5))
 
         out, _, code, _ = self.run_cli("--domain", "writing", world=world,
                                        zones_absent=True)
 
-        self.assertEqual(code, 0)   # closed default: no local candidate, blocked
+        self.assertIsNone(code)
         lines = out.splitlines()
         zone_line = next(ln for ln in lines if ln.startswith("zone: "))
         quota_line = next(ln for ln in lines if ln.startswith("free quota: "))
-        self.assertEqual(zone_line, "zone: undeclared (closed)")
-        self.assertEqual(
-            quota_line,
-            "free quota: unavailable | :free routes excluded by the closed zone")
-        self.assertNotIn("stay in the pool", out)
-        # The claim is true: the zone removed the route before the table.
-        self.assertNotIn("vendor/model:free", out)
+        self.assertEqual(zone_line, f"zone: {os.getcwd()} (open)")
+        self.assertEqual(quota_line,
+                         "free quota: unavailable | :free routes stay in the pool")
+        self.assertNotIn("excluded by the closed zone", out)
+        self.assertIn("vendor/model:free", out)
 
-    def test_an_absent_zones_file_gets_one_advisory_after_the_zone_header(self):
-        # AC2: a missing zones file has never had a line of its own - the
-        # loader returns the closed default in silence. One line now, right
-        # under the zone header, naming the path to create as the default
-        # machine spells it (~/.config against the config-dir constants).
-        out, _, code, _ = self.run_cli("--domain", "writing", zones_absent=True)
+    def test_an_absent_zones_file_prints_no_line_of_its_own(self):
+        # AC: no warning and no nag on a first run — the zone line states
+        # open and nothing points at setup.
+        out, err, code, _ = self.run_cli("--domain", "writing",
+                                         zones_absent=True)
 
-        self.assertEqual(code, 0)   # closed default: blocked stop, exit 0
-        lines = out.splitlines()
-        zone_at = next(i for i, ln in enumerate(lines)
-                       if ln.startswith("zone: "))
-        self.assertEqual(
-            lines[zone_at + 1],
-            "zones file: absent (~/.config/modelbandit/zones.json) — "
-            "undeclared paths are closed")
-        self.assertEqual(out.count("zones file:"), 1)
+        self.assertIsNone(code)
+        self.assertNotIn("zones file:", out)
+        for nag in ("setup", "next:", "absent"):
+            self.assertNotIn(nag, out.lower())
+        self.assertNotIn("zones", err.lower())
 
     def test_a_present_zones_file_keeps_the_whole_output_byte_identical(self):
         # AC2 golden: zones.json present -> not one byte moves: no
         # advisory line, no reworded pool claim. The fixture machine
-        # declares open, where free routes genuinely remain in the pool.
+        # declares nothing closed, where free routes genuinely remain.
         out, _, code, _ = self.run_cli("--domain", "writing")
 
         self.assertIsNone(code)
-        self.assertEqual(out, PRESENT_ZONES_GOLDEN)
+        self.assertEqual(out, PRESENT_ZONES_GOLDEN.format(cwd=os.getcwd()))
 
     def test_check_policy_header_names_the_zone(self):
         out, _, code, _ = self.run_cli(
@@ -2647,7 +2618,7 @@ class CliTests(unittest.TestCase):
 
     # --- pre-flight: --assert-allowed -----------------------------------
 
-    def guard(self, model, *, zones=None, zones_default="open", sensitive=False,
+    def guard(self, model, *, zones=None, sensitive=False,
               plain=False, policy_path=None, working_dir=None):
         argv = ["--assert-allowed", "--model", model,
                 "--working-dir", working_dir or self._tmp.name]
@@ -2655,8 +2626,7 @@ class CliTests(unittest.TestCase):
             argv.append("--sensitive")
         if plain:
             argv.append("--plain")
-        return self.run_cli(*argv, zones=zones, zones_default=zones_default,
-                            policy_path=policy_path)
+        return self.run_cli(*argv, zones=zones, policy_path=policy_path)
 
     def test_assert_allowed_blocks_a_paid_route_in_a_closed_zone(self):
         # ADR 0008: closed implies sensitive, so only a local serving may
@@ -2683,10 +2653,10 @@ class CliTests(unittest.TestCase):
                 self.assertIn(self._tmp.name, out)   # the zone is named
                 self.assertEqual(calls, [])
 
-    def test_assert_allowed_blocks_an_exposed_paid_route_in_a_sensitive_zone(self):
+    def test_assert_allowed_blocks_an_exposed_paid_route_on_a_sensitive_shape(self):
         self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
-                                     zones=self.zone_of("sensitive"))
+                                     sensitive=True)
         self.assertEqual(code, 0)
         self.assertIn("exposed (trains)", out)
 
@@ -2806,10 +2776,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("opened", err.getvalue())
         self.assertEqual(out.getvalue(), "")
 
-    def test_assert_allowed_treats_an_undeclared_folder_as_closed(self):
-        out, _, code, _ = self.guard("vendor/model:free", zones_default="closed")
+    def test_assert_allowed_treats_an_undeclared_folder_as_open(self):
+        out, _, code, _ = self.guard("vendor/model:free", plain=True)
         self.assertEqual(code, 0)
-        self.assertIn("zone: undeclared (closed)", out)
+        self.assertIn(f"zone: {self._tmp.name} (open)", out)
+        self.assertIn("allowed: vendor/model:free", out)
 
     def test_assert_allowed_admits_a_local_catalog_entry_in_a_closed_zone(self):
         # A genuinely served local route is catalogued under a non-remote
@@ -2828,7 +2799,7 @@ class CliTests(unittest.TestCase):
     def test_a_remote_free_route_labelled_local_is_refused_by_the_pre_flight(self):
         # The catalog's label is not a serving fact: a `:free` id labelled
         # `local` is a remote serving identity, and the pre-flight refuses it
-        # in a closed regime exactly as the plan's source filter does.
+        # in a closed zone exactly as the plan's source filter does.
         pol = json.loads(json.dumps(POLICY))
         model = "qwen/qwen3-coder-30b:free"
         pol["free_models"] = {"qwen/qwen3-coder-30b": {
@@ -2880,10 +2851,7 @@ class CliTests(unittest.TestCase):
         link = self.link(os.path.join(open_dir, "shortcut"), closed_dir)
 
         out, _, code, calls = self.guard("vendor/model:free",
-                                         zones=[{"path": open_dir,
-                                                 "free": "open"},
-                                                {"path": closed_dir,
-                                                 "free": "closed"}],
+                                         zones=[closed_dir],
                                          working_dir=link)
 
         self.assertEqual(code, 0)
@@ -2901,8 +2869,6 @@ class CliTests(unittest.TestCase):
         link = self.link(os.path.join(self._tmp.name, "to-open"), open_dir)
 
         out, _, code, _ = self.guard("vendor/model:free", plain=True,
-                                     zones=[{"path": open_dir,
-                                             "free": "open"}],
                                      working_dir=link)
 
         self.assertEqual(code, 0)
@@ -2910,19 +2876,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("allowed: vendor/model:free", out)
 
     def test_pre_flight_names_the_resolved_place_of_a_declared_link(self):
-        # A declaration spelled through a link governs the place it reaches,
-        # and the header says so instead of the link's spelling.
+        # A closed declaration spelled through a link governs the place it
+        # reaches, and the header says so instead of the link's spelling.
         target = os.path.join(self._tmp.name, "free-zone")
         os.makedirs(target)
         link = self.link(os.path.join(self._tmp.name, "free-link"), target)
 
-        out, _, code, _ = self.guard("vendor/model:free", plain=True,
-                                     zones=[{"path": link, "free": "open"}],
+        out, _, code, _ = self.guard("vendor/model:free",
+                                     zones=[link],
                                      working_dir=link)
 
         self.assertEqual(code, 0)
-        self.assertIn(f"zone: {target} (open) (declared: {link})", out)
-        self.assertIn("allowed: vendor/model:free", out)
+        self.assertIn(f"zone: {target} (closed) (declared: {link})", out)
+        self.assertIn("blocked by the free-use zone", out)
 
     def test_a_link_into_a_closed_zone_removes_remote_free_routes_from_a_ranking(self):
         self.free_risk_policy(
@@ -2936,8 +2902,7 @@ class CliTests(unittest.TestCase):
 
         out, _, code, _ = self.run_cli(
             "--domain", "writing", "--working-dir", link, world=world,
-            zones=[{"path": open_dir, "free": "open"},
-                   {"path": closed_dir, "free": "closed"}])
+            zones=[closed_dir])
 
         self.assertEqual(code, 0)   # closed through the link: blocked stop
         self.assertIn(f"zone: {closed_dir} (closed)", out)
@@ -3505,11 +3470,11 @@ class CliTests(unittest.TestCase):
     # never an answer code, never a traceback.
 
     def status(self, *, working_dir=None, policy_path=None, zones=None,
-               zones_default="open", zones_absent=False):
+               zones_absent=False):
         argv = ["--status"]
         if working_dir:
             argv += ["--working-dir", working_dir]
-        return self.run_cli(*argv, zones=zones, zones_default=zones_default,
+        return self.run_cli(*argv, zones=zones,
                             zones_absent=zones_absent, policy_path=policy_path)
 
     def test_status_reports_the_setup_lines_for_a_provisioned_setup(self):
@@ -3523,7 +3488,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         lines = out.splitlines()
-        self.assertEqual(lines[0], "zone: undeclared (open)")
+        self.assertEqual(lines[0], f"zone: {self._tmp.name} (open)")
         self.assertTrue(lines[1].startswith("zones file: present ("), lines[1])
         self.assertTrue(lines[1].endswith("/config/modelbandit/zones.json)"),
                         lines[1])
@@ -3547,24 +3512,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(calls, [])
 
-    def test_status_empty_setup_reports_absent_states_and_exits_zero(self):
-        # AC2: no zones file — the documented default, so exit 0, the same
-        # four lines in the absent state. No nag beyond the one sentence
-        # the ranking header prints (issue #38); the setup interview it
-        # used to point at is gone.
+    def test_status_empty_setup_reports_the_open_zone_and_exits_zero(self):
+        # AC2: no zones file — every path is open (ADR-0010), so exit 0 and
+        # three lines: the zone states open, the built-in rules note, the
+        # policy age. No zones-file line, no nag, no setup pointer.
         out, err, code, calls = self.status(working_dir=self._tmp.name,
                                             zones_absent=True)
 
         self.assertEqual(code, 0)
         lines = out.splitlines()
-        self.assertEqual(lines[0], "zone: undeclared (closed)")
-        self.assertEqual(
-            lines[1],
-            "zones file: absent (~/.config/modelbandit/zones.json) — "
-            "undeclared paths are closed")
-        self.assertEqual(lines[2], "secrets: built-in rules apply")
+        self.assertEqual(lines[0], f"zone: {self._tmp.name} (open)")
+        self.assertEqual(lines[1], "secrets: built-in rules apply")
         policy = os.path.join(self._tmp.name, "policy.json")
-        self.assertEqual(lines[3], f"policy: {policy} — 0d old")
+        self.assertEqual(lines[2], f"policy: {policy} — 0d old")
+        self.assertEqual(len(lines), 3)
+        self.assertNotIn("zones file:", out)
         self.assertEqual(err, "")
         self.assertEqual(calls, [])
 
@@ -3630,7 +3592,7 @@ class CliTests(unittest.TestCase):
             calls.append(args)
             raise AssertionError("network in --status")
 
-        config_home = self.zones_file([], default="open")
+        config_home = self.zones_file([])
         out, err = io.StringIO(), io.StringIO()
         code = None
         argv = ["modelbandit", "--policy", self.policy_path, "--status",
@@ -3649,7 +3611,7 @@ class CliTests(unittest.TestCase):
                 code = exc.code
         self.assertEqual(code, 0)
         self.assertEqual(calls, [])
-        self.assertIn("zone: undeclared (open)", out.getvalue())
+        self.assertIn(f"zone: {self._tmp.name} (open)", out.getvalue())
         self.assertEqual(err.getvalue(), "")
 
     def test_status_help_documents_the_flag(self):

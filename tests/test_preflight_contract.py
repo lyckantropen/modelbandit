@@ -11,8 +11,8 @@ free-use zone` lines say which answer came back, and the status is pinned to
 0 for either — status says the tool ran, the line says what's true, so the
 property can never lean on a status code again.
 
-The property is pinned across a small matrix of Exposure, regime and route
-kind (paid, `:free`, `opencode/*`, locally served).
+The property is pinned across a small matrix of Exposure, zone posture and
+route kind (paid, `:free`, `opencode/*`, locally served).
 
 The matrix includes the stale-policy cells a `local` catalogue label on a
 remote serving identity would produce (constructed directly, bypassing the
@@ -39,7 +39,7 @@ import modelbandit  # noqa: E402
 
 ENTRY = {"context_length": 262_144, "summary_ref": "s"}
 SUMMARIES = {"s": "fixture summary"}
-REGIMES = ("open", "sensitive", "closed")
+POSTURES = ("open", "closed")
 
 # (route kind, mid, catalog prefix, constructible Exposures, plan-local).
 # The `local` Exposure on a remote kind is the stale-policy cell: the policy
@@ -107,22 +107,20 @@ class PreflightNeverLooserThanPlanTests(EgressVerdictMixin,
 
     def assert_never_looser(self, mid, policy, *, local, sensitive_plan,
                             sensitive_preflight):
-        for regime in REGIMES:
-            zone = modelbandit.Zone(path="z", regime=regime)
-            with self.subTest(mid=mid, regime=regime,
+        for posture in POSTURES:
+            zone = modelbandit.Zone(path="z", posture=posture)
+            with self.subTest(mid=mid, posture=posture,
                               sensitive_plan=sensitive_plan,
                               sensitive_preflight=sensitive_preflight):
                 allowed, printed = self.preflight_answer(
                     mid, zone, policy, sensitive_preflight=sensitive_preflight)
                 shape = modelbandit.Shape(
-                    sensitive=sensitive_plan,
-                    regime=modelbandit.shape_regime(zone,
-                                             sensitive=sensitive_plan))
+                    sensitive=sensitive_plan, posture=zone.posture)
                 plan = modelbandit.admit(shape, modelbandit.candidate_for(mid, policy,
                                                             local=local))
                 if allowed:
                     self.assertTrue(plan.admitted, (
-                        f"pre-flight allows {mid} at regime {regime} "
+                        f"pre-flight allows {mid} at posture {posture} "
                         f"(preflight sensitive={sensitive_preflight}) but the "
                         f"plan refuses it (plan sensitive={sensitive_plan}, "
                         f"reason: {plan.reason}); pre-flight output:\n"
@@ -155,7 +153,7 @@ class PreflightNeverLooserThanPlanTests(EgressVerdictMixin,
 class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
                                         unittest.TestCase):
     """A remote Free route labelled `local` is refused for a Sensitive shape
-    and refused in a closed regime — by the plan's source filter and by the
+    and refused in a closed zone — by the plan's source filter and by the
     pre-flight alike; the two gates cannot disagree about the same route."""
 
     def test_both_gates_refuse_the_labelled_remote_route(self):
@@ -167,23 +165,24 @@ class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
             policy = policy_for(prefix, exposure)
             with self.subTest(kind=kind):
                 # The plan's source filter: the route never enters the pool.
-                shape = modelbandit.Shape(sensitive=True, regime="sensitive")
+                shape = modelbandit.Shape(sensitive=True, posture="open")
                 plan = modelbandit.admit(shape, modelbandit.candidate_for(mid, policy,
                                                             local=local))
                 self.assertFalse(plan.admitted)
                 self.assertIn("exposed (trains)", plan.reason)
-                closed = modelbandit.Shape(regime="closed")
+                closed = modelbandit.Shape(posture="closed")
                 source = modelbandit.zone_prohibition(
-                    closed, modelbandit.candidate_for(mid, policy, local=local))
+                    closed.posture,
+                    modelbandit.candidate_for(mid, policy, local=local))
                 self.assertIn("remote free route is prohibited", source)
                 # The pre-flight, read at its egress: the same refusals.
                 allowed, printed = self.preflight_answer(
-                    mid, modelbandit.Zone(path="z", regime="closed"), policy,
+                    mid, modelbandit.Zone(path="z", posture="closed"), policy,
                     sensitive_preflight=False)
                 self.assertFalse(allowed)
                 self.assertIn("remote free route is prohibited", printed)
                 allowed, printed = self.preflight_answer(
-                    mid, modelbandit.Zone(path="z", regime="sensitive"),
+                    mid, modelbandit.Zone(path="z", posture="open"),
                     policy, sensitive_preflight=True)
                 self.assertFalse(allowed)
                 self.assertIn("exposed (trains)", printed)
@@ -195,14 +194,14 @@ class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
     non-local route, no-retention alike — a vendor promise about storage is
     not containment in transit — and both gates judge the same route the
     same way, whether Sensitive came from material (`--sensitive`, or the
-    assumed default) or from place (a `sensitive`/`closed` regime)."""
+    assumed default) or from place (a closed zone)."""
 
     def test_a_no_retention_route_is_blocked_for_a_sensitive_shape(self):
         policy = policy_for("vendor/paid", "no-retention")
         for zone, sensitive_preflight in (
-                (modelbandit.Zone(path="z", regime="open"), True),
-                (modelbandit.Zone(path="z", regime="closed"), False)):
-            with self.subTest(regime=zone.regime,
+                (modelbandit.Zone(path="z", posture="open"), True),
+                (modelbandit.Zone(path="z", posture="closed"), False)):
+            with self.subTest(posture=zone.posture,
                               sensitive_preflight=sensitive_preflight):
                 allowed, printed = self.preflight_answer(
                     "vendor/paid", zone, policy,
@@ -212,9 +211,7 @@ class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
                 # The plan's admission refuses the same route for the same
                 # shape: the pre-flight never answers looser than the plan.
                 shape = modelbandit.Shape(
-                    sensitive=sensitive_preflight,
-                    regime=modelbandit.shape_regime(
-                        zone, sensitive=sensitive_preflight))
+                    sensitive=sensitive_preflight, posture=zone.posture)
                 plan = modelbandit.admit(
                     shape, modelbandit.candidate_for("vendor/paid", policy,
                                                      local=False))
@@ -226,7 +223,7 @@ class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
         # not Sensitive, and an open zone judges the route as stated.
         policy = policy_for("vendor/paid", "no-retention")
         allowed, _ = self.preflight_answer(
-            "vendor/paid", modelbandit.Zone(path="z", regime="open"),
+            "vendor/paid", modelbandit.Zone(path="z", posture="open"),
             policy, sensitive_preflight=False)
         self.assertTrue(allowed)
 
@@ -240,7 +237,7 @@ class LoopbackServingTests(EgressVerdictMixin, unittest.TestCase):
     LAN = "http://desktop-rme135a.tail409f29.ts.net:1234/v1"
 
     def test_local_exposure_survives_the_pre_flight_only_on_loopback(self):
-        zone = modelbandit.Zone(path="z", regime="sensitive")
+        zone = modelbandit.Zone(path="z", posture="open")
         policy = policy_for("lmstudio/qwen", "local")
 
         allowed, printed = self.preflight_answer(

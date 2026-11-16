@@ -201,7 +201,7 @@ class PlanReachesTheDealCliTests(unittest.TestCase):
         os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
         with open(os.path.join(config_home, "modelbandit", "zones.json"),
                   "w", encoding="utf-8") as f:
-            json.dump({"zones": [], "default": "open"}, f)
+            json.dump({"zones": []}, f)
         self.config_home = config_home
 
     def tearDown(self):

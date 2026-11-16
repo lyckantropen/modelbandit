@@ -369,7 +369,7 @@ def norm_id(model_id: str) -> str:
 
 _ROUTE_FACETS = {
     "market": {
-        "zone_refusable_in_closed_regimes": False,
+        "zone_refusable_in_closed_zones": False,
         "default_exposure": "no-retention",
         "spends_free_request_counter": False,
         "needs_policy_catalog_entry": False,
@@ -377,7 +377,7 @@ _ROUTE_FACETS = {
         "standing_from": "boards",
     },
     "free-slug": {
-        "zone_refusable_in_closed_regimes": True,
+        "zone_refusable_in_closed_zones": True,
         "default_exposure": "trains",
         "spends_free_request_counter": True,
         "needs_policy_catalog_entry": False,
@@ -385,7 +385,7 @@ _ROUTE_FACETS = {
         "standing_from": "own board row",
     },
     "harness": {
-        "zone_refusable_in_closed_regimes": True,
+        "zone_refusable_in_closed_zones": True,
         "default_exposure": "trains",
         "spends_free_request_counter": False,
         "needs_policy_catalog_entry": True,
@@ -393,7 +393,7 @@ _ROUTE_FACETS = {
         "standing_from": "family share",
     },
     "plan": {
-        "zone_refusable_in_closed_regimes": False,
+        "zone_refusable_in_closed_zones": False,
         "default_exposure": "no-retention",
         "spends_free_request_counter": False,
         "needs_policy_catalog_entry": True,
@@ -401,7 +401,7 @@ _ROUTE_FACETS = {
         "standing_from": "deferred to plan economics",
     },
     "local": {
-        "zone_refusable_in_closed_regimes": False,
+        "zone_refusable_in_closed_zones": False,
         "default_exposure": "local",
         "spends_free_request_counter": False,
         "needs_policy_catalog_entry": True,
@@ -851,22 +851,23 @@ def emit_json(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
-def closed_regime_provenance(sources, zones: dict, *, environ=None,
-                             run=None) -> Zone | None:
-    """The first named source whose effective regime is closed.
+def closed_place(sources, zones, *, environ=None, run=None) -> Zone | None:
+    """The first named source whose place would refuse a remote free route.
 
     Provenance is the caller's own list of where the material came from
     (`--outside-file`), and it resolves the way a run resolves its working
     folder: the stricter of the source's folder and the repository it came
     from, so a source in a worktree carries the posture of the content it
-    holds. The closed default applies just as a declared closed zone does, so
-    undeclared provenance is blocked too.
+    holds. The closed-path question is asked through the Zone gate — the
+    same three-caller machinery admission and the source filter use — never
+    by re-deriving the predicate here.
     """
+    probe = candidate_for("provenance/model:free", {})
     for source in sources:
         folder = source if os.path.isdir(source) else os.path.dirname(source)
         zone = effective_zone(folder or os.curdir, zones=zones, run=run,
                               environ=environ)
-        if zone.regime == "closed":
+        if not zone_gate(Shape(posture=zone.posture), probe).admitted:
             return zone
     return None
 
@@ -874,7 +875,7 @@ def closed_regime_provenance(sources, zones: dict, *, environ=None,
 def run_secrets_check(*, working_dir: str | None = None,
                       material: str | None = None,
                       outside_files=(),
-                      sensitive: bool = False, as_json: bool = False) -> int:
+                      as_json: bool = False) -> int:
     """Print the Secrets gate's verdict for one shape's material.
 
     Material is read from stdin; the verdict and the rule that tripped it
@@ -910,10 +911,10 @@ def run_secrets_check(*, working_dir: str | None = None,
         return RULES_CONFIG_ERROR
     zone = effective_zone(path_base, zones=zones)
     if not as_json:
-        print(f"zone: {zone_label(zone, sensitive=sensitive)}")
+        print(f"zone: {zone_label(zone)}")
     blocked, reason = None, None
     if outside_paths:
-        blocked = closed_regime_provenance(outside_paths, zones)
+        blocked = closed_place(outside_paths, zones)
         if blocked is not None:
             reason = "material provenance from this zone"
     if reason is not None:
@@ -926,7 +927,7 @@ def run_secrets_check(*, working_dir: str | None = None,
                        "reason": reason, "rule": None})
         else:
             print("secrets gate: blocked by the free-use zone")
-            print(f"zone: {zone_label(blocked, sensitive=sensitive)}")
+            print(f"zone: {zone_label(blocked)}")
             print(f"reason: {reason}")
         return 0
     if not isinstance(material, str) or not material.strip():
@@ -960,15 +961,17 @@ def run_secrets_check(*, working_dir: str | None = None,
 
 
 def run_zones_writer(*, payload: str | None = None) -> int:
-    """Validate the interview's zones proposal and write the machine's file.
+    """Validate a zones proposal and write the machine's file.
 
-    JSON comes in on stdin; zones are a whole-file posture, so the submitted
-    config goes through `validate_zones` **before** anything is written.
-    Invalid config refuses with status 4 naming the offending entry and
-    writes nothing: a pre-existing `zones.json` is left byte-identical.
+    JSON comes in on stdin; zones are a whole-file declaration, so the
+    submitted config goes through `validate_zones` **before** anything is
+    written. Invalid config refuses with status 4 naming the offending entry
+    and writes nothing: a pre-existing `zones.json` is left byte-identical.
     A valid config replaces the file atomically (temp file in the same
     directory, then `os.replace`), so a reader never sees a half-written
-    zones file, and the path written is printed for the user's review.
+    zones file, and the path written is printed for the user's review. The
+    writer is dumb: the schema is the bare opt-out list, and nothing beyond
+    validation and the atomic write happens here.
     """
     if payload is None:
         try:
@@ -997,7 +1000,7 @@ def run_zones_writer(*, payload: str | None = None) -> int:
                                          suffix=".tmp")
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(validated, f, indent=2, ensure_ascii=False)
+            json.dump({ZONES_KEY: validated}, f, indent=2, ensure_ascii=False)
             f.write("\n")
         os.replace(temp_path, path)
     except BaseException:
@@ -1012,64 +1015,63 @@ def run_zones_writer(*, payload: str | None = None) -> int:
 
 
 # --- Free-use zones --------------------------------------------------------
-# Where free models may run, machine-wide: a path declares the regime for
-# everything under it, and anything undeclared is closed. The three regimes
-# order open < sensitive < closed; a run takes the stricter of its working
-# folder and the repository that folder came from, and a shape may tighten
-# that but never loosen it.
+# Where free models may run, machine-wide: open unless declared, and the
+# zones file is a bare opt-out list of the paths declared closed. Only a
+# closed place stops remote free routes at the source, and a run takes the
+# stricter of its working folder's and its origin repository's declaration
+# (ADR-0010).
 ZONES_FILE = "zones.json"
 ZONES_CONFIG_DIR = "modelbandit"
-REGIMES = ("open", "sensitive", "closed")
-DEFAULT_REGIME = "closed"
-# A zone entry carries its path and its regime, nothing else: a field the tool
-# silently ignored would be a rule the user believes in.
-ZONE_KEYS = ("path", "free")
-ZONES_KEYS = ("zones", "default")
+# The file's whole schema: `{"zones": ["path", ...]}` — a bare list of the
+# paths declared closed. The per-entry posture key and the top-level `default`
+# key are retired, and open-unless-declared is not configurable (ADR-0010).
+ZONES_KEY = "zones"
+ZONES_FORM = '{"zones": ["<path>", ...]}'
 _ENV_VAR = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 
 @dataclasses.dataclass(frozen=True)
 class Zone:
-    """The zone that decided a run: the declared path, or None undeclared.
+    """The zone that decided a run: the declaration that matched, or None
+    when nothing covered the place, and the binary posture it lands on.
 
-    `resolved` carries the place the run was judged at when a link moved the
-    judgement - the working folder or the declaration itself spells one place
-    and reaches another. None when nothing moved, so every existing header
-    keeps its shape.
+    `place` is the judged folder as the header spells it; `resolved` carries
+    the place a link reached when the judgement moved - the working folder or
+    the declaration itself spells one place and reaches another. None when
+    nothing moved.
     """
     path: str | None
-    regime: str
+    posture: str
+    place: str | None = None
     resolved: str | None = None
 
     def label(self) -> str:
-        return "undeclared" if self.path is None else self.path
+        if self.path is not None:
+            return self.path
+        return self.place or "undeclared"
 
 
-def zone_label(zone: Zone, *, sensitive: bool = False) -> str:
-    """The run header's statement: `<path> (<regime>)`, or
-    `undeclared (closed)` when no declared path matched. An open zone tightened
-    by `--sensitive` names both the declared and effective posture. When a
-    link moved the judgement, the header names the resolved place - with the
-    declared path noted, or `undeclared` when no declaration matched - so a
-    declaration cannot silently cover content it did not name.
+def zone_label(zone: Zone) -> str:
+    """The run header's statement: `<path> (<posture>)` — the place the
+    judgement landed and the binary `open` / `closed` posture, never the
+    shape. When a link moved the judgement, the header names the resolved
+    place - with the declared path noted, or `undeclared` when no
+    declaration matched - so a declaration cannot silently cover content it
+    did not name.
     """
-    if sensitive and zone.regime == "open":
-        posture = "open; sensitive via --sensitive"
-    else:
-        posture = zone.regime
     if zone.resolved is None:
-        return f"{zone.label()} ({posture})"
+        return f"{zone.label()} ({zone.posture})"
     declared = f"declared: {zone.path}" if zone.path else "undeclared"
-    return f"{zone.resolved} ({posture}) ({declared})"
+    return f"{zone.resolved} ({zone.posture}) ({declared})"
 
 
 def zone_payload(zone: Zone) -> dict:
     """The `zone` object every `--json` verdict carries: the place the
-    judgement landed (`path`), the regime, the declaration (null when no
-    declaration matched) and the resolved place when a link moved it — the
+    judgement landed (`path`), the binary posture, the declaration (null when
+    no declaration matched) and the resolved place when a link moved it — the
     same facts the human `zone:` line spells."""
-    return {"path": zone.resolved if zone.resolved else zone.path,
-            "regime": zone.regime,
+    return {"path": zone.resolved if zone.resolved else zone.label(),
+            "posture": zone.posture,
             "declared": zone.path,
             "resolved": zone.resolved}
 
@@ -1092,14 +1094,6 @@ def zones_file_label(*, environ=None) -> str:
     if os.path.normcase(path).startswith(os.path.normcase(home) + os.sep):
         path = "~" + path[len(home):]
     return path.replace(os.sep, "/")
-
-
-def zones_absent_line(*, environ=None) -> str:
-    """The one sentence every mode prints when no zones file exists —
-    built once so the ranking header, the status report and the README
-    example can never drift apart."""
-    return (f"zones file: absent ({zones_file_label(environ=environ)}) "
-            "— undeclared paths are closed")
 
 
 # --- Local roster ----------------------------------------------------------
@@ -1276,65 +1270,54 @@ def compare_path(text: str, *, environ=None) -> str:
     return os.path.normcase(display_path(text, environ=environ))
 
 
-def known_regime(value, *, where: str) -> str:
-    """A regime the tool knows, or a loud stop naming where it came from."""
-    if value not in REGIMES:
-        raise SystemExit(f"{where}: unknown free-use regime {value!r}; "
-                         f"known: {', '.join(REGIMES)}")
-    return value
+def validate_zones(payload, *, source: str = ZONES_FILE, environ=None) -> list:
+    """The zones file's contents, validated: the paths it declares closed.
 
-
-def validate_zones(payload, *, source: str = ZONES_FILE, environ=None) -> dict:
-    """The zones file's contents, validated — additive against the default.
-
-    Two entries naming the same normalised path stop loudly: the resolver
-    would take the last one, and a later entry could silently reopen a path
-    an earlier one closed — the one direction a fail-closed resolver must
-    never take.
+    A bare list is the whole schema — no per-entry posture, no top-level
+    `default` (ADR-0010). A payload still carrying either is refused with a
+    corrective message showing the one-line form, never migrated: no
+    compatibility shim exists. Two entries naming the same normalised path
+    stop loudly: the declaration is a set, and a repeat would name nothing.
     """
     if not isinstance(payload, dict):
-        raise SystemExit(f"{source} must be a JSON object with "
-                         f"{' / '.join(ZONES_KEYS)}")
-    unknown = sorted(set(payload) - set(ZONES_KEYS))
+        raise SystemExit(f"{source} must be a JSON object: {ZONES_FORM} — "
+                         "a bare list of the paths declared closed")
+    unknown = sorted(set(payload) - {ZONES_KEY})
     if unknown:
         raise SystemExit(f"unknown key(s) in {source}: {', '.join(unknown)}; "
-                         f"known: {', '.join(ZONES_KEYS)}")
-    entries = payload.get("zones", [])
+                         f"the zones file is a bare opt-out list now — write "
+                         f"{ZONES_FORM} (closed paths only, no default key "
+                         "and no per-entry posture)")
+    entries = payload.get(ZONES_KEY, [])
     if not isinstance(entries, list):
-        raise SystemExit(f"zones in {source} must be a list of "
-                         f"{{{' / '.join(ZONE_KEYS)}}} objects")
-    zones = []
+        raise SystemExit(f"zones in {source} must be a list of paths: "
+                         f"{ZONES_FORM}")
+    paths = []
     seen: dict[str, int] = {}
     for index, entry in enumerate(entries, 1):
         where = f"zone #{index} in {source}"
-        if not isinstance(entry, dict):
-            raise SystemExit(f"{where} must be an object with "
-                             f"{' / '.join(ZONE_KEYS)}")
-        extra = sorted(set(entry) - set(ZONE_KEYS))
-        if extra:
-            raise SystemExit(f"unknown key(s) in {where}: {', '.join(extra)}; "
-                             f"known: {', '.join(ZONE_KEYS)}")
-        path = entry.get("path")
-        if not isinstance(path, str) or not path.strip():
-            raise SystemExit(f"{where} needs a non-empty string path")
-        normalised = compare_path(path, environ=environ)
+        if isinstance(entry, dict):
+            raise SystemExit(
+                f"{where} is {json.dumps(entry, ensure_ascii=False)} — entries "
+                f"are bare closed paths now, so write {ZONES_FORM} instead")
+        if not isinstance(entry, str) or not entry.strip():
+            raise SystemExit(f"{where} must be a non-empty path string: "
+                             f"{ZONES_FORM}")
+        normalised = compare_path(entry, environ=environ)
         if normalised in seen:
             raise SystemExit(f"zone #{index} in {source} duplicates zone "
-                             f"#{seen[normalised]} ({path})")
+                             f"#{seen[normalised]} ({entry})")
         seen[normalised] = index
-        zones.append({"path": path,
-                      "free": known_regime(entry.get("free"), where=where)})
-    default = known_regime(payload.get("default", DEFAULT_REGIME),
-                           where=f"default in {source}")
-    return {"zones": zones, "default": default}
+        paths.append(entry)
+    return paths
 
 
-def load_zones(path: str | None = None, *, environ=None) -> dict:
-    """The machine's zones, validated. A missing file means the default
-    everywhere — nothing declared, nothing open."""
+def load_zones(path: str | None = None, *, environ=None) -> list:
+    """The machine's closed declarations, validated. A missing file declares
+    nothing — every path is open (ADR-0010)."""
     path = zones_path(environ=environ) if path is None else path
     if not os.path.exists(path):
-        return {"zones": [], "default": DEFAULT_REGIME}
+        return []
     try:
         with open(path, encoding="utf-8") as f:
             payload = json.load(f)
@@ -1343,32 +1326,15 @@ def load_zones(path: str | None = None, *, environ=None) -> dict:
     return validate_zones(payload, source=path, environ=environ)
 
 
-def stricter(left: str, right: str) -> str:
-    """The stricter of two regimes: open < sensitive < closed."""
-    both = (known_regime(left, where="regime"), known_regime(right, where="regime"))
-    return max(both, key=REGIMES.index)
-
-
-def regime_at_least(regime: str, floor: str) -> bool:
-    """Whether `regime` is at least as strict as `floor`.
-
-    The dimension a gate asks about: a gate that excludes under `sensitive`
-    excludes under `closed` too, because a stricter regime dominates every
-    milder one — `closed` implies `sensitive`, never the other way round.
-    """
-    return (REGIMES.index(known_regime(regime, where="regime"))
-            >= REGIMES.index(known_regime(floor, where="floor")))
-
-
 def _covers(zone_path: str, folder: str) -> bool:
     """Whether a normalised zone path covers a normalised folder path."""
     return (folder == zone_path
             or folder.startswith(zone_path.rstrip(os.sep) + os.sep))
 
 
-def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
+def resolve_zone(folder: str, zones, *, environ=None) -> Zone:
     """The zone governing `folder`: the longest declared path that covers it,
-    else the file's default. A declared path may name the folder exactly.
+    else open. A declared path may name the folder exactly.
 
     Both sides compare the place the path reaches - links resolved - so a
     junction or symlink is judged by the content it leads to. When a link
@@ -1378,25 +1344,22 @@ def resolve_zone(folder: str, zones: dict, *, environ=None) -> Zone:
     """
     target = compare_path(folder, environ=environ)
     spelled = spelled_path(folder, environ=environ)
+    place = display_path(folder, environ=environ)
     best = None
-    for entry in zones.get("zones", []):
-        declared = compare_path(entry["path"], environ=environ)
+    for declared_path in zones:
+        declared = compare_path(declared_path, environ=environ)
         if _covers(declared, target) and (best is None
                                           or len(declared) >= len(best[0])):
-            best = (declared, entry)
+            best = (declared, declared_path)
     if best is None:
-        if spelled == target:
-            return Zone(path=None, regime=zones.get("default", DEFAULT_REGIME))
-        return Zone(path=None, regime=zones.get("default", DEFAULT_REGIME),
-                    resolved=display_path(folder, environ=environ))
-    entry = best[1]
-    declared_spelled = spelled_path(entry["path"], environ=environ)
-    declared_moved = declared_spelled != best[0]
-    place = display_path(folder, environ=environ)
-    if declared_moved or (spelled != target
-                          and os.path.normcase(place) != declared_spelled):
-        return Zone(path=entry["path"], regime=entry["free"], resolved=place)
-    return Zone(path=entry["path"], regime=entry["free"])
+        return Zone(path=None, posture="open", place=place,
+                    resolved=place if spelled != target else None)
+    declared_spelled = spelled_path(best[1], environ=environ)
+    moved = (declared_spelled != best[0]
+             or (spelled != target
+                 and os.path.normcase(place) != declared_spelled))
+    return Zone(path=best[1], posture="closed", place=place,
+                resolved=place if moved else None)
 
 
 def _under_modules(common: str) -> bool:
@@ -1466,11 +1429,12 @@ def git_origin(root: str, *, run=None) -> str | None:
     return origin
 
 
-def effective_zone(folder: str | None = None, *, zones: dict | None = None,
+def effective_zone(folder: str | None = None, *, zones=None,
                    run=None, environ=None) -> Zone:
-    """The regime a run works under: the stricter of the working folder's zone
-    and its origin repository's, so a worktree carries the posture of the
-    content it holds. The zone that decided it answers for it."""
+    """The zone a run works under: the stricter of the working folder's and
+    its origin repository's declaration, so a worktree carries the posture of
+    the content it holds — one closed declaration covers the repository's
+    worktrees (ADR-0010). The zone that decided it answers for it."""
     folder = folder or os.getcwd()
     zones = load_zones(environ=environ) if zones is None else zones
     here = resolve_zone(folder, zones, environ=environ)
@@ -1479,16 +1443,8 @@ def effective_zone(folder: str | None = None, *, zones: dict | None = None,
             == compare_path(folder, environ=environ):
         return here
     there = resolve_zone(origin, zones, environ=environ)
-    return there if REGIMES.index(there.regime) > REGIMES.index(here.regime) \
+    return there if there.posture == "closed" and here.posture == "open" \
         else here
-
-
-def shape_regime(zone: Zone, *, sensitive: bool) -> str:
-    """The regime a shape works under: the zone's, tightened by --sensitive.
-
-    A flag may only tighten: `--sensitive` in a closed zone leaves it closed.
-    """
-    return stricter(zone.regime, "sensitive" if sensitive else "open")
 
 
 def load_policy_file(path: str | None) -> dict:
@@ -1534,30 +1490,30 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
                sensitive: bool = False, loopback: bool = True) -> str | None:
     """The effective zone's reason this model may not serve here, or None.
 
-    The whole pre-flight rule: the shape's regime is the zone's, tightened by
-    `--sensitive` and never loosened, and the candidate facts are the policy's
-    Exposure facts plus the serving endpoint's loopback status (an empty
-    policy and an undeclared endpoint keep the safe defaults). Blocked
-    means a prohibition the regime states outright — a remote free route in a
-    closed zone, a non-local route at a sensitive regime or stricter (ADR
-    0008: only Exposure `local` serves Sensitive work) — never a Footprint,
-    catalog or quota exclusion.
+    The whole pre-flight rule, and the pre-flight's caller of the one zone
+    predicate: the candidate facts are the policy's Exposure facts plus the
+    serving endpoint's loopback status (an empty policy and an undeclared
+    endpoint keep the safe defaults). Blocked means a prohibition the zone
+    states outright — a remote free route in a closed place (the predicate's
+    clause), a non-local route on a Sensitive shape (the Exposure clause,
+    ADR 0008: only Exposure `local` serves Sensitive work) — never a
+    Footprint, catalog or quota exclusion.
 
     The candidate is judged by its serving identity alone: localness is a
     serving fact, never a catalogue claim, and this guard observes no serving
     — so a policy label cannot make a remote id (`opencode/*`, `:free`) local
-    here, and a remote Free route is refused in a closed zone whatever the
+    here, and a remote Free route is refused in a closed place whatever the
     catalog says. The harness's `lmstudio/*` namespace classifies local, but
     `local` still resolves only for a loopback endpoint: the pre-flight
     reads the harness's declared endpoint (a file read, still no serving
     observed) and a non-loopback serving fails closed as exposed.
     """
-    shape = Shape(sensitive=sensitive,
-                  regime=shape_regime(zone, sensitive=sensitive))
+    shape = Shape(sensitive=sensitive, posture=zone.posture)
     model_id = norm_id(model_id)
     policy = policy or {}
-    return regime_prohibition(shape, candidate_for(model_id, policy,
-                                                   loopback=loopback))
+    candidate = candidate_for(model_id, policy, loopback=loopback)
+    return zone_prohibition(shape.posture, candidate) \
+        or exposed_prohibition(shape, candidate)
 
 
 # The pre-flight's default-deny verdict: an id outside every Route kind names
@@ -1568,7 +1524,7 @@ UNKNOWN_SERVING_NAMESPACE = "unknown serving namespace"
 def _print_preflight_posture(zone: Zone, *, plain: bool,
                              restated: bool) -> None:
     """The effective zone, then the shape the pre-flight judges the id as."""
-    print(f"zone: {zone_label(zone, sensitive=restated)}")
+    print(f"zone: {zone_label(zone)}")
     if plain:
         print("shape: plain (via --plain)")
     elif restated:
@@ -1592,7 +1548,7 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     `shape: plain (via --plain)`); `--sensitive` restates the default and is
     accepted with the same verdict.
 
-    Prints the effective posture (`zone: <path> (<regime>)`) and either the
+    Prints the effective posture (`zone: <path> (open|closed)`) and either the
     model as allowed (`allowed: <id>`) or a free-use zone block — both
     verdicts exit 0 and the lines say which (exit contract v2, ADR-0004:
     launch only on `allowed`; the status says the tool ran). An id outside
@@ -1618,7 +1574,7 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         return RULES_CONFIG_ERROR
     model_id = norm_id(model)
     if classify_route(model_id) is None:
-        # Route kind is decided from the id alone, before the zone regime: an
+        # Route kind is decided from the id alone, before the zone: an
         # id outside every kind has no serving fact, so the pre-flight refuses
         # it in an open zone exactly as in a closed one. The block is a
         # verdict, not a failure (ADR-0004): the lines carry it, the status
@@ -1671,8 +1627,7 @@ def load_policy_bundle(policy_path: str | None) -> dict:
 
 
 def run_status(*, working_dir: str | None = None,
-               policy_path: str | None = None,
-               sensitive: bool = False, as_json: bool = False) -> int:
+               policy_path: str | None = None, as_json: bool = False) -> int:
     """The offline setup report: zone, zones file, built-in secrets rules,
     policy age.
 
@@ -1711,13 +1666,12 @@ def run_status(*, working_dir: str | None = None,
                    "secrets": {"rules": "built-in"},
                    "policy": {"path": policy_path, "age_days": age}})
         return 0
-    print(f"zone: {zone_label(zone, sensitive=sensitive)}")
+    print(f"zone: {zone_label(zone)}")
     if zones_present:
         print(f"zones file: present ({label})")
-    else:
-        # Absent is the documented default (exit 0), never silence: the
-        # same line the ranking header prints (issue #38).
-        print(zones_absent_line())
+    # An absent file declares nothing, so the zone line above already says
+    # everything there is to say: no warning and no nag on a first run
+    # (ADR-0010).
     # The built-in rules are the whole secrets surface now in force — the
     # report states them instead of a file it would have to find (spec #75).
     print("secrets: built-in rules apply")
@@ -2817,9 +2771,9 @@ class Shape:
     """A Ticket shape's admission-relevant elements.
 
     Sensitive is the shape's fifth element: the Secrets gate's verdict on the
-    material, bound per invocation, never a mood declared mid-run. `regime` is
-    the free-use zone the run works under (see shape_regime), `open` unless a
-    zone or the flag says otherwise. `domain` and `intent` are the ticket
+    material, bound per invocation, never a mood declared mid-run. `posture`
+    is the free-use zone the run works under — `open` unless a closed
+    declaration covers the place. `domain` and `intent` are the ticket
     facts the Local roster's band judges against: which domain the run works
     (None when nothing judges one) and which effort rung it asks for.
     """
@@ -2828,7 +2782,7 @@ class Shape:
     context_headroom: float = 2.0
     context_margin: float = 0.5
     output_tokens: int | None = None
-    regime: str = "open"
+    posture: str = "open"
     domain: str | None = None
     intent: str = "measured"
 
@@ -3066,11 +3020,10 @@ ADMITTED = Decision(True)
 
 def sensitive_shape(shape: Shape) -> bool:
     """Whether the shape is Sensitive: material (`--sensitive`, or the
-    pre-flight's assumed default) or place (an effective regime at least as
-    strict as `sensitive`), whichever is stricter — a flag may only tighten
-    the zone's regime, never loosen it (shape_regime), so either trigger
-    firing is enough (ADR 0008)."""
-    return shape.sensitive or regime_at_least(shape.regime, "sensitive")
+    pre-flight's assumed default) or place (a closed zone) — either trigger
+    firing is enough (ADR 0008: Sensitive is material that trips the checks,
+    an explicit flag, or a closed place)."""
+    return shape.sensitive or shape.posture == "closed"
 
 
 def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
@@ -3082,9 +3035,8 @@ def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     about storage, not about transit — Sensitive material leaves the
     machine on any remote route — so it is excluded alike with `trains`.
     Exposure, never price, decides; an excluded candidate is marked with
-    its Exposure in the table and never hidden. A `sensitive` zone is the
-    flag by another name, and a `closed` zone is at least that strict (see
-    regime_at_least), so it refuses every non-local route on top of every
+    its Exposure in the table and never hidden. A closed place is Sensitive
+    by definition, so it refuses every non-local route on top of every
     remote free one.
     """
     if not sensitive_shape(shape):
@@ -3202,42 +3154,41 @@ def catalog_gate(shape: Shape, candidate: Candidate) -> Decision:
     return ADMITTED
 
 
-def zone_prohibition(shape: Shape, candidate: Candidate) -> str | None:
-    """Why the free-use zone forbids this candidate outright, or None.
+def zone_prohibition(posture: str, candidate: Candidate) -> str | None:
+    """Why a closed posture forbids this candidate outright, or None.
 
-    The zone-refusable facet answers: a closed regime refuses exactly the
-    remote, unaccountable servings - the free-slug and harness kinds -
-    whatever their price, while a market or plan serving is accountable and
-    a model this machine serves never leaves it and stays in. `open` and
-    `sensitive` forbid nothing here - Exposure and the quota answer for
-    them.
+    The one zone predicate, evaluated on the posture value: a closed place
+    refuses exactly the remote, unaccountable servings - the free-slug and
+    harness kinds - whatever their price, while a market or plan serving is
+    accountable and a model this machine serves never leaves it and stays in.
+    An open posture forbids nothing; Exposure and the quota answer for the
+    rest. Three askers call it: the pre-flight block, the candidate source
+    filter and the Zone gate.
 
-    This is the source filter: a candidate it names never enters the candidate
-    set, so it is not ranked, scored, dealt or listed. The header states the
-    zone that made it absent (`zone: <path> (<regime>)`), which is how the
-    absence is explained without a row and without a reason column.
+    A candidate it names never enters the candidate set, so it is not ranked,
+    scored, dealt or listed. The header states the zone that made it absent
+    (`zone: <path> (closed)`), which is how the absence is explained without
+    a row and without a reason column.
     """
     facets = facets_for_candidate(candidate)
-    if (facets and facets["zone_refusable_in_closed_regimes"]
-            and regime_at_least(shape.regime, "closed")):
-        return "remote free route is prohibited by the effective regime"
+    if (facets and facets["zone_refusable_in_closed_zones"]
+            and posture == "closed"):
+        return "remote free route is prohibited by the closed zone"
     return None
 
 
 def filter_zone_candidates(share: dict, models: dict, policy: dict, *,
-                           local_ids, regime: str, intent: str,
+                           local_ids, posture: str, intent: str,
                            loopback: bool = True) -> dict:
-    """Drop routes prohibited by this free-use regime before ranking or scoring.
+    """Drop routes prohibited by a closed zone before ranking or scoring.
 
     The candidate built here carries the run's serving facts — the loopback
     fact among them — rather than defaulting a local row to loopback: a
     default that assumes the serving is this machine's fails open against
-    what the run actually observed (ADR-0003, fail closed by default), and
-    the row must read here exactly as the admission that judges it later
-    reads it."""
-    zone_shape = Shape(regime=regime)
+    what the run actually observed, and the row must read here exactly as the
+    admission that judges it later reads it."""
     return {mid: value for mid, value in share.items()
-            if zone_prohibition(zone_shape, candidate_for(
+            if zone_prohibition(posture, candidate_for(
                 mid, policy, local=mid in local_ids, model=models.get(mid),
                 intent=intent, loopback=loopback)) is None}
 
@@ -3248,29 +3199,15 @@ def zone_gate(shape: Shape, candidate: Candidate) -> Decision:
     Admission refuses too, though the source filter should never let such a
     candidate reach it: one verdict, whichever path asks.
     """
-    reason = zone_prohibition(shape, candidate)
+    reason = zone_prohibition(shape.posture, candidate)
     return Decision(reason is None, reason or "")
 
 
-def regime_prohibition(shape: Shape, candidate: Candidate) -> str | None:
-    """What the shape's regime forbids outright, or None.
-
-    The pre-flight's yardstick, and the only two clauses a zone states: no
-    remote free route in a closed zone, no non-local route at a regime at
-    least as strict as `sensitive` (ADR 0008 — the closed regime implies
-    sensitive). Everything else — Footprint, quota, an uncataloged Free
-    route — is a shape-level exclusion the table marks, so it is not a zone
-    block.
-    """
-    return zone_prohibition(shape, candidate) \
-        or exposed_prohibition(shape, candidate)
-
-
-# The gates, in order, behind the one decision. The zone comes first: a route a
-# closed zone forbids outright does not need its Exposure, band or Footprint
-# judged, and the first failing gate is the reason the table shows. The band
-# sits beside them: judgment about the rostered local row, after the regime
-# and Exposure facts, before the mechanical capacity checks.
+# The gates, in order, behind the one decision. The Zone gate comes first: a
+# route a closed zone forbids outright does not need its Exposure, band or
+# Footprint judged, and the first failing gate is the reason the table shows.
+# The band sits beside them: judgment about the rostered local row, after the
+# zone and Exposure facts, before the mechanical capacity checks.
 GATES = (zone_gate, exposure_gate, band_gate, context_gate, catalog_gate)
 
 
@@ -4031,7 +3968,7 @@ SOURCE_COLUMNS = {
 
 def domain_rankings(classif: dict, domains: dict, models: dict,
                     by_canon: dict, top: int, config: PolicyConfig,
-                    policy: dict, local_ids=(), regime: str = "open",
+                    policy: dict, local_ids=(), posture: str = "open",
                     intent: str = "measured", loopback: bool = True):
     """Per-domain share boards (free candidates merged, zone-filtered — the
     same source the check and a ranking run judge), their top-cut ranked mids
@@ -4053,7 +3990,7 @@ def domain_rankings(classif: dict, domains: dict, models: dict,
                 share.setdefault(mid, 0.0)
         share = filter_zone_candidates(
             share, models, policy, local_ids=local_ids,
-            regime=regime, intent=intent, loopback=loopback)
+            posture=posture, intent=intent, loopback=loopback)
         share_by_domain[name] = share
         ranked_by_domain[name] = [mid for mid, _ in
                                   sorted(share.items(), key=lambda kv: -kv[1])[:top]]
@@ -4217,7 +4154,7 @@ def scope_facts(key: str, exact: bool, models: dict, by_canon: dict,
 
 def anchor_scope(explicit: list, models: dict, by_canon: dict, classif: dict,
                  domains: dict, policy: dict, top: int, config: PolicyConfig,
-                 zone: Zone, regime: str) -> list[str]:
+                 zone: Zone, posture: str) -> list[str]:
     """The anchor model set: explicit ids when given (deduplicated, in given
     order), else the check's drift set — gaps, then stale summaries, then
     stale signals, via the shared drift_keys helper over the same
@@ -4243,7 +4180,7 @@ def anchor_scope(explicit: list, models: dict, by_canon: dict, classif: dict,
                if isinstance(v, dict) and v.get("fit")}
     _, _, all_ranked = domain_rankings(
         classif, domains, models, by_canon, top, config, policy,
-        local_ids=(), regime=regime, intent="measured")
+        local_ids=(), posture=posture, intent="measured")
     gaps, stale, stale_signals = drift_keys(
         all_ranked, summaries, signals, policy.get("free_models", {}))
     out, seen = [], set()
@@ -4298,13 +4235,13 @@ def anchor_row(source: str, row: dict) -> str:
 
 def run_anchors(explicit: list, models: dict, by_canon: dict, classif: dict,
                 domains: dict, policy: dict, top: int, refresh: bool,
-                config: PolicyConfig, zone: Zone, regime: str) -> None:
+                config: PolicyConfig, zone: Zone, posture: str) -> None:
     """First-party benchmark anchors for the scope: one unfiltered,
     authenticated, cached fetch of the combined feed; one table per source
     in that source's own schema, rows in scope order; a trailing line naming
     scoped models the feed does not cover. Facts only — nothing persists."""
     scope = anchor_scope(explicit, models, by_canon, classif, domains,
-                         policy, top, config, zone, regime)
+                         policy, top, config, zone, posture)
     feed = fetch_json(BENCHMARKS_URL, "benchmarks.json", auth=True,
                       refresh=refresh)
     rows = feed.get("data", []) if isinstance(feed, dict) else (feed or [])
@@ -4352,12 +4289,12 @@ def run_anchors(explicit: list, models: dict, by_canon: dict, classif: dict,
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
                      intent: str, basis: str, config: PolicyConfig,
-                     local_ids=(), regime: str = "open",
+                     local_ids=(), posture: str = "open",
                      zone: Zone | None = None,
                      sensitive: bool = False,
                      ranks=None, local_listing=None,
                      roster=None, loopback: bool = True) -> None:
-    zone = zone if zone is not None else Zone(path=None, regime=regime)
+    zone = zone if zone is not None else Zone(path=None, posture=posture)
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -4367,7 +4304,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     # serve and no Free-share signal is claimed for routes that cannot draw.
     share_by_domain, ranked_by_domain, all_ranked = domain_rankings(
         classif, domains, models, by_canon, top, config, policy,
-        local_ids=local_ids, regime=regime, intent=intent,
+        local_ids=local_ids, posture=posture, intent=intent,
         loopback=loopback)
     # The deal's players: the eligibility top-K of each domain, plus ranked
     # models the user favors (weight > 1) below the cut — the same pool
@@ -4412,10 +4349,10 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     for name in domains:
         profile_name = DOMAIN_PROFILE.get(name, "agentic")
         in_tok, out_tok, cached = PROFILES[profile_name]
-        shape = Shape(sensitive=False, input_tokens=in_tok,
+        shape = Shape(sensitive=sensitive, input_tokens=in_tok,
                       context_headroom=config.context.headroom,
                       context_margin=config.context.margin,
-                      regime=regime, domain=name, intent=intent)
+                      posture=posture, domain=name, intent=intent)
         aff = domain_weights(signals, name, config.factors)
         admitted = frozenset(
             mid for mid in share_by_domain[name]
@@ -4476,7 +4413,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     age = policy_age_days(policy_path)
 
     print("# Policy check\n")
-    print(f"zone: {zone_label(zone, sensitive=sensitive)}")
+    print(f"zone: {zone_label(zone)}")
     age_txt = f"{age} day{'' if age == 1 else 's'} old" if age is not None \
         else "unknown (file missing)"
     print(f"policy.json last modified: {age_txt}\n")
@@ -4863,7 +4800,6 @@ def main() -> None:
         # no board are needed to decide whether a shape is Sensitive.
         raise SystemExit(run_secrets_check(working_dir=args.working_dir,
                                            outside_files=args.outside_file,
-                                           sensitive=args.sensitive,
                                            as_json=args.json))
     if args.write_zones:
         # The machine's zones file: the interview's proposal on stdin,
@@ -4878,7 +4814,6 @@ def main() -> None:
         # report (exit 4).
         raise SystemExit(run_status(working_dir=args.working_dir,
                                     policy_path=args.policy,
-                                    sensitive=args.sensitive,
                                     as_json=args.json))
 
     # One policy loader for every entry point: the ranking path reports a
@@ -4913,9 +4848,16 @@ def main() -> None:
             f"no domain '{args.domain}'; known: {', '.join(domains) or 'none'}")
 
     # Where free may run: the machine's zones file, judged for this working
-    # folder and the repository it came from, then tightened by --sensitive.
-    zone = effective_zone(args.working_dir)
-    regime = shape_regime(zone, sensitive=args.sensitive)
+    # folder and the repository it came from. The posture is binary and the
+    # run works under it; --sensitive no longer tightens it (ADR-0010). A
+    # zones file that exists but fails validation is a rules/config error
+    # (status 4), named instead of escaping as a generic failure.
+    try:
+        zone = effective_zone(args.working_dir)
+    except SystemExit as exc:
+        print(f"zones/config error: {exc}", file=sys.stderr)
+        raise SystemExit(RULES_CONFIG_ERROR) from None
+    posture = zone.posture
 
     models_raw = fetch_json(MODELS_URL, "models.json", auth=False, refresh=args.refresh)
     model_rows = models_raw["data"] if isinstance(models_raw, dict) else models_raw
@@ -4929,7 +4871,7 @@ def main() -> None:
                          refresh=args.refresh)["data"]
     if args.anchors is not None:
         run_anchors(args.anchors, models, by_canon, classif, domains, policy,
-                    args.top, args.refresh, config, zone, regime)
+                    args.top, args.refresh, config, zone, posture)
         return
     # The local universe arrives from the harness — passed in with
     # --local-listing — and the serving endpoint from the harness's config:
@@ -4961,7 +4903,7 @@ def main() -> None:
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
-                         config, local_ids=local_ids, regime=regime, zone=zone,
+                         config, local_ids=local_ids, posture=posture, zone=zone,
                          sensitive=args.sensitive, ranks=ranks,
                          local_listing=local_listing, roster=roster,
                          loopback=loopback)
@@ -5000,7 +4942,7 @@ def main() -> None:
                   output_tokens=out_tok,
                   context_headroom=config.context.headroom,
                   context_margin=config.context.margin,
-                  regime=regime,
+                  posture=posture,
                   domain=args.domain, intent=args.effort)
     # Zone prohibitions filter at source: a candidate the zone forbids outright
     # never enters the candidate set — not ranked, not scored, not dealt, not
@@ -5010,7 +4952,7 @@ def main() -> None:
     # candidate so the row the table later marks is the row admission judged.
     share = filter_zone_candidates(
         share, models, policy, local_ids=local_ids,
-        regime=regime, intent=args.effort, loopback=loopback)
+        posture=posture, intent=args.effort, loopback=loopback)
     missing = set(tags) - known_tags
     if missing:
         print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
@@ -5035,15 +4977,7 @@ def main() -> None:
         base_per = bp[args.pricing_basis]
 
     print(f"# Popularity ranking: {args.domain}\n")
-    print(f"zone: {zone_label(zone, sensitive=args.sensitive)}")
-    if not os.path.exists(zones_path()):
-        # Absent has always been silent in every mode: the loader returns
-        # the closed default without a word, so a fresh install never
-        # learns setup is missing. One line, only when the file is truly
-        # absent - a present file stays byte-identical, and a corrupt one
-        # already stopped loudly when the zone was resolved above
-        # (issue #38).
-        print(zones_absent_line())
+    print(f"zone: {zone_label(zone)}")
     age = policy_age_days(args.policy)
     age_txt = f"{age}d old" if age is not None else "unknown"
     print(f"profile={profile_name} (in={in_tok:,} out={out_tok:,} cached={cached:.0%}) "
@@ -5068,13 +5002,13 @@ def main() -> None:
               + f" | reserve {config.free_quota_reserve} protected; "
                 "plan size does not gate")
     else:
-        # Same yardstick as filter_zone_candidates: a closed effective
-        # regime has already dropped every remote Free route at source, so
-        # the pool clause says so instead of claiming they stayed (issue
-        # #38). Where free routes genuinely remain - open or sensitive -
-        # the line is unchanged, as are the quota figures above.
+        # Same yardstick as filter_zone_candidates: a closed posture has
+        # already dropped every remote Free route at source, so the pool
+        # clause says so instead of claiming they stayed (issue #38). Where
+        # free routes genuinely remain, the line is unchanged, as are the
+        # quota figures above.
         pool = (":free routes excluded by the closed zone"
-                if regime_at_least(regime, "closed")
+                if posture == "closed"
                 else ":free routes stay in the pool")
         print(f"free quota: unavailable | {pool}")
     if not verdict.eligible:
