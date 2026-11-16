@@ -3741,8 +3741,8 @@ def band_line(mid: str, band: dict | None) -> str:
 
 def run_substitution(target: str, reason: str, rows: list[dict], *,
                      local=(), sensitive: bool = False, roster=None,
-                     zone=None, as_json: bool = False,
-                     assign: list | None = None) -> int:
+                     zone: Zone, as_json: bool = False,
+                    assign: list | None = None) -> int:
     """The substitution record (issue #71): the named model's Spare takes
     the ticket over whole, the fence restated, the reason recorded — and
     the lane effect stated (issue #72): lane membership follows the served
@@ -4277,12 +4277,10 @@ def run_anchors(explicit: list, models: dict, by_canon: dict, classif: dict,
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
                      intent: str, basis: str, config: PolicyConfig,
-                     local_ids=(), posture: str = "open",
-                     zone: Zone | None = None,
-                     sensitive: bool = False,
-                     ranks=None, local_listing=None,
-                     roster=None, loopback: bool = True) -> None:
-    zone = zone if zone is not None else Zone(path=None, posture=posture)
+                    zone: Zone, local_ids=(),
+                    sensitive: bool = False,
+                    ranks=None, local_listing=None,
+                    roster=None, loopback: bool = True) -> None:
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -4292,7 +4290,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     # serve and no Free-share signal is claimed for routes that cannot draw.
     share_by_domain, ranked_by_domain, all_ranked = domain_rankings(
         classif, domains, models, by_canon, top, config, policy,
-        local_ids=local_ids, posture=posture, intent=intent,
+        local_ids=local_ids, posture=zone.posture, intent=intent,
         loopback=loopback)
     # The deal's players: the eligibility top-K of each domain, plus ranked
     # models the user favors (weight > 1) below the cut — the same pool
@@ -4340,7 +4338,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         shape = Shape(sensitive=sensitive, input_tokens=in_tok,
                       context_headroom=config.context.headroom,
                       context_margin=config.context.margin,
-                      posture=posture, domain=name, intent=intent)
+                      posture=zone.posture, domain=name, intent=intent)
         aff = domain_weights(signals, name, config.factors)
         admitted = frozenset(
             mid for mid in share_by_domain[name]
@@ -4891,7 +4889,7 @@ def main() -> None:
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
-                         config, local_ids=local_ids, posture=posture, zone=zone,
+                         config, local_ids=local_ids, zone=zone,
                          sensitive=args.sensitive, ranks=ranks,
                          local_listing=local_listing, roster=roster,
                          loopback=loopback)
