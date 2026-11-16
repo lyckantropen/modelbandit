@@ -73,13 +73,12 @@ of that first-run output, annotated:
 [docs/cli.md](docs/cli.md#first-run-annotated). `--help` is the full
 reference.
 
-One thing surprises a first run: **free routes are excluded until you declare where they may run**, remote free routes (`:free`, `opencode/*`) excluded at source — visibly, never silently. Paid routes work from the first run. Where that rule lives: the [single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop) and the zone header of every run's output.
+Free routes work from the first run with no setup files. Zones are open unless declared: an absent zones file means everything is open, and the file is only an opt-out list of paths declared `closed` ([ADR-0010](docs/adr/0010-open-unless-declared.md)). Every run's header states the effective posture. The [single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop) describes the run.
 
 ## Setup
 
-Three things decide what this tool does on your machine: a key to read the
-data, a zones file that says where free models may run, and — per project —
-a secrets file the gate reads.
+Live data uses an API key. Free routes work on the first run without setup
+files; a zones file is optional and lists only paths declared `closed`.
 
 Check where you stand at any point — offline, read-only, never prints file
 contents:
@@ -101,57 +100,45 @@ offline modes — `--list-domains`, `--assert-allowed`, `--check-secrets`,
 
 ### zones.json
 
-Free routes can retain what you send, so where they may run is opt-in, path by
-path. The file lives at `$XDG_CONFIG_HOME/modelbandit/zones.json`, defaulting
-to `~/.config/modelbandit/zones.json`, and a complete, general-purpose one
-looks like this:
+The optional file lives at `$XDG_CONFIG_HOME/modelbandit/zones.json`,
+defaulting to `~/.config/modelbandit/zones.json`. It is an opt-out list of
+paths declared `closed`:
 
 ```json
-{
-  "zones": [
-    {"path": "~/work", "free": "open"},
-    {"path": "~/work/acme", "free": "sensitive"},
-    {"path": "~/work/acme/payroll", "free": "closed"}
-  ],
-  "default": "closed"
-}
+{"zones": ["~/work/acme/payroll"]}
 ```
 
-Read it as: free models may run under `~/work`, except where a route may
-retain what it sees, and never under `~/work/acme/payroll`. The rules in one
-breath: the three regimes order `open < sensitive < closed` and a stricter
-regime dominates every milder one; **anything undeclared is `closed`** — the
-whole file absent included; the longest covering prefix wins; and the regime a
-run works under is the stricter of its working folder's and its origin
-repository's. Full rules, worktrees, and the loud validation:
+With nothing declared, everything is open, including when the file is absent.
+The effective posture is the stricter of the working folder and origin
+repository, so one closed declaration covers that repository's worktrees.
+Free routes work from the first run; the default-posture decision is recorded
+in [ADR-0010](docs/adr/0010-open-unless-declared.md). More:
 [docs/setup.md](docs/setup.md#free-use-zones).
 
-**Paid models are unaffected by this default** — zones only ever remove remote
-free routes at source; paid routes work from the first run. Why the default is
-`closed` rather than an opening one is a recorded decision:
-[ADR-0003, Fail closed by default](docs/adr/0003-fail-closed-by-default.md).
+Write the JSON on stdin with `--write-zones`, then review the file and confirm
+the posture with the next run's `zone:` header or `--assert-allowed`.
 
-Rather not hand-write JSON? The skill's loop presents it and writes through `--write-zones` — review what was written before committing: [the single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop).
+The [single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop)
+describes how a run proceeds.
 
-### Secrets file
+### Secrets gate
 
-The Secrets gate reads the project's **`modelbandit.secrets.json`** — at the
-folder's git root when it is in a repository — for project-specific phrases
-and patterns. The file is optional: while it is missing, the built-in
-credential rules alone decide, and the project's own rules are never applied
-until it exists. To create or extend one, run: `--check-secrets --write-secrets`. The assessment is silent — the script reads your material, never exposes values. The loop's first step runs this check automatically at deal time; no pre-flight choreography stands between you and the ranking: [the single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop). Details: [docs/setup.md](docs/setup.md#secrets-file).
+At deal time, the Secrets gate automatically applies the built-in credential,
+identifier, machine-fact, and gitignored-content rules to the material a run
+is given. `--check-secrets` manually inspects a single material.
 
 ## Keeping your data safe with free models
 
-Free routes can retain what you send — an unknown free route defaults to
-`trains` — so two layers decide what happens to your material, in order:
+Free routes can retain what you send - an unknown free route defaults to
+`trains` - so five parts decide what happens to your material:
 
 1. **Secrets gate — what the material is.** Before any model is chosen, the
    shape's material goes through `--check-secrets` and comes back **safe**,
    **sensitive** or **not certified** — decided once at collection; the loop runs this automatically.
-2. **Zones — where free may run.** The effective regime marks paths `open`, `sensitive`
-   or `closed`; undeclared is `closed`, and a run takes the stricter of its
-   working folder's zone and its origin repository's ([Setup](#setup)).
+2. **Zones - where free may run.** Paths are `open` or `closed`, open unless
+   declared; an absent zones file means everything is open, and the file lists
+   only paths declared `closed`. A run takes the stricter posture of its
+   working folder and origin repository.
 3. **Exposure marks — which routes retain.** Every candidate carries its
    serving route's Exposure — `no-retention`, `trains` or `local` — a property
    of the route, never inferred from price. On a Sensitive shape a `trains`
@@ -164,7 +151,8 @@ Free routes can retain what you send — an unknown free route defaults to
    malformed response — anything else means do not launch. No policy file, no
    classification fetch, no network, and it fails closed
    ([command](#directly)).
-5. **When a zone blocks — posture over ceremony.** A blocked ticket names its zone, stops, and asks — no re-gate beyond that. How it looks in practice is one sentence in [the single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop).
+5. **When a zone blocks.** A blocked ticket names its zone, stops, and asks.
+   How it looks in practice is one sentence in [the single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop).
 
 ## Usage
 
@@ -264,8 +252,8 @@ Where everything else lives:
 
 - [`skills/modelbandit/SKILL.md`](skills/modelbandit/SKILL.md) — the skill's
   full policy: one interaction loop, how a blocked ticket behaves, the reference.
-- [`docs/setup.md`](docs/setup.md) — setup in detail: the full zone rules,
-  the secrets file, the `--status` mode.
+- [`docs/setup.md`](docs/setup.md) - setup in detail: zones and the
+  `--status` mode.
 - [`docs/cli.md`](docs/cli.md) — the annotated first run and the command
   gallery.
 - [`GLOSSARY.md`](GLOSSARY.md) and [`docs/adr/`](docs/adr/) — vocabulary and

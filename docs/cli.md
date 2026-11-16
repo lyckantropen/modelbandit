@@ -7,7 +7,12 @@ for daily. Commands run from the repo checkout.
 
 ## First run, annotated
 
-Before the effective free-use posture is declared (a path in `zones.json`), the header of a first run reads:
+Every run's header states the effective posture. Zones are open unless
+declared, so on a first run with nothing declared everything is open and free
+routes work without setup files
+([ADR-0010, Open unless declared](adr/0010-open-unless-declared.md)). The
+annotated output below is retained for re-verification in ticket #87; its
+current zone values are not the target first-run posture.
 
 ```text
 # Popularity ranking: writing
@@ -19,35 +24,9 @@ profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=wo
 free quota: unavailable | :free routes excluded by the closed zone
 ```
 
-Every line of that output, in order (the blank lines are only spacing):
-
-- `# Popularity ranking: writing` — the subject of the run: this domain's
-  popularity ranking.
-- `zone: undeclared (closed)` — the free-use zone that governed the run. No
-  declared path matched, so the default applied, and the default is
-  **closed**: every remote free route was already out of this run, removed at
-  source rather than listed below with a mark. After [Setup](../README.md#setup)
-  this line reads `zone: <path> (open)` — or names the resolved place when a
-  junction or symlink moved the judgement.
-- `zones file: absent (~/.config/modelbandit/zones.json) — undeclared paths are closed`
-  — printed only while the zones file doesn't exist: the exact path to
-  create, and what its absence means
-  ([zones.json](../README.md#zonesjson)).
-- `profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=worst | policy: 0d old | source: …`
-  — the run's coordinates: the token profile for the domain (authoring work
-  is output-heavy), the effort rung, the pricing basis, the age of
-  `policy.json` (a fresh checkout reads `0d old`; past about one rankings
-  window the run offers a refresh), and where the ranking data comes from and
-  as of when.
-- `free quota: unavailable | :free routes excluded by the closed zone` — the
-  day's free-request counter, which no run waits on: here it was not reported
-  (the key endpoint did not answer, or the payload carried no counter). The
-  clause after `|` is the zone's doing — with the effective zone `closed`,
-  every remote free route was excluded before this ranking began. With a
-  reachable counter the same line carries the day's figures instead
-  (`used`/`limit`, left, protected reserve).
-
-The table that follows is the ranking itself — share, score, price, context window, Exposure. No remote free route appears in it until a path is declared; before then every run states its effective zone and excludes remote free routes at source — **posture over ceremony** — the single interaction loop owns this sentence: [the one interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop).
+The ranking table reports share, score, price, context window, and Exposure.
+The [single interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop)
+describes how the run proceeds.
 
 ## Command gallery
 

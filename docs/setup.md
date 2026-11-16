@@ -1,8 +1,7 @@
 # Setup in detail
 
 The expanded companion to the README's [Setup](../README.md#setup) section:
-what each file is, the full zone rules, and the offline status mode. The files
-are normally written for you — both are described in each section below.
+the API key, optional zones file, and offline status mode.
 
 ## API key
 
@@ -22,108 +21,34 @@ models catalogue (`/api/v1/models`) is keyless.
 
 ## Free-use zones
 
-The zones file lives at the machine's config root:
-`$XDG_CONFIG_HOME/modelbandit/zones.json`, defaulting to
-`~/.config/modelbandit/zones.json`. Its schema:
+Free routes work from the first run with no setup files. The zones posture is
+open unless declared; an absent file means everything is open. The optional
+file at `$XDG_CONFIG_HOME/modelbandit/zones.json` (default
+`~/.config/modelbandit/zones.json`) is only an opt-out list of paths declared
+`closed`:
 
 ```json
-{"zones": [{"path": "~/work", "free": "open"}], "default": "closed"}
+{"zones": ["~/work/acme/payroll"]}
 ```
 
-`path` is a folder, `free` one of three regimes. `~` and environment
-variables expand, and paths compare the way the platform does. The complete,
-worked example lives in the [README](../README.md#zonesjson).
-
-### The three regimes
-
-- **`open`** — free models may run on content here, whatever a route retains.
-- **`sensitive`** — nothing may leave the machine: only models served on this
-  machine run here, every non-local route excluded (`no-retention` alike with
-  `trains` — a vendor promise about storage is not containment in transit).
-- **`closed`** — no remote free route may run here at all; models served on
-  this machine never leave it and, `closed` implying `sensitive`, they are the
-  only routes that stay in.
-
-The regimes order **`open` < `sensitive` < `closed`**, and a stricter regime
-dominates every milder one in every dimension — `closed` implies
-`sensitive`.
-
-### Undeclared is closed
-
-Anything the file does not name takes the default, and the default is
-`closed` — including the whole file being absent. That is why
-`"default": "closed"` is spelled out: the file opens what it names, and only
-that. The longest covering prefix wins, so a nested path can only be stricter
-than what covers it, and a path the file never names never opens.
-
-### The effective regime: stricter of two
-
-The regime a run works under is the **stricter of two**: the zone of its
-working folder and the zone of the repository that folder came from (the
-parent of `git rev-parse --git-common-dir`). Git missing or failing leaves
-the working folder's zone alone.
-
-An undeclared worktree root therefore stays closed however open its
-repository is — to let the origin repository's zone decide, declare the
-directory the worktrees live in:
-
-```json
-{"zones": [{"path": "~/.opencode/worktrees", "free": "open"}], "default": "closed"}
-```
-
-### Validation is loud
-
-An unknown key or an unknown regime stops the run naming the offending key or
-entry, two entries spelling the same place are refused, and the built-in
-default is additive-only — no file can open what the machine closed. An
-invalid config refuses with status 4 and writes nothing, so `--write-zones`
-over an existing file cannot corrupt it.
-
-### What the posture governs
-
-The posture governs where free routes may run, not where you may work: zones
-only ever remove remote free routes at source, and **paid routes work
-from the first run**. Remote free routes are excluded until a path is declared;
-where that rule lives: [the single interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop). Why the default is `closed`
-rather than an opening one is a recorded decision:
-[ADR-0003, Fail closed by default](adr/0003-fail-closed-by-default.md).
+The effective posture is the stricter of the working folder and its origin
+repository, so one closed declaration covers that repository's worktrees.
+The default-posture decision is recorded in
+[ADR-0010, Open unless declared](adr/0010-open-unless-declared.md); ADR-0003
+is its superseded predecessor. More on the run itself:
+[the single interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop).
 
 ### Writing the file
 
-The loop presents your answer as JSON and writes it through
-`--write-zones` — no mode ever needs this file hand-written. Then review the
-printed path and the file's contents, and verify afterwards: the next run's
-`zone:` header, or `--assert-allowed`, states the posture now in force.
-[The loop](../skills/modelbandit/SKILL.md#one-interaction-loop).
+`--write-zones` is a validated, atomic writer that reads JSON from stdin.
+Review the file, then confirm the posture with the next run's `zone:` header
+or `--assert-allowed`.
 
-## Secrets file
+## Secrets gate
 
-The Secrets gate reads the project's **`modelbandit.secrets.json`** — at the
-folder's git root when it is in a repository, the folder itself otherwise —
-for project-specific phrases and patterns.
-
-- **Optional by design.** While the file is missing, the built-in credential
-  rules alone decide, and the project's own rules are never applied until it
-  exists.
-- **Written at check time.** `--check-secrets --write-secrets` scans your repository for candidate identifiers (not credential
-  values), records your include/exclude decision per candidate, writes the file — no ceremony: the assessment runs once and the loop carries its verdict forward. No setup files, no pre-flight choreography. The built-in credential rules always apply.
-- **Additive merges.** Existing rules are never removed, exact duplicates are
-  kept once, and the writer's report gives counts, never rule values. The
-  built-in credential and machine-fact rules always apply and cannot be
-  disabled.
-- **Additive merges.** Existing rules are never removed, exact duplicates are
-  kept once, and the writer's report gives counts, never rule values. The
-  built-in credential and machine-fact rules always apply and cannot be
-  disabled.
-- **Commit or gitignore.** If the confirmed entries identify a person, client
-  or internal system — or you chose not to commit the file — the writer
-  gitignores it once; a file that is already tracked is refused until you
-  `git rm --cached` it.
-- **Read at check time.** `--check-secrets` reads the file itself, with the
-  shape's material on stdin and one `--outside-file PATH` per named outside
-  source. It reports **safe**, **sensitive** or **not certified** and names
-  the rule class that tripped it (`phrase #1`, `pattern #1`, a credential
-  pattern, a machine fact) — never a rule's value.
+At deal time, the Secrets gate automatically applies the built-in credential,
+identifier, machine-fact, and gitignored-content rules to the material a run
+is given. `--check-secrets` manually inspects a single material.
 
 ## Checking your setup
 
@@ -131,22 +56,20 @@ for project-specific phrases and patterns.
 python3 skills/modelbandit/scripts/modelbandit.py --status
 ```
 
-The offline setup report: read-only, fully offline (no endpoint fetch, no
-classification, no quota, no probe), and it prints the secrets file's
-presence only, never its contents. One line each — zone, zones file, secrets
-file, policy age — plus, while the zones file is absent, one actionable line:
+The offline setup report is read-only and fully offline (no endpoint fetch,
+classification, quota, or probe). Its header states the effective posture;
+with nothing declared on a first run, everything is open and no action is
+needed:
 
 ```text
-zone: undeclared (closed)
-zones file: absent (~/.config/modelbandit/zones.json) — undeclared paths are closed
-next: create ~/.config/modelbandit/zones.json — see [the single interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop) for how this file fits into every run's posture
-secrets file: absent (<working dir>/modelbandit.secrets.json) — built-in default rules apply
-policy: <policy path> — 0d old
+zone: <working folder> (open)
+zones file: absent (~/.config/modelbandit/zones.json)
+secrets: built-in rules apply
+policy: <policy path> - 0d old
 ```
 
-Exit status: **0** whenever setup files are absent — a missing zones or
-secrets file is the documented default, not an answer the status must carry;
-**4** only when a file that exists fails validation, named on stderr.
+Exit status: **0** when optional setup files are absent; **4** when a file
+that exists fails validation, named on stderr.
 `--working-dir` judges the folder the way the pre-flight does. With
 `--json`, one object replaces the lines (`mode`, `ok`, `zone`,
-`zones_file`, `secrets_file`, `policy`).
+`zones_file`, `secrets`, `policy`).
