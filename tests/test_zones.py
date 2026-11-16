@@ -569,9 +569,11 @@ class SubmoduleFixtureTests(TempDirMixin):
                       modelbandit.zone_block("qwen/qwen3-coder-30b:free", closed,
                                       policy=policy))
         open_zone = modelbandit.Zone(path=None, posture="open")
-        self.assertIn("exposed (trains)",
-                      modelbandit.zone_block("qwen/qwen3-coder-30b:free", open_zone,
-                                      policy=policy, sensitive=True))
+        self.assertIn("only Exposure local may serve a Sensitive shape "
+                      "(trains)",
+                      modelbandit.zone_block("qwen/qwen3-coder-30b:free",
+                                             open_zone,
+                                             policy=policy, sensitive=True))
 
     def make_link(self, link, target):
         if os.name == "nt":
@@ -693,7 +695,7 @@ class BinaryZoneGateTests(unittest.TestCase):
         self.assertEqual(
             modelbandit.zone_block("deepseek/deepseek-v4-pro", zone,
                                    sensitive=True),
-            "exposed (no-retention)")
+            "only Exposure local may serve a Sensitive shape (no-retention)")
 
     def test_the_gate_is_on_the_admission_path(self):
         self.assertIn(modelbandit.zone_gate, modelbandit.GATES)
@@ -988,7 +990,7 @@ class BinaryZonesCliTests(TempDirMixin):
             "--working-dir", closed)
         self.assertEqual(code, 0)
         self.assertEqual(self.zone_line(blocked), f"zone: {closed} (closed)")
-        self.assertIn("blocked by the free-use zone", blocked)
+        self.assertIn("blocked: free-use zone", blocked)
 
         allowed, _, code = self.run_cli(
             "--assert-allowed", "--model", "vendor/model:free", "--plain",
@@ -1078,7 +1080,7 @@ class BinaryZonesCliTests(TempDirMixin):
 
         self.assertEqual(code, 0)
         self.assertEqual(self.zone_line(out), f"zone: {repo} (closed)")
-        self.assertIn("blocked by the free-use zone", out)
+        self.assertIn("blocked: free-use zone", out)
 
     def test_the_json_zone_object_carries_the_binary_posture(self):
         out, err, code = self.run_cli("--status", "--json", "--working-dir",

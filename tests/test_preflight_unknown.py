@@ -78,7 +78,7 @@ class UnknownNamespaceIsBlockedTests(unittest.TestCase):
                     code, out = preflight("anthropic", zone, plain=plain)
                     self.assertEqual(code, 0, out)
                     self.assertIn(UNKNOWN, out.splitlines(), out)
-                    self.assertNotIn("blocked by the free-use zone", out)
+                    self.assertNotIn("blocked: free-use zone", out)
 
     def test_the_json_answer_carries_the_same_block(self):
         zone = modelbandit.Zone(path="z", posture="open")

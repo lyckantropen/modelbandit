@@ -168,7 +168,7 @@ class VerdictMatrixTests(ModelbanditCli):
                                     stdin="Summarize it.")
 
         self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn("blocked: free-use zone", out)
         # The zone line names the declared closed place, never the content.
         self.assertIn(f"zone: {self.place(vault)} (closed)", out)
         self.assertIn("reason: material provenance from this zone", out)
@@ -190,8 +190,10 @@ class VerdictMatrixTests(ModelbanditCli):
                                           "deepseek/deepseek-v4-pro",
                                           "--working-dir", self.root)
         self.assertEqual(code, 0)
-        self.assertIn("blocked by the free-use zone", blocked)
-        self.assertIn("reason: exposed (no-retention)", blocked)
+        self.assertIn("blocked: free-use zone", blocked)
+        self.assertIn(
+            "reason: only Exposure local may serve a Sensitive shape "
+            "(no-retention)", blocked)
         self.assertEqual(err, "")
 
     def test_blocked_is_a_completed_run_not_a_status(self):
@@ -200,7 +202,7 @@ class VerdictMatrixTests(ModelbanditCli):
                                     "--working-dir", self.root,
                                     zones=[self.root])
         self.assertEqual(code, 0)
-        self.assertIn("blocked by the free-use zone", out)
+        self.assertIn("blocked: free-use zone", out)
         self.assertIn("model: vendor/model:free", out)
 
     # --- --status: already 0, pinned here for the matrix -----------------
@@ -311,7 +313,7 @@ class LineOutputParityTests(ModelbanditCli):
         self.assertEqual(code, 0)
         self.assertEqual(
             out, f"zone: {self.place()} (open)\n"
-                 "secrets gate: blocked by the free-use zone\n"
+                 "blocked: free-use zone\n"
                  f"zone: {self.place(vault)} (closed)\n"
                  "reason: material provenance from this zone\n")
 
@@ -334,9 +336,10 @@ class LineOutputParityTests(ModelbanditCli):
         self.assertEqual(blocked,
                          f"zone: {self.place()} (open)\n"
                          "shape: sensitive (assumed)\n"
-                         "blocked by the free-use zone\n"
+                         "blocked: free-use zone\n"
                          "model: deepseek/deepseek-v4-pro\n"
-                         "reason: exposed (no-retention)\n")
+                         "reason: only Exposure local may serve a Sensitive "
+                         "shape (no-retention)\n")
 
     def test_assert_allowed_blocked_lines_are_byte_identical(self):
         out, _, code = self.run_cli("--assert-allowed", "--model",
@@ -347,7 +350,7 @@ class LineOutputParityTests(ModelbanditCli):
         self.assertEqual(
             out, f"zone: {self.place()} (closed)\n"
                  "shape: sensitive (assumed)\n"
-                 "blocked by the free-use zone\n"
+                 "blocked: free-use zone\n"
                  "model: vendor/model:free\n"
                  "reason: remote free route is prohibited by the closed "
                  "zone\n")
@@ -561,6 +564,57 @@ class JsonModeTests(ModelbanditCli):
         self.assertIs(payload["allowed"], False)
         self.assertEqual(self.zone_of(payload)["posture"], "closed")
         self.assertIn("remote free route is prohibited", payload["reason"])
+
+    def test_the_json_face_states_the_printed_verdict_vocabulary(self):
+        # The output contract (spec #75): the machine face's values are the
+        # printed verdict vocabulary, asserted at the same seam. Each blocked
+        # stop is the locked `blocked: <reason>` pattern, and the object
+        # carries the same verdict word and reason the lines print.
+        out, _, code = self.run_cli("--assert-allowed", "--model",
+                                    "vendor/model:free",
+                                    "--working-dir", self.root,
+                                    zones=[self.root])
+        self.assertEqual(code, 0)
+        stop = next(ln for ln in out.splitlines()
+                    if ln.startswith("blocked: "))
+        self.assertEqual(stop, "blocked: free-use zone")
+        reason_line = next(ln for ln in out.splitlines()
+                           if ln.startswith("reason: "))
+        payload = json.loads(self.run_cli(
+            "--assert-allowed", "--json", "--model", "vendor/model:free",
+            "--working-dir", self.root, zones=[self.root])[0])
+        self.assertIs(payload["allowed"], False)
+        self.assertEqual(payload["reason"], reason_line[len("reason: "):])
+
+        # The Exposure clause, same rule: the prose the lines print is the
+        # reason the object carries, and the table's `exposed (<class>)`
+        # mark appears in neither face.
+        out, _, code = self.run_cli("--assert-allowed", "--model",
+                                    "deepseek/deepseek-v4-pro",
+                                    "--working-dir", self.root)
+        self.assertEqual(code, 0)
+        reason_line = next(ln for ln in out.splitlines()
+                           if ln.startswith("reason: "))
+        self.assertIn("(no-retention)", reason_line)
+        self.assertNotIn("exposed (", out)
+        payload = json.loads(self.run_cli(
+            "--assert-allowed", "--json", "--model",
+            "deepseek/deepseek-v4-pro", "--working-dir", self.root)[0])
+        self.assertEqual(payload["reason"], reason_line[len("reason: "):])
+
+        # The ranking's blocked stop: the object's verdict is the stop's own
+        # word and its reason is the stop's reason.
+        self.write_policy(policy_with(exposure={"deepseek/": "trains"}))
+        out, _, code = self.run_cli("--domain", "writing", "--sensitive")
+        self.assertEqual(code, 0)
+        stop = next(ln for ln in out.splitlines()
+                    if ln.startswith("blocked: "))
+        self.assertEqual(stop, "blocked: no eligible local candidate")
+        payload = json.loads(self.run_cli(
+            "--domain", "writing", "--sensitive", "--budget", "1000",
+            "--json")[0].splitlines()[-1])
+        self.assertEqual(payload["verdict"], "blocked")
+        self.assertEqual(payload["reason"], stop[len("blocked: "):])
 
     # --- --status ---------------------------------------------------------
 

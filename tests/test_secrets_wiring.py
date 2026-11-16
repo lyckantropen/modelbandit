@@ -382,8 +382,10 @@ class SecretsCliTests(TempDirMixin):
 
 class JsonOutcomeVocabularyTests(TempDirMixin):
     """The machine face speaks the stdout vocabulary: each `--json` check
-    `outcome` is the verdict word the printed `secrets gate:` line states —
-    safe, sensitive, not certified, blocked — pinned at the CLI seam."""
+    `outcome` is the verdict word the printed verdict line states — the
+    `secrets gate:` lines (safe, sensitive, not certified) and the blocked
+    stop in the locked `blocked: <reason>` pattern (`blocked: free-use
+    zone`) — pinned at the CLI seam."""
 
     def run_cli(self, *argv, stdin="", zones=()):
         out, err = io.StringIO(), io.StringIO()
@@ -411,8 +413,10 @@ class JsonOutcomeVocabularyTests(TempDirMixin):
         plain, _, code = self.run_cli(*argv, stdin=stdin, zones=zones)
         self.assertEqual(code, 0)
         line = next(ln for ln in plain.splitlines()
-                    if ln.startswith("secrets gate: "))
-        printed = line[len("secrets gate: "):]
+                    if ln.startswith("secrets gate: ")
+                    or ln.startswith("blocked: "))
+        printed = line[len("secrets gate: "):] \
+            if line.startswith("secrets gate: ") else line
 
         payload, _, code = self.run_cli(*argv, "--json", stdin=stdin,
                                         zones=zones)
@@ -525,7 +529,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                         stdin="Summarize it.")
 
         self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn("blocked: free-use zone", out)
         self.assertIn(f"zone: {self.closed} (closed)", out)
         self.assertNotIn(line, out + err)        # the content never is
         self.assertNotIn("outside-file content", out)
@@ -570,7 +574,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                       stdin=f"Use {line} in deployment.")
         self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
-        self.assertNotIn("blocked by the free-use zone", out)
+        self.assertNotIn("blocked: free-use zone", out)
 
     def test_sensitive_material_in_a_closed_folder_still_exits_zero(self):
         out, _, code = self.run_check("--working-dir", self.closed,
@@ -606,7 +610,7 @@ class ZoneBlockedCheckTests(TempDirMixin):
                                         stdin="Summarize it.")
 
         self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
+        self.assertIn("blocked: free-use zone", out)
         self.assertIn(f"zone: {self.closed} (closed)", out)
         self.assertNotIn(line, out + err)
 

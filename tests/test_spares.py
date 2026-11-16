@@ -215,7 +215,7 @@ class SubstitutionTests(SpareCliMixin, unittest.TestCase):
                       "allowance, unloadable", out)
         self.assertIn("takeover: openrouter/deepseek/deepseek-v4-pro takes "
                       "the ticket over whole (1 ticket)", out)
-        self.assertIn("fence: band", out)
+        self.assertIn("band: none binds", out)
         # The record is this invocation's answer: no deal readout, no
         # projection — one question, one output.
         self.assertNotIn("deal (seed", out)
@@ -336,9 +336,9 @@ class SubstitutionFenceTests(SpareCliMixin, unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn(f"substitution: {self.QWEN} -> {self.ZAI}", out)
-        self.assertIn(f"fence: band — {self.ZAI}: domains writing; "
+        self.assertIn(f"band: {self.ZAI}: domains writing; "
                       "difficulty ceiling measured", out)
-        self.assertIn("fence: sensitive — local-only (ADR 0008)", out)
+        self.assertIn("fence: sensitive — local-only", out)
         self.assertIn(modelbandit.NON_LEAK_NOTE, out)
         self.assertIn("takeover:", out)
         # The taker is local, whatever a cloud route would have offered:

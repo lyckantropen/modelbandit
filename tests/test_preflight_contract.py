@@ -92,7 +92,7 @@ class EgressVerdictMixin:
         allowed = [line for line in out.splitlines()
                    if line.startswith("allowed: ")]
         blocked = [line for line in out.splitlines()
-                   if line == "blocked by the free-use zone"]
+                   if line == "blocked: free-use zone"]
         self.assertEqual(len(allowed) + len(blocked), 1,
                          f"exactly one verdict line expected, got:\n{out}")
         self.assertEqual(
@@ -185,7 +185,9 @@ class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
                     mid, modelbandit.Zone(path="z", posture="open"),
                     policy, sensitive_preflight=True)
                 self.assertFalse(allowed)
-                self.assertIn("exposed (trains)", printed)
+                self.assertIn(
+                    "only Exposure local may serve a Sensitive shape (trains)",
+                    printed)
 
 
 class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
@@ -207,7 +209,9 @@ class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
                     "vendor/paid", zone, policy,
                     sensitive_preflight=sensitive_preflight)
                 self.assertFalse(allowed)
-                self.assertIn("exposed (no-retention)", printed)
+                self.assertIn(
+                    "only Exposure local may serve a Sensitive shape "
+                    "(no-retention)", printed)
                 # The plan's admission refuses the same route for the same
                 # shape: the pre-flight never answers looser than the plan.
                 shape = modelbandit.Shape(
@@ -244,7 +248,9 @@ class LoopbackServingTests(EgressVerdictMixin, unittest.TestCase):
             "lmstudio/qwen/qwen3-4b", zone, policy,
             sensitive_preflight=True, endpoint=self.LAN)
         self.assertFalse(allowed)
-        self.assertIn("exposed (trains)", printed)
+        self.assertIn(
+            "only Exposure local may serve a Sensitive shape (trains)",
+            printed)
 
         allowed, _ = self.preflight_answer(
             "lmstudio/qwen/qwen3-4b", zone, policy, sensitive_preflight=True)

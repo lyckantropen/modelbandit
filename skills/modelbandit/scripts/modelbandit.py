@@ -851,6 +851,47 @@ def emit_json(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
+# --- The output contract (spec #75): one printer, locked verdict strings ----
+# Every full-sentence stop follows the one `blocked: <reason>` pattern and is
+# emitted by _print_verdict and nowhere else, so the locked vocabulary cannot
+# drift back through hand-rolled prints. The strings are pinned at the CLI
+# seam on both faces: the printed stops and the `--json` values (outcome,
+# verdict, reason) carry the same words.
+
+# The pre-flight's default-deny verdict: an id outside every Route kind names
+# no serving, so no zone, Exposure or policy label can speak for it. The same
+# words are the reason the machine face carries.
+UNKNOWN_SERVING_NAMESPACE = "unknown serving namespace"
+
+# The locked stops.
+STOP_FREE_USE_ZONE = "blocked: free-use zone"
+STOP_UNKNOWN_SERVING_NAMESPACE = f"blocked: {UNKNOWN_SERVING_NAMESPACE}"
+STOP_NO_ELIGIBLE_LOCAL_CANDIDATE = "blocked: no eligible local candidate"
+
+
+def _print_verdict(verdict: str, *, zone: Zone | None = None,
+                   model: str | None = None, reason: str | None = None,
+                   rule: str | None = None) -> None:
+    """Print one verdict with the verdict lines it owns.
+
+    The one printer for the output contract: `verdict` is the verdict line
+    itself — a full-sentence stop from the locked vocabulary above (the
+    `blocked: <reason>` pattern) or the Secrets gate's outcome verdict — and
+    the remaining arguments name the verdict lines that belong to it: the
+    zone decided (`zone: <label>`), the model judged (`model: <id>`), the
+    rule that tripped (`rule: <name>`) and the reason (`reason: <text>`).
+    """
+    print(verdict)
+    if zone is not None:
+        print(f"zone: {zone_label(zone)}")
+    if model is not None:
+        print(f"model: {model}")
+    if rule is not None:
+        print(f"rule: {rule}")
+    if reason is not None:
+        print(f"reason: {reason}")
+
+
 def closed_place(sources, zones, *, environ=None, run=None) -> Zone | None:
     """The first named source whose place would refuse a remote free route.
 
@@ -892,7 +933,9 @@ def run_secrets_check(*, working_dir: str | None = None,
     The zone of a provenance block is named; the material never is. With
     `as_json`, one JSON object replaces the lines (mode, ok, verdict,
     outcome, zone, reason, rule); the `outcome` values are the printed
-    verdict words (safe / sensitive / not certified / blocked).
+    verdict words (safe / sensitive / not certified / blocked), and the
+    blocked verdict is the locked `blocked: free-use zone` stop like every
+    full-sentence stop.
     """
     if material is None:
         try:
@@ -926,9 +969,7 @@ def run_secrets_check(*, working_dir: str | None = None,
                        "zone": zone_payload(blocked),
                        "reason": reason, "rule": None})
         else:
-            print("secrets gate: blocked by the free-use zone")
-            print(f"zone: {zone_label(blocked)}")
-            print(f"reason: {reason}")
+            _print_verdict(STOP_FREE_USE_ZONE, zone=blocked, reason=reason)
         return 0
     if not isinstance(material, str) or not material.strip():
         if as_json:
@@ -937,7 +978,7 @@ def run_secrets_check(*, working_dir: str | None = None,
                        "zone": zone_payload(zone),
                        "reason": "no material given", "rule": None})
         else:
-            print("secrets gate: not certified (no material given)")
+            _print_verdict("secrets gate: not certified (no material given)")
         return 0
     sensitive, rule = secrets_check(material, root=root,
                                     outside_files=outside_paths)
@@ -948,15 +989,14 @@ def run_secrets_check(*, working_dir: str | None = None,
                        "zone": zone_payload(zone),
                        "reason": None, "rule": rule})
         else:
-            print("secrets gate: sensitive")
-            print(f"rule: {rule}")
+            _print_verdict("secrets gate: sensitive", rule=rule)
     elif as_json:
         emit_json({"mode": "check-secrets", "ok": True,
                    "outcome": "safe", "verdict": True,
                    "zone": zone_payload(zone),
                    "reason": None, "rule": None})
     else:
-        print("secrets gate: safe")
+        _print_verdict("secrets gate: safe")
     return 0
 
 
@@ -1497,7 +1537,9 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
     states outright — a remote free route in a closed place (the predicate's
     clause), a non-local route on a Sensitive shape (the Exposure clause,
     ADR 0008: only Exposure `local` serves Sensitive work) — never a
-    Footprint, catalog or quota exclusion.
+    Footprint, catalog or quota exclusion. The Exposure clause answers in
+    words (`only Exposure local may serve a Sensitive shape (<class>)`); the
+    `exposed (<class>)` mark itself stays the ranked table's own.
 
     The candidate is judged by its serving identity alone: localness is a
     serving fact, never a catalogue claim, and this guard observes no serving
@@ -1512,13 +1554,17 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
     model_id = norm_id(model_id)
     policy = policy or {}
     candidate = candidate_for(model_id, policy, loopback=loopback)
-    return zone_prohibition(shape.posture, candidate) \
-        or exposed_prohibition(shape, candidate)
-
-
-# The pre-flight's default-deny verdict: an id outside every Route kind names
-# no serving, so no zone, Exposure or policy label can speak for it.
-UNKNOWN_SERVING_NAMESPACE = "unknown serving namespace"
+    reason = zone_prohibition(shape.posture, candidate)
+    if reason is None:
+        # The Exposure clause answers in words here: the `exposed (<class>)`
+        # mark stays the ranked table's own, and the pre-flight states the
+        # clause (ADR 0008: only Exposure `local` serves Sensitive work)
+        # with the route's class named for the human.
+        mark = exposed_prohibition(shape, candidate)
+        if mark is not None:
+            reason = (f"only Exposure local may serve a Sensitive shape "
+                      f"({candidate.exposure})")
+    return reason
 
 
 def _print_preflight_posture(zone: Zone, *, plain: bool,
@@ -1588,8 +1634,7 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
                        "reason": UNKNOWN_SERVING_NAMESPACE})
             return 0
         _print_preflight_posture(zone, plain=plain, restated=restated)
-        print(f"blocked: {UNKNOWN_SERVING_NAMESPACE}")
-        print(f"model: {model_id}")
+        _print_verdict(STOP_UNKNOWN_SERVING_NAMESPACE, model=model_id)
         return 0
     reason = zone_block(model_id, zone, policy=facts, sensitive=not plain,
                         loopback=loopback_endpoint(harness_serving_endpoint()))
@@ -1604,11 +1649,9 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     _print_preflight_posture(zone, plain=plain, restated=restated)
     if reason is not None:
         # A block is a verdict, not a failure: exit 0, the lines say blocked.
-        print("blocked by the free-use zone")
-        print(f"model: {model_id}")
-        print(f"reason: {reason}")
+        _print_verdict(STOP_FREE_USE_ZONE, model=model_id, reason=reason)
         return 0
-    print(f"allowed: {model_id}")
+    _print_verdict(f"allowed: {model_id}")
     return 0
 
 
@@ -3053,7 +3096,7 @@ def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
 
 
 def exposure_gate(shape: Shape, candidate: Candidate) -> Decision:
-    """The Exposure<->Sensitive gate; see `exposed_prohibition`."""
+    """The Exposure gate; see `exposed_prohibition`."""
     reason = exposed_prohibition(shape, candidate)
     return Decision(reason is None, reason or "")
 
@@ -3779,7 +3822,7 @@ def run_substitution(target: str, reason: str, rows: list[dict], *,
                        "reason": text, "sensitive": sensitive,
                        "zone": zone_payload(zone)})
         else:
-            print(f"blocked: {text}")
+            _print_verdict(f"blocked: {text}")
         return 0
     to = qualified_id(to_mid, local=to_mid in local)
     entry = (roster or {}).get(to_mid)
@@ -3833,9 +3876,12 @@ def run_substitution(target: str, reason: str, rows: list[dict], *,
         # ticket (a second death): the held ticket still moves whole.
         print(f"  takeover: {to} takes the held ticket over whole")
     print(f"  lane: {effect}")
-    print(f"  fence: band — {band_line(to, band)}")
+    print(f"  band: {band_line(to, band)}")
     if sensitive:
-        print("  fence: sensitive — local-only (ADR 0008)")
+        # The fence label is the sensitive local-only rule's alone (spec #75,
+        # output contract): the standing ADR 0008 citation lives in this
+        # comment, never in a printed line.
+        print("  fence: sensitive — local-only")
         print(NON_LEAK_NOTE)
     return 0
 
@@ -4566,8 +4612,8 @@ def main() -> None:
                          "paths; model-and-zone questions belong to "
                          "--assert-allowed. It needs no policy and no "
                          "network. Exit 0 for every verdict — safe, "
-                         "sensitive, not certified, or blocked by the "
-                         "free-use zone — the printed lines say which; "
+                         "sensitive, not certified, or blocked: free-use "
+                         "zone — the printed lines say which; "
                          "4 rules/config error, 2 usage errors. --json "
                          "answers with one object.")
     ap.add_argument("--outside-file", action="append", default=[], metavar="PATH",
@@ -4580,7 +4626,7 @@ def main() -> None:
                          "(assumed)`); --plain states the material is not "
                          "Sensitive, --sensitive restates the default. Exit 0 "
                          "either way — the output says `allowed: <id>` or "
-                         "`blocked by the free-use zone`, so launch only on "
+                         "`blocked: free-use zone`, so launch only on "
                          "allowed; 4 policy/config error. The zone is named, "
                          "the shape's content never is. No board or "
                          "classification is fetched; no network is needed.")
@@ -5237,7 +5283,7 @@ def main() -> None:
                            "reason": "no eligible local candidate",
                            "rule": None, "zone": zone_payload(zone)})
             else:
-                print("blocked: no eligible local candidate")
+                _print_verdict(STOP_NO_ELIGIBLE_LOCAL_CANDIDATE)
             raise SystemExit(0)
         # A completed run that found nothing to pick: the answer (why there
         # is no pick) goes to stderr on its own line — byte-identical to the

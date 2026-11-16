@@ -2702,8 +2702,10 @@ class CliTests(unittest.TestCase):
                                          zones=self.zone_of("closed"))
         self.assertEqual(code, 0)
         self.assertIn(f"zone: {self._tmp.name} (closed)", out)
-        self.assertIn("blocked by the free-use zone", out)
-        self.assertIn("reason: exposed (no-retention)", out)
+        self.assertIn("blocked: free-use zone", out)
+        self.assertIn(
+            "reason: only Exposure local may serve a Sensitive shape "
+            "(no-retention)", out)
         self.assertEqual(calls, [])          # no board, no classification fetch
 
     def test_assert_allowed_blocks_a_remote_free_route_in_a_closed_zone(self):
@@ -2713,7 +2715,7 @@ class CliTests(unittest.TestCase):
                                                  zones=self.zone_of("closed"))
                 self.assertEqual(code, 0)
                 self.assertIn("blocked", out)
-                self.assertIn("blocked by the free-use zone", out)
+                self.assertIn("blocked: free-use zone", out)
                 self.assertIn(f"zone: {self._tmp.name} (closed)", out)
                 self.assertIn(self._tmp.name, out)   # the zone is named
                 self.assertEqual(calls, [])
@@ -2723,14 +2725,16 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      sensitive=True)
         self.assertEqual(code, 0)
-        self.assertIn("exposed (trains)", out)
+        self.assertIn(
+            "only Exposure local may serve a Sensitive shape (trains)", out)
 
     def test_assert_allowed_blocks_an_exposed_paid_route_in_a_closed_zone(self):
         self.sensitive_policy({"deepseek/deepseek-v4-pro": "trains"})
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      zones=self.zone_of("closed"))
         self.assertEqual(code, 0)
-        self.assertIn("exposed (trains)", out)
+        self.assertIn(
+            "only Exposure local may serve a Sensitive shape (trains)", out)
 
     def test_an_unstated_shape_is_sensitive_and_the_output_says_so(self):
         # The dispatch contract fails closed: an unstated shape means
@@ -2740,7 +2744,8 @@ class CliTests(unittest.TestCase):
         out, _, code, _ = self.guard("deepseek/deepseek-v4-pro",
                                      zones=self.zone_of("open"))
         self.assertEqual(code, 0)
-        self.assertIn("exposed (trains)", out)
+        self.assertIn(
+            "only Exposure local may serve a Sensitive shape (trains)", out)
         self.assertIn("shape: sensitive (assumed)", out)
 
     def test_plain_states_the_shape_and_admits_the_trains_route(self):
@@ -2764,7 +2769,8 @@ class CliTests(unittest.TestCase):
                                      sensitive=True,
                                      zones=self.zone_of("open"))
         self.assertEqual(code, 0)
-        self.assertIn("exposed (trains)", out)
+        self.assertIn(
+            "only Exposure local may serve a Sensitive shape (trains)", out)
         self.assertIn("shape: sensitive (via --sensitive)", out)
 
     def test_plain_and_sensitive_contradict_as_a_usage_error(self):
@@ -2797,7 +2803,7 @@ class CliTests(unittest.TestCase):
                                              zones=self.zone_of("closed"),
                                              policy_path=absent)
         self.assertEqual(code, 0)
-        self.assertIn("blocked by the free-use zone", blocked)
+        self.assertIn("blocked: free-use zone", blocked)
         self.assertEqual(calls, [])
 
         out, err, code, calls = self.guard("deepseek/deepseek-v4-pro",
@@ -2815,7 +2821,9 @@ class CliTests(unittest.TestCase):
                                              zones=self.zone_of("closed"),
                                              policy_path=absent)
         self.assertEqual(code, 0)
-        self.assertIn("reason: exposed (no-retention)", guarded)
+        self.assertIn(
+            "reason: only Exposure local may serve a Sensitive shape "
+            "(no-retention)", guarded)
         self.assertEqual(calls, [])
 
     def test_assert_allowed_reports_a_broken_zones_file_as_a_config_error(self):
@@ -2920,7 +2928,7 @@ class CliTests(unittest.TestCase):
                                          working_dir=link)
 
         self.assertEqual(code, 0)
-        self.assertIn("blocked by the free-use zone", out)
+        self.assertIn("blocked: free-use zone", out)
         self.assertIn(f"zone: {closed_dir} (closed)", out)
         self.assertEqual(calls, [])
 
@@ -2953,7 +2961,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn(f"zone: {target} (closed) (declared: {link})", out)
-        self.assertIn("blocked by the free-use zone", out)
+        self.assertIn("blocked: free-use zone", out)
 
     def test_a_link_into_a_closed_zone_removes_remote_free_routes_from_a_ranking(self):
         self.free_risk_policy(
