@@ -92,11 +92,12 @@ _Avoid_: privacy, data policy (an account rule, not a model property), training 
 
 **Sensitive**
 A ticket only a local candidate may serve — because its material trips the
-secrets gate, or because its place sits in an `open` or `closed` zone,
-whichever is stricter. Every non-local Exposure is excluded alike:
-no-retention is a promise about storage, not about transit. A join of the
-shape — the fifth shape element, bound per invocation (`--sensitive`) — and
-the place's posture; never a mood declared mid-run.
+Secrets gate, because of an explicit `--sensitive` flag, or because its place
+is `closed`, whichever is stricter. Every non-local Exposure is excluded alike:
+no-retention is a promise about storage, not about transit. A join of those
+three causes and a property of the ticket shape only — never a place, since
+zones are binary — computed once when the run's shape is constructed and
+derived thereafter; never a mood declared mid-run.
 _Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
 
 **Local roster**
@@ -108,16 +109,26 @@ candidate's band may come from.
 _Avoid_: registry, catalogue, inventory
 
 **Zone**
-The machine-wide declaration of where free models may run. A zone is a path with a posture for everything under it, resolved by longest prefix, with anything undeclared `closed`. The effective posture at any path combines all applicable postures — from working folder settings and origin repository stance — taking the stricter (most restrictive) one, so a worktree's closed declaration covers its entire content tree without needing per-repository configuration. Zones are additive-only: a file can open less, never more.
+The machine-wide declaration of where free models may run, in a binary
+posture: `open` or `closed` — two words, no ladder, no third value. Open
+unless declared: anything undeclared is `open`, and an absent zones file
+means everything is open. The zones file is only an opt-out list of paths
+declared `closed` — it can add closures and can never reopen anything, so
+the inverted posture (closed everywhere, open exceptions) is not expressible.
+Each declaration is a path declared `closed` for everything under it,
+resolved by longest prefix. The effective posture at any path combines all
+applicable declarations — from working folder settings and origin repository
+stance — taking the stricter (most restrictive) one, so one closed
+declaration covers that repository's worktrees without needing
+per-repository configuration.
 _Avoid_: allowlist, permission (it is a place, not a grant)
 
 **Secrets gate**
-The check run at collect-demand: the project's optional secrets file
-(`modelbandit.secrets.json`), falling back to the built-in default — content
-from a gitignored file inside the working folder, from files outside it
-(including content supplied from named outside files), passwords/tokens/keys,
-and identifiers readable from this machine's state — applied to the shape's
-material. Content-inclusion, any-of; a mere path mention does not trip it.
+The check that applies the built-in credential, identifier, machine-fact, and
+gitignored-content rules to the material a run is given — run automatically at
+deal time (the run reads its own ticket material), and manually via the check
+mode for a single material. Content-inclusion, any-of; a mere path mention
+does not trip it.
 Outcome: Sensitive when an inclusion is found, safe when provided material has
 none, or not certified when no material is present.
 _Avoid_: detector, classifier (suggests learned behaviour; it is a list)
@@ -136,7 +147,7 @@ _Avoid_: complexity (it names both halves at once and so neither)
 **Capability band**
 What a local model's roster entry claims it may serve: the domains it handles,
 and ceilings on Difficulty and on context demand, set as a thin structured
-header beside its prose. Author-owned and binding — the gate enforces the
+header beside its prose. Author-owned and binding — the Band gate enforces the
 band, so understating it costs only reach, while overstating it fails at the
 ticket.
 _Avoid_: description, profile, skill
@@ -175,7 +186,7 @@ serving alone: market (an OpenRouter paid slug), free-slug (an OpenRouter
 `:free` slug), harness (an OpenCode `opencode/*` model), plan (an OpenCode Go
 `opencode-go/*` model), or local (served on this machine). Never a price,
 never a policy claim; an unrecognized namespace fails closed. Plan and metered routes are captured here as route kinds — they're not separate concepts. The free-slug kind is also the Free route category.
-_Plan route_: A candidate served through a subscription plan (Route kind `plan`): $0 cash within its Allowance, scored as risk of its Draw. Not a Free route — the zone gate does not refuse it, the free counter does not count it, and it is the family model at full quality, not a rate-limited surrogate._
+_Plan route_: A candidate served through a subscription plan (Route kind `plan`): $0 cash within its Allowance, scored as risk of its Draw. Not a Free route — the Zone gate does not refuse it, the free counter does not count it, and it is the family model at full quality, not a rate-limited surrogate._
 _Metered route_: A candidate billed per ticket at its list price (Route kind `market`): Plan route's price-class counterpart, Free route's opposite. The default economics — nothing prepaid, every ticket on the bill._
 _Avoid_: provider, price class (that is Free route), catalogue label
 
@@ -223,8 +234,9 @@ it would burn — one rule, two cases. A Plan route prices as risk of its own
 list-priced Draw; a Free route has no Draw and prices against the pool's
 cheapest paid ticket. Never zero, so marginal zero cannot win by division, and
 always below a healthy paid row, so it can still win. Applied uniformly to Free
-routes regardless of Exposure — the Exposure difference is decided by the
-Sensitive gate, not by price. If the pool has no priced paid ticket, use the $1
+routes regardless of Exposure — the Exposure difference is decided by
+the Exposure gate, not by price. If the pool has no priced paid ticket, use
+the $1
 nominal reference ticket as the basis for Free risk.
 _Avoid_: free price, effective cost, shadow price
 
@@ -266,7 +278,7 @@ The mechanical check at the source: free-slug and harness candidates are dropped
 _Avoid_: route kind, admission (those say what survives; this says where it starts)
 
 **Exposure gate**
-The sensitivity filter that joins shape's flag with its place: non-local Exposures (`no-retention` and `trains`) are excluded when the effective posture is ≥ `sensitive`. This is how zones enforce local-only for sensitive work.
+The sensitivity filter: non-local Exposures (`no-retention` and `trains`) are excluded whenever the shape is sensitive, so only Exposure `local` may serve it. This is how Exposure enforces local-only for sensitive work.
 _Avoid_: capability band, admission (those say what survives; this says where it starts)
 
 **Band gate**
