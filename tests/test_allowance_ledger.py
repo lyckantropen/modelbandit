@@ -611,8 +611,10 @@ class PickEvictionCliTests(unittest.TestCase):
         printed, err = self.run_main(self.world(
             [market_model()], [(PLAN, 0.6), (SECOND, 0.4)]))
         self.assertNotIn("default pick", printed)
-        self.assertIn("no candidate admitted", err)
-        self.assertIn(PLAN, err)
+        self.assertTrue(printed.endswith("blocked: no candidate admitted\n"),
+                        printed)
+        self.assertIn(PLAN, printed)
+        self.assertIn(SECOND, printed)
 
     def test_plan_share_counts_absorbed_tickets_metered(self):
         # The plan row takes 2 tickets (cap 2.0, list price 1.0), the third

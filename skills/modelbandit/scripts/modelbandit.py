@@ -372,7 +372,6 @@ _ROUTE_FACETS = {
         "zone_refusable_in_closed_zones": False,
         "default_exposure": "no-retention",
         "spends_free_request_counter": False,
-        "needs_policy_catalog_entry": False,
         "priced_by_endpoint_spread": True,
         "standing_from": "boards",
     },
@@ -380,7 +379,6 @@ _ROUTE_FACETS = {
         "zone_refusable_in_closed_zones": True,
         "default_exposure": "trains",
         "spends_free_request_counter": True,
-        "needs_policy_catalog_entry": False,
         "priced_by_endpoint_spread": False,
         "standing_from": "own board row",
     },
@@ -388,7 +386,6 @@ _ROUTE_FACETS = {
         "zone_refusable_in_closed_zones": True,
         "default_exposure": "trains",
         "spends_free_request_counter": False,
-        "needs_policy_catalog_entry": True,
         "priced_by_endpoint_spread": False,
         "standing_from": "family share",
     },
@@ -396,7 +393,6 @@ _ROUTE_FACETS = {
         "zone_refusable_in_closed_zones": False,
         "default_exposure": "no-retention",
         "spends_free_request_counter": False,
-        "needs_policy_catalog_entry": True,
         "priced_by_endpoint_spread": False,
         "standing_from": "deferred to plan economics",
     },
@@ -404,7 +400,6 @@ _ROUTE_FACETS = {
         "zone_refusable_in_closed_zones": False,
         "default_exposure": "local",
         "spends_free_request_counter": False,
-        "needs_policy_catalog_entry": True,
         "priced_by_endpoint_spread": False,
         "standing_from": "family share",
     },
@@ -469,9 +464,8 @@ def is_free_route(mid: str, *, local: bool = False) -> bool:
     slug, an OpenCode `opencode/*` model, or a model this machine serves.
     Derived from the Route-kind seam, never re-spelled from the id's shape:
     what serves an id is the classifier's answer alone. This is what the
-    Nominal floor, the Context gate, the catalog gate and the Free share
-    count - not the zone or quota question; those gates ask their own
-    facets."""
+    Nominal floor, the Context gate and the Free share count - not the zone
+    or quota question; those gates ask their own facets."""
     return classify_route(mid, local=local) in FREE_KINDS
 
 
@@ -867,6 +861,8 @@ UNKNOWN_SERVING_NAMESPACE = "unknown serving namespace"
 STOP_FREE_USE_ZONE = "blocked: free-use zone"
 STOP_UNKNOWN_SERVING_NAMESPACE = f"blocked: {UNKNOWN_SERVING_NAMESPACE}"
 STOP_NO_ELIGIBLE_LOCAL_CANDIDATE = "blocked: no eligible local candidate"
+STOP_NO_CANDIDATE_ADMITTED = "blocked: no candidate admitted"
+STOP_NO_RANKED_CANDIDATES = "blocked: no ranked candidates"
 
 
 def _print_verdict(verdict: str, *, zone: Zone | None = None,
@@ -2554,8 +2550,10 @@ def merge_free_candidates(share: dict, models: dict, free_models: dict,
     """Merge cataloged OpenCode models and ranked :free routes into candidates.
 
     OpenRouter :free rows retain their own slug even when the API only resolves
-    them through a paid family model. Uncataloged or unsummarized ranked routes
-    stay visible but the catalog gate prevents the Deal from using them.
+    them through a paid family model. Uncataloged or unsummarized ranked Free
+    routes stay visible; a missing summary is marked as a Gap and does not keep
+    a pool from playing the route. The plans catalog is separate and still
+    decides which plan routes exist.
     OpenCode catalog entries are added with a discounted share of their family's
     domain share (the family's revealed preference standing in for a route with
     no board row); their context and Exposure remain curated facts, not inferred
@@ -2844,12 +2842,16 @@ class Candidate:
     exposure: str
     is_free: bool = False
     context_length: int | None = None
-    cataloged: bool = True
     completion_cap: int | None = None
     output_multiplier: float = 1.0
     local: bool = False
     band: dict | None = None
     summary_missing: bool = False
+
+
+def _shown_mid(mid: str, candidate: Candidate) -> str:
+    """Format a row id with the table's Gap mark, byte-identically everywhere."""
+    return f"{'† ' if candidate.summary_missing else ''}{mid}"
 
 
 def facets_for_candidate(candidate: Candidate) -> dict | None:
@@ -2959,9 +2961,7 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     carry simply has no band to judge."""
     catalog_match = longest_prefix_match(mid, policy.get("free_models", {}))
     catalog_entry = catalog_match[1] if catalog_match is not None else {}
-    plan_match = longest_prefix_match(mid, policy.get("plans", {}))
     is_free = is_free_route(mid, local=local)
-    facets = facets_for(mid, local=local)
     context_length = None
     if model:
         # The window the live serving reported for this candidate (the
@@ -2978,13 +2978,6 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
     if (completion_cap is None and is_free
             and isinstance(catalog_entry, dict)):
         completion_cap = catalog_entry.get("max_completion_tokens")
-    # Catalog presence remains a fact about where a serving comes from. It
-    # does not decide admission; the plans catalog's pool filters still decide
-    # which plan routes exist, while an absent Free summary is rendered as a
-    # mark below the table.
-    needs_catalog_entry = (facets["needs_policy_catalog_entry"]
-                           if facets else True)
-    is_plan = is_plan_route(mid, local=local)
     roster_entry = roster.get(mid) if roster else None
     band = roster_entry.get("band") if isinstance(roster_entry, dict) else None
     return Candidate(id=mid,
@@ -3000,9 +2993,6 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                       completion_cap=completion_cap,
                       output_multiplier=(mult_for(model, intent) if model
                                          else EFFORT_MULTIPLIERS[intent]),
-                      cataloged=(not needs_catalog_entry
-                                 or (is_free and catalog_match is not None)
-                                 or (is_plan and plan_match is not None)),
                       summary_missing=(bool(is_free)
                                        and not _free_summary(
                                            catalog_entry,
@@ -3163,7 +3153,10 @@ def context_gate(shape: Shape, candidate: Candidate) -> Decision:
     admitted, but return the same reasons for the ranked table to flag.
     """
     reasons = []
-    if shape.input_tokens is not None and candidate.context_length is not None:
+    if candidate.context_length is None:
+        if candidate.is_free:
+            reasons.append("unknown context window")
+    elif shape.input_tokens is not None:
         required = shape.input_tokens * shape.context_headroom
         available = candidate.context_length * shape.context_margin
         if required > available:
@@ -4034,23 +4027,23 @@ def domain_rankings(classif: dict, domains: dict, models: dict,
 
 def drift_keys(all_ranked: set, summaries: dict, signals: dict,
                free_models: dict | None = None):
-    """The check's gap/stale derivation, shared by the scope report and the
+    """The check's Gap/Stale derivation, shared by the scope report and the
     anchors scope: ranked mids without a summary; summary and signal keys
     with no current rank among the top-cut mids.
 
-    A cataloged Free route's ``summary_ref`` is how its family summary
-    reaches it everywhere else in this file — the catalog gate
+    A Free route's ``summary_ref`` is how its family summary
+    reaches it everywhere else in this file — the summary resolver
     (``_free_summary``) and the table's summary column
     (``summary_for_candidate``) both resolve it — and an ``opencode/*`` or
     local id can never prefix-match the family key. So the ref counts here
-    too: a gap is a summary the route does not have, not one spelled in
+    too: a Gap is a summary the route does not have, not one spelled in
     another namespace. Symmetrically, a summary key a ranked route
     references is not stale — it is still serving. An unresolvable ref
     silences neither side."""
     free_models = free_models or {}
 
     def catalog_ref(mid: str) -> str | None:
-        """The resolvable family summary a ranked cataloged route stands on,
+        """The resolvable family summary a ranked Free route stands on,
         gated the way ``summary_for_candidate`` gates it: a paid mid sharing
         the entry's prefix does not borrow the ref."""
         match = longest_prefix_match(mid, free_models)
@@ -5230,7 +5223,7 @@ def main() -> None:
         admit_cell = ""
         if show_admission:
             admit_cell = f" {decisions[mid].reason or '—'} |"
-        shown_mid = f"{'† ' if candidates[mid].summary_missing else ''}{mid}"
+        shown_mid = _shown_mid(mid, candidates[mid])
         print(f"| {i} | {shown_mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
               f"{delta} | {ctx} | {exposure} | {rung} |{admit_cell}")
@@ -5279,12 +5272,12 @@ def main() -> None:
                                  loopback=loopback)
                     if free_details or is_free_route(mid, local=mid in local_ids)
                     else "—")
-        shown_mid = f"{'† ' if candidates[mid].summary_missing else ''}{mid}"
+        shown_mid = _shown_mid(mid, candidates[mid])
         print(f"| {i} | {shown_mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
 
     if any(candidate.summary_missing for candidate in candidates.values()):
-        print("\n† missing summary: editorial completeness is not an admission verdict.")
+        print("\n† Gap: editorial completeness is not an admission verdict.")
 
     odd = {k: v for k, v in matches.items() if v in ("heuristic", "unresolved")}
     if odd:
@@ -5318,25 +5311,19 @@ def main() -> None:
             else:
                 _print_verdict(STOP_NO_ELIGIBLE_LOCAL_CANDIDATE)
             raise SystemExit(0)
-        # A completed run that found nothing to pick: the answer (why there
-        # is no pick) goes to stderr on its own line — byte-identical to the
-        # v1 message — and the status stays 0 (exit contract v2, ADR-0004).
-        # A --json run answers with the object instead: one object per
-        # invocation, every verdict included (issue #41, Build 2).
-        if excluded:
-            stop_reason = ("shape: no candidate admitted — every ranked "
-                           f"candidate is excluded ({', '.join(excluded)}); drop "
-                           "the restrictive shape setting or pick another domain")
-            stop_verdict = "no-candidate-admitted"
-        else:
-            stop_reason = "domain has no ranked candidates in the model list"
-            stop_verdict = "no-ranked-candidates"
+        # A completed run that found nothing to pick: the stop uses the
+        # one blocked-verdict printer and the status stays 0 (exit contract
+        # v2, ADR-0004). A --json run answers with the same verdict and reason
+        # in its one object (issue #41, Build 2).
+        stop_line = (STOP_NO_CANDIDATE_ADMITTED if excluded
+                     else STOP_NO_RANKED_CANDIDATES)
         if args.json:
             emit_json({"mode": "budget", "ok": True,
-                       "verdict": stop_verdict, "reason": stop_reason,
+                       "verdict": "blocked",
+                       "reason": stop_line.removeprefix("blocked: "),
                        "rule": None, "zone": zone_payload(zone)})
         else:
-            print(stop_reason, file=sys.stderr)
+            _print_verdict(stop_line)
         raise SystemExit(0)
     if excluded and rows_out \
             and not decisions[rows_out[0][0]].admitted:
@@ -5367,14 +5354,14 @@ def main() -> None:
         # ticket files are read here and each is assessed through the shared
         # material-assessment entry point — built-in credential, identifier,
         # machine-fact and gitignored-content rules, scoped to that file's
-        # own directory, with no project rules file anywhere. The verdict
-        # splits the batch at collection: a tripped ticket is reported held
-        # and excluded from this invocation's deal — never silently dropped,
-        # never dealt to a cloud route. A run that already states the
-        # Sensitive shape (the flag, or a closed place) is the held lane's
-        # follow-up, so its trips deal under the local-only fence instead of
-        # holding; the deal's seed math is untouched — one invocation still
-        # deals one shape.
+        # own directory, with no project rules file anywhere. US9 reports a
+        # tripped ticket as held when excluded from this invocation's ordinary
+        # deal; US10 assigns it to its own follow-up Sensitive run, local-only.
+        # In that follow-up the ticket is dealt, not held or excluded, so a
+        # held line would contradict US9. A run that already states the
+        # Sensitive shape (the flag, or a closed place) is that follow-up.
+        # The deal's seed math is untouched — one invocation still deals one
+        # shape.
         if args.ticket_files:
             ordinary = 0
             for index, path in enumerate(args.ticket_files, 1):

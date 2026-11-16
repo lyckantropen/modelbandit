@@ -597,8 +597,10 @@ class SubmoduleFixtureTests(TempDirMixin):
 
 
 def candidate(mid, *, exposure="no-retention", is_free=False, local=False):
+    # These tests isolate Zone and Exposure behavior; use a known window so
+    # the independent Context gate does not decide their verdicts.
     return modelbandit.Candidate(id=mid, exposure=exposure, is_free=is_free,
-                          local=local)
+                                 local=local, context_length=262_144)
 
 
 def shape(posture="open", *, sensitive=False):

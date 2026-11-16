@@ -386,7 +386,7 @@ class CliTests(unittest.TestCase):
     def test_a_catalog_summary_ref_closes_its_gap(self):
         # An opencode/* id can never prefix-match its family summary key,
         # but it resolves one through summary_ref everywhere else in the
-        # file (catalog gate, table column) — so the drift set counts it
+        # file (the Gap/table summary resolver) — so the drift set counts it
         # as having a summary too. The route must actually rank for the
         # assertion to mean anything, hence the ranking run first.
         pol = json.loads(json.dumps(POLICY))
@@ -408,7 +408,7 @@ class CliTests(unittest.TestCase):
 
     def test_a_summary_a_ranked_route_references_is_not_stale(self):
         # Stale is the mirror of the gap: without the summary_ref seam,
-        # "stale/model" would retire here even though a ranked cataloged
+        # "stale/model" would retire here even though a ranked Free
         # route still serves it — the ref is how the family summary
         # reaches an opencode/* id.
         pol = json.loads(json.dumps(POLICY))
@@ -1560,7 +1560,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("†", row)
         self.assertNotIn("free route requires a catalog entry and summary", out)
         explanation = (
-            "† missing summary: editorial completeness is not an admission verdict.")
+            "† Gap: editorial completeness is not an admission verdict.")
         self.assertEqual(out.count(explanation), 1)
 
         # The same candidate remains in the eligible pool and can take the
@@ -3123,8 +3123,25 @@ class CliTests(unittest.TestCase):
         self.assertIn("† vendor/unknown:free", row)
         self.assertNotIn("free route requires a catalog entry and summary", out)
         self.assertEqual(
-            out.count("† missing summary: editorial completeness is not an admission verdict."),
+            out.count("† Gap: editorial completeness is not an admission verdict."),
             1)
+
+    def test_free_candidate_with_unknown_window_is_excluded_from_the_deal(self):
+        world = build_world()
+        mid = "vendor/unknown:free"
+        world["models"].append(make_model(mid, "0", "0", "0"))
+        world["classifications"]["classifications"][0]["models"].append(
+            {"id": mid, "tag_usage_share": 0.2})
+
+        out, _, code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--tickets", "3", world=world)
+
+        self.assertIsNone(code)
+        row = next(line for line in out.splitlines()
+                   if line.startswith("|") and f"{mid} |" in line)
+        self.assertIn("unknown context window", row)
+        deal = out[out.index("deal (seed"):out.index("projection at")]
+        self.assertNotIn(f"| {mid} |", deal)
 
     def test_canonical_resolution_regression_prices_august_endpoints(self):
         out, _, _, _ = self.run_cli("--domain", "writing")

@@ -6,10 +6,9 @@ the Free catalog or the local probe can carry it. The validated `plans`
 policy section is its one catalog: the assembly step joins a cataloged plan
 row with the minimal record the table and the gates honestly consume (the $0
 cash price within its Allowance; no per-1M market price, no endpoint spread,
-no context window), the pools' plan filters release for the rows that section
-catalogs, and the catalog gate asks it instead of refusing every plan id. An
-uncataloged plan id still refuses with the catalog reason, and the Free
-catalog keeps refusing plan entries (test_free_catalog_kinds.py).
+no context window), and the pools' plan filters release only rows that section
+catalogs. Admission does not decide which plan routes exist; the Free catalog
+still refuses plan entries (test_free_catalog_kinds.py).
 
 Popularity is the family's: a family served twice — its metered twin and its
 plan serving — divides its board share across the two full-quality rows, so
@@ -225,18 +224,16 @@ class PlanPoolTests(unittest.TestCase):
 
 
 class PlanCatalogFactTests(unittest.TestCase):
-    """The plans catalog controls pool membership, not admission verdicts."""
+    """Admission is separate from the pools' plan-entry membership filter."""
 
-    def test_a_plans_cataloged_plan_row_is_admitted(self):
+    def test_a_plan_row_is_not_refused_by_admission(self):
         candidate = modelbandit.candidate_for(
             PLAN, {"plans": {PLAN: plan_entry()}})
-        self.assertTrue(candidate.cataloged)
         self.assertTrue(modelbandit.admit(modelbandit.Shape(),
                                           candidate).admitted)
 
-    def test_an_uncataloged_plan_row_is_not_refused_by_admission(self):
+    def test_a_plan_row_without_an_entry_is_not_refused_by_admission(self):
         candidate = modelbandit.candidate_for(PLAN, {})
-        self.assertFalse(candidate.cataloged)
         decision = modelbandit.admit(modelbandit.Shape(), candidate)
         self.assertTrue(decision.admitted)
 
@@ -268,7 +265,6 @@ class PlanCatalogFactTests(unittest.TestCase):
         candidate = modelbandit.candidate_for(PLAN, policy, local=True)
         self.assertTrue(candidate.local)
         self.assertTrue(candidate.is_free)
-        self.assertTrue(candidate.cataloged)
         self.assertEqual(candidate.exposure, "local")
         self.assertTrue(modelbandit.admit(modelbandit.Shape(),
                                           candidate).admitted)

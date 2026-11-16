@@ -173,8 +173,9 @@ class HeldLaneTests(TicketFilesCliMixin, unittest.TestCase):
             "--sensitive", **listing)
 
         self.assertIsNone(code)
-        # This run IS the held lane: the trips deal under the local-only
-        # fence instead of holding — nothing is reported held.
+        # This run IS the US10 follow-up: the trips deal local-only instead of
+        # being excluded. US9's held line therefore does not describe this
+        # invocation — nothing is reported held.
         self.assertNotIn("held:", out)
         # Both tickets dealt, every one of them to the local candidate:
         # no held ticket is ever dealt to a non-local route.
@@ -190,6 +191,27 @@ class HeldLaneTests(TicketFilesCliMixin, unittest.TestCase):
             "--sensitive", **listing)
         self.assertEqual(out[out.index("deal (seed"):],
                          out2[out2.index("deal (seed"):])
+
+    def test_a_closed_place_deals_tripped_tickets_without_a_held_line(self):
+        secret1, secret2 = self.ticket_files(SECRET_TICKET, SECRET_TICKET)
+        self.local_policy()
+        listing = dict(local_listing={QWEN},
+                       local_models={QWEN: {"id": QWEN,
+                                            "context_length": 262_144}})
+
+        # A closed place creates the same Sensitive follow-up shape as the
+        # explicit flag: these files are dealt, not excluded or reported held.
+        closed_out, _, closed_code, _ = self.run_cli(
+            "--domain", "writing", "--deal", "--seed", "held-lane",
+            "--ticket-files", secret1, "--ticket-files", secret2,
+            zones=[os.getcwd()], **listing)
+        self.assertIsNone(closed_code)
+        self.assertNotIn("held:", closed_out)
+        self.assertEqual(self.dealt_tickets(closed_out), 2)
+        closed_block = closed_out[closed_out.index("deal (seed"):
+                                   closed_out.index("projection at")]
+        self.assertIn(f"| {QWEN} |", closed_block)
+        self.assertNotIn("openrouter/", closed_block)
 
     def test_held_tickets_with_no_eligible_local_candidate_stop_through_printer(self):
         # The real decision the held lane can face: no local candidate can

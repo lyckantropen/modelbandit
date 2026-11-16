@@ -24,8 +24,8 @@ work — you name the run's ticket files and the script reads them itself,
 applying the built-in checks at deal time: the Secrets gate's credential,
 identifier, machine-fact and gitignored-content rules over the material
 each ticket carries, with no pre-flight choreography and no setup files.
-Tickets that pass are ordinary tickets and are dealt across the eligible
-pool; tickets that trip are reported held — `held: <ids> (sensitive)` —
+Tickets that are not Sensitive are ordinary tickets and are dealt across the
+eligible pool; tickets that trip are reported held — `held: <ids> (sensitive)` —
 never silently dropped and never escalated to a cloud route; a follow-up
 run deals them local-only, one shape per invocation. Presenting and
 offering changes are the only places you are asked: when a held ticket has

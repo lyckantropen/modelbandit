@@ -33,9 +33,15 @@ construction.
 _Avoid_: batch, group
 
 **ordinary ticket**
-A ticket that is not sensitive: the default posture for most work, with no
+A ticket that is not Sensitive: the default posture for most work, with no
 special constraints at any gate — only what every ticket has.
 _Avoid_: ordinary request (it names a class of ticket; this defines the shape)
+
+**held**
+A ticket whose material trips the Secrets gate, reported by its collection id
+and excluded from that ordinary invocation's Deal. It remains for a follow-up
+Sensitive run, local-only: never silently dropped or escalated to a cloud route.
+_Avoid_: dropped ticket, cloud fallback
 
 **Spare**
 A candidate the deal names but does not deal: the highest-Score eligible
@@ -153,11 +159,12 @@ ticket.
 _Avoid_: description, profile, skill
 
 **Context gate**
-The mechanical exclusion of free candidates whose Footprint exceeds their
-capacity, on either dimension — the input budget against a share of the context
-window, the rung-priced output against a share of the completion cap. Free-tier
-only: a free route has no paid tier to upgrade into, so an overrun is a hard
-failure, not taste. The paid tier is flagged and stays judge-only.
+The mechanical exclusion of Free candidates whose Footprint exceeds capacity
+on either dimension, or whose context window is unknown. Input is checked
+against a share of the context window; rung-priced output against a share of
+the completion cap. Free-tier only: a free route has no paid tier to upgrade
+into, so an overrun or unknown window fails closed, not taste. The paid tier
+is flagged and stays judge-only.
 _Avoid_: context flooring, token cap
 
 **Free risk**

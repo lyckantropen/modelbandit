@@ -90,6 +90,19 @@ class OneInteractionLoopTests(unittest.TestCase):
         # choreography is instructed any more.
         self.assertNotIn("--check-secrets", collect)
 
+    def test_ordinary_tickets_match_the_glossary_definition(self):
+        loop = section("One interaction loop")
+        self.assertIn("Tickets that are not Sensitive are ordinary tickets",
+                      loop)
+        self.assertNotIn("Tickets that pass are ordinary tickets", loop)
+        with open(os.path.join(ROOT, "GLOSSARY.md"), encoding="utf-8") as f:
+            glossary = flat(f.read())
+        self.assertIn("**ordinary ticket** A ticket that is not Sensitive",
+                      glossary)
+        self.assertIn("**held** A ticket whose material trips the Secrets gate",
+                      glossary)
+        self.assertIn("follow-up Sensitive run, local-only", glossary)
+
 
 class ReferenceDefinitionOwnershipTests(unittest.TestCase):
     """The definition-ownership split: the glossary owns term definitions;

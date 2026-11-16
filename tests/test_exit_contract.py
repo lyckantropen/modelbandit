@@ -1,17 +1,18 @@
 """Exit contract v2, verdict matrix (issue #41): status says whether the
 tool ran; output says what's true.
 
-Every answer across every mode exits **0**, each on the stream it has always
-used: the verdict lines stay on stdout, the ranking's stop messages stay
-byte-identical on stderr, and the retired codes (1 sensitive, 3 not
-certified, 5 zone block, over-budget's borrowed 2) are never assigned.
+Every answer across every mode exits **0**: verdict lines, including ranking
+stops, use stdout; operational failures retain their stderr payload. The
+retired codes (1 sensitive, 3 not certified, 5 zone block, over-budget's
+borrowed 2) are never assigned.
 Usage stays 2 (argparse's own channel), rules/config stays 4, and a network
 failure keeps its message payload — nonzero in a shell — pinned here as
 *not* an answer.
 
-`LineOutputParityTests` pins the default (no `--json`) line output
-byte-identical to the v1 egresses: the goldens below were captured from the
-pre-v2 script on the same fixture shape. JSON mode is pinned in
+`LineOutputParityTests` pins unchanged default (no `--json`) line output
+byte-identical to the v1 egresses. The ranking stop lines intentionally use
+the spec's unified printer instead of the old v1 stderr sentences; both their
+stdout and JSON forms are pinned here. JSON mode is otherwise pinned in
 `JsonModeTests`.
 """
 
@@ -240,7 +241,7 @@ class VerdictMatrixTests(ModelbanditCli):
         self.assertNotIn("no candidate admitted", err)
         self.assertNotIn("no candidate admitted", out)
 
-    def test_no_ranked_candidates_stops_on_stderr_with_zero(self):
+    def test_no_ranked_candidates_uses_the_blocked_printer_with_zero(self):
         # The domain's tag is known but ranks no model: an empty pool is a
         # completed run's answer, not a failure.
         self.write_policy(policy_with(domains={"writing": ["content_writing"]},
@@ -251,8 +252,36 @@ class VerdictMatrixTests(ModelbanditCli):
         out, err, code = self.run_cli("--domain", "writing", world=world)
 
         self.assertEqual(code, 0)
-        self.assertIn("domain has no ranked candidates in the model list", err)
-        self.assertNotIn("has no ranked candidates", out)
+        self.assertNotIn("no ranked candidates", err)
+        self.assertTrue(out.endswith("blocked: no ranked candidates\n"), out)
+
+    def test_no_admitted_candidates_uses_the_blocked_printer_and_json_reason(self):
+        # The Context gate excludes the only ranked Free route when its window
+        # is unknown; the stop goes through the same printer and JSON contract.
+        mid = "vendor/unknown:free"
+        world = build_world()
+        world["models"].append({
+            "id": mid, "supported_parameters": [],
+            "pricing": {"prompt": "0", "completion": "0",
+                        "input_cache_read": "0"}})
+        world["classifications"]["classifications"] = [{
+            "tag": "content_writing", "usage_share": 1.0,
+            "models": [{"id": mid, "tag_usage_share": 1.0}],
+        }]
+
+        out, err, code = self.run_cli("--domain", "writing", world=world)
+        self.assertEqual(code, 0)
+        self.assertNotIn("no candidate admitted", err)
+        self.assertTrue(out.endswith("blocked: no candidate admitted\n"), out)
+        self.assertIn("unknown context window", out)
+
+        out, err, code = self.run_cli("--domain", "writing", "--budget",
+                                      "1000", "--json", world=world)
+        self.assertEqual(code, 0)
+        self.assertNotIn("no candidate admitted", err)
+        payload = json.loads(out.splitlines()[-1])
+        self.assertEqual(payload["verdict"], "blocked")
+        self.assertEqual(payload["reason"], "no candidate admitted")
 
     # --- AC2: a failure is never an answer -------------------------------
 
@@ -517,8 +546,8 @@ class JsonModeTests(ModelbanditCli):
         self.assertNotIn("no ranked candidates", err)
         payload = self.last_json_line_is_the_only_json_line(out)
         self.assertEqual(payload["mode"], "budget")
-        self.assertEqual(payload["verdict"], "no-ranked-candidates")
-        self.assertIn("no ranked candidates", payload["reason"])
+        self.assertEqual(payload["verdict"], "blocked")
+        self.assertEqual(payload["reason"], "no ranked candidates")
 
     def test_json_alongside_a_losing_flag_is_a_usage_error(self):
         # The flag would be silently ignored - dispatch order decides which

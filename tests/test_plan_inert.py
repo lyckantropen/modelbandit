@@ -93,9 +93,8 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
         self.assertIn(PLAN, [row["mid"] for row in rows])
 
         facts = modelbandit.candidate_for(PLAN, {"plans": plans})
-        self.assertTrue(facts.cataloged)
-        # Admit never refuses on completeness: a cataloged plan row is admitted
-        # with its reason empty, and the pools decide its play instead.
+        # Admission has no catalog-completeness verdict; the pool assertions
+        # above pin that the plans entry is what lets this route be played.
         decision = modelbandit.admit(modelbandit.Shape(), facts)
         self.assertTrue(decision.admitted)
         self.assertEqual(decision.reason, "")
@@ -130,9 +129,8 @@ class PlanEntersThroughItsCatalogTests(unittest.TestCase):
         self.assertEqual([row["mid"] for row in rows], [MARKET])
 
         facts = modelbandit.candidate_for(PLAN, {})
-        self.assertFalse(facts.cataloged)
-        # The verdict is what disappears (the gate), not the requirement — no
-        # plans entry still means the pools and the deal never play this id.
+        # Admission remains independent of plan existence; the pool checks
+        # above pin that no plans entry means no pool or deal can play this id.
         decision = modelbandit.admit(modelbandit.Shape(), facts)
         self.assertTrue(decision.admitted)
 
