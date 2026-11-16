@@ -1,9 +1,13 @@
-"""SKILL.md contract pins for the free-use zones setup (issue #36).
+"""SKILL.md contract pins (issue #36 originally; #78 rewrote the flow).
 
-The README links `SKILL.md#set-up-the-free-use-zones` and quotes the
-interview question verbatim, so the section heading, the interview's
-substance and step 2's offer are a contract, not prose that may drift.
-Document reads only — no behaviour, no network, no machine state.
+The skill's flow is one interaction loop — assess, deal, present, offer
+changes — with the closed-area rule stated once and the mechanical floor as
+the loop's one-line rule. The setup interviews and the five-rule closed-zone
+protocol are deleted; the doc-contract tests that pinned them (the interview
+sections, step 2's offer, the protocol launch) left with the prose they
+pinned, not updated. The Reference keeps operational readout shapes only —
+the glossary owns term definitions. Document reads only — no behaviour, no
+network, no machine state.
 """
 
 import os
@@ -43,73 +47,73 @@ def step(number, title):
     return flat(body)
 
 
-class ZonesSetupSectionTests(unittest.TestCase):
-    """AC1: the interview section exists with the retention-aware question,
-    the worktree-root rule, the default-closed statement and the review
-    step — beside the secrets interview, mirroring its shape."""
+class OneInteractionLoopTests(unittest.TestCase):
+    """Ticket #78: one interaction loop replaces the setup interviews and
+    the closed-zone protocol. The loop is stated once as short prose; the
+    closed-area rule is one sentence, no five-rule ceremony; the mechanical
+    floor is the loop section's one-line rule, exactly once in the file."""
 
-    def setUp(self):
-        self.body = section("Set up the free-use zones")
+    def test_the_loop_is_stated_once_in_its_own_section(self):
+        body = section("One interaction loop")
+        for word in ("assess", "deal", "present", "offer changes"):
+            self.assertIn(word, body)
+        self.assertEqual(TEXT.count("## One interaction loop"), 1)
 
-    def test_the_heading_is_exact_so_the_readme_anchor_resolves(self):
-        self.assertEqual(TEXT.count("## Set up the free-use zones"), 1)
-        self.assertEqual(TEXT.count("## Set up the secrets file"), 1)
-        # ...and it sits beside the secrets interview, before Reference
-        titles = [h.splitlines()[0] for h in HEADINGS]
+    def test_the_mechanical_floor_sentence_appears_exactly_once(self):
+        sentence = ("facts and arithmetic stay mechanical; "
+                    "editorial completeness is a mark in the table.")
+        self.assertEqual(flat(TEXT).count(sentence), 1)
+        self.assertIn(sentence, section("One interaction loop"))
+
+    def test_the_closed_area_rule_is_stated_once_without_ceremony(self):
         self.assertEqual(
-            titles[titles.index("## Set up the secrets file") + 1],
-            "## Set up the free-use zones")
-        self.assertEqual(
-            titles[titles.index("## Set up the free-use zones") + 1],
-            "## Reference")
+            flat(TEXT).count("names the zone, stops, and asks"), 1)
+        self.assertNotIn("Closed-zone protocol", TEXT)
 
-    def test_the_question_asks_about_retention_in_user_terms(self):
-        self.assertIn("may free models — some of which retain what you "
-                      "send — run on content here?", self.body)
-        for regime in ("open", "sensitive", "closed"):
-            self.assertIn(regime, self.body)
+    def test_no_setup_interviews_or_worktree_interview_prose_remain(self):
+        flat_text = flat(TEXT)
+        for gone in ("## Set up the secrets file",
+                     "## Set up the free-use zones",
+                     "### Worktrees",
+                     "undeclared worktree root stays closed",
+                     "may free models — some of which retain what you send",
+                     "--write-secrets",
+                     "modelbandit.secrets.json"):
+            self.assertNotIn(gone, flat_text)
 
-    def test_candidate_folders_are_discovered_not_invented(self):
-        self.assertIn("working folder", self.body)
-        self.assertIn("repositories", self.body)
-        self.assertIn("worktree", self.body)
-
-    def test_the_worktree_root_rule_is_carried_into_the_interview(self):
-        # An undeclared worktree root stays closed; declaring the directory
-        # the worktrees live in lets the origin repository's zone decide.
-        self.assertIn("undeclared worktree root stays closed", self.body)
-        self.assertIn("origin repository", self.body)
-
-    def test_anything_unasked_stays_closed_and_the_interview_opens_less(self):
-        self.assertRegex(self.body, r"(?i)unasked.*closed")
-        self.assertIn("never more", self.body)
-
-    def test_the_proposal_is_written_via_write_zones_then_reviewed(self):
-        self.assertIn("--write-zones", self.body)
-        self.assertRegex(self.body, r"(?i)\breview\b")
-        self.assertRegex(self.body, r"(?i)\bverify\b")
+    def test_the_steps_use_the_automatic_assessment_vocabulary(self):
+        collect = step(1, "Collect the demand.")
+        self.assertIn("names its ticket files", collect)
+        self.assertIn("held:", collect)
+        self.assertIn("follow-up local-only run", collect)
+        # The deal-time check is the run's own work: no manual pre-flight
+        # choreography is instructed any more.
+        self.assertNotIn("--check-secrets", collect)
 
 
-class Step2OfferTests(unittest.TestCase):
-    """AC4: step 2 surfaces absent/undeclared zones with an offer to run the
-    interview, naming the consequence — remote free routes excluded —
-    surfaced every time it applies, never silently skipped."""
+class ReferenceDefinitionOwnershipTests(unittest.TestCase):
+    """The definition-ownership split: the glossary owns term definitions;
+    the Reference keeps operational readout shapes only."""
 
-    def setUp(self):
-        self.body = step(2, "Pull popularity.")
+    def test_no_regime_vocabulary_survives_anywhere(self):
+        # Regime folded into Zone (glossary): the binary posture replaced
+        # the ladder everywhere, so the word has no home in the skill file.
+        self.assertNotIn("regime", flat(TEXT).lower())
 
-    def test_step2_offers_the_interview_for_absent_or_undeclared_zones(self):
-        self.assertIn("Set up the free-use zones", self.body)
-        self.assertRegex(self.body, r"(?i)zones file.*absent")
-        self.assertRegex(self.body, r"zone: undeclared \(closed\)")
-
-    def test_the_offer_names_the_consequence(self):
-        # Wording names what absence costs this run: remote free routes
-        # are excluded.
-        self.assertRegex(self.body, r"(?i)remote free routes.*excluded")
-
-    def test_the_offer_is_made_never_silently_skipped(self):
-        self.assertRegex(self.body, r"(?i)never silently skipped")
+    def test_the_zones_reference_keeps_the_operational_shapes_only(self):
+        body = section("Reference")
+        self.assertIn("$XDG_CONFIG_HOME/modelbandit/zones.json", body)
+        self.assertIn('{"zones": ["', body)
+        self.assertIn("--write-zones", body)
+        self.assertIn("atomically", body)
+        # The exception list is the whole schema: no per-entry posture key
+        # and no default key survive in prose.
+        flat_text = flat(TEXT)
+        self.assertNotIn('"free":', flat_text)
+        self.assertNotIn('"default"', flat_text)
+        # The old zone-header shapes are gone with the ladder.
+        self.assertNotIn("zone: undeclared (closed)", flat_text)
+        self.assertNotIn("sensitive via --sensitive", flat_text)
 
 
 class MigrationRoutingTests(unittest.TestCase):
@@ -125,17 +129,9 @@ class MigrationRoutingTests(unittest.TestCase):
 
 
 class ExitContractV2WordingTests(unittest.TestCase):
-    """Issue #41 pins: the closed-zone protocol launches only on the
-    `allowed` verdict (default-deny), and the exit-status reference carries
-    the v2 table — status says the tool ran, output says what's true."""
-
-    def test_protocol_step4_launches_only_on_the_allowed_verdict(self):
-        body = section("Closed-zone protocol")
-        self.assertIn("Launch only when the pre-flight says `allowed`",
-                      body)
-        self.assertIn("anything else means do not launch", body)
-        self.assertNotIn("exit **5**", body)
-        self.assertNotIn("Exit **0** means", body)
+    """Issue #41 pins: the exit-status reference carries the v2 table —
+    status says the tool ran, output says what's true. (The protocol-launch
+    pins left with the closed-zone protocol they pinned — #78 deleted it.)"""
 
     def test_the_exit_statuses_reference_is_the_v2_table(self):
         body = section("Reference")

@@ -16,69 +16,59 @@ to a rung on each candidate's ladder.
 
 On a migrate request or old-name keywords, read `migrate.md` and follow it.
 
+## One interaction loop
+
+The skill runs one loop, stated once: **assess** silently, **deal**,
+**present** the deal, and **offer changes**. Assessing is the run's own
+work — you name the run's ticket files and the script reads them itself,
+applying the built-in checks at deal time: the Secrets gate's credential,
+identifier, machine-fact and gitignored-content rules over the material
+each ticket carries, with no pre-flight choreography and no setup files.
+Tickets that pass are ordinary tickets and are dealt across the eligible
+pool; tickets that trip are reported held — `held: <ids> (sensitive)` —
+never silently dropped and never escalated to a cloud route; a follow-up
+run deals them local-only, one shape per invocation. Presenting and
+offering changes are the only places you are asked: when a held ticket has
+no eligible local candidate, or when you want a change to the presented
+deal.
+
+Two one-line rules hold the loop. The mechanical floor (ADR-0011) decides
+forever where a future check belongs: facts and arithmetic stay mechanical;
+editorial completeness is a mark in the table. And the closed-area rule is
+short — a blocked task names the zone, stops, and asks: the run's header
+states the posture in force and `blocked: free-use zone` says why the
+remote routes are absent. No ceremony beyond that.
+
 ## Steps
 
 1. **Collect the demand.** Domain (one of the five in `policy.json`), effort
    intent, tickets, budget. The token profile defaults to the domain; output
    volume is the cost driver for authoring work and is stated before pricing.
-   Apply the Secrets gate to the shape's material — always, before choosing a
-   model. Run `scripts/modelbandit.py --check-secrets --working-dir <folder>` with the
-   shape's material on stdin; add a repeatable `--outside-file PATH` for each
-   named outside source that contributes content. Each named file contributes
-   only a capped slice. The gate does the mechanics itself: it reads the
-   project's `modelbandit.secrets.json` (at the folder's git root, when it is
-   in a repository), gathers this machine's hostname, login, home path and
-   local address, reads content from the folder's **gitignored** files, and
-   checks the named outside files — no assembly by you. It reports safe,
-   sensitive or **not certified**, and names a rule when one trips it
-   (`hostname`, `username`, `home path`, `local address`, `gitignored content
-   (.env)`, outside-file content, a credential pattern, `phrase #N`,
-   `pattern #N`). Every verdict exits **0** — safe, sensitive, **not
-   certified** (no material given, never read as safe), or **blocked by the
-   free-use zone**: a named outside source whose effective regime is closed
-   (including the undeclared closed default), or a `--model` its effective
-   zone cannot admit — and the printed lines say which: status says the
-   check ran, output says what's true (ADR-0004). **2** is a usage error,
-   **4** a rules/config error. A block is a stop, never a Sensitive verdict —
-   see **Closed-zone protocol** below.
-   Content-inclusion, any-of: the shape is **Sensitive** when its material
-   carries content drawn from a file outside the working folder, or from a
-   gitignored file inside it, or passwords/tokens/keys, or identifiers
-   readable from this machine's state — a mere path mention does not trip
-   it; any one item does. The project file can tighten the default, never
-   silently loosen it. The verdict is decided at collection — never a mood
-   declared mid-run — and a Sensitive shape goes to the ranking run as
-   `--sensitive`.
-   If the rules file needs creating or updating, complete **Set up the secrets
-   file** below before relying on project-specific rules.
+   The run names its ticket files and the script reads them itself: the
+   built-in credential, identifier, machine-fact and gitignored-content
+   rules apply at deal time to the material each ticket carries — no
+   invocation choreography, no project rules file, nothing to remember
+   before a model is chosen. Sensitivity is computed once, when the run's
+   shape is constructed, and derived thereafter — never a mood declared
+   mid-run. A ticket the rules trip is reported held (`held: <ids>
+   (sensitive)`), kept out of the ordinary deal, and waits for a follow-up
+   local-only run — never sent to a cloud route, never silently dropped.
    Done when: each input is stated or defaulted and none is guessed — the
-   Secrets gate's verdict included; a Sensitive shape goes to the script as
-   `--sensitive`.
+   ticket files named, the assessment left to the deal-time check.
 
 2. **Pull popularity.** Run `scripts/modelbandit.py` (mechanics: `--help`). It reads
    the task-classification leaderboards and the daily token rankings, cached
    24h, and prices every candidate at live rates. Every run's header states
-   the free-use zone that governed it - `zone: <path> (<regime>)`, or
-   `zone: undeclared (closed)` when no declared path matched. If `--sensitive`
-   tightens an open zone, the header says `(open; sensitive via --sensitive)`.
-   A zone is the place a path reaches, not the string it is spelled with:
-   junctions and symlinks are resolved before matching, and when the resolved
-   place differs from the declared path the header names it -
-   `zone: <resolved> (<regime>) (declared: <path>)`, or `(... ) (undeclared)`
-   when no declaration matched.
-   `--check-policy` and `--assert-allowed` report the same effective posture.
-   A closed effective regime removes every remote Free route before anything
-   else happens: those
-   candidates are never ranked, scored, dealt or listed, and the `zone:` line
-   is the explanation for their absence. Locally served models stay; Exposure,
-   Footprint, quota and catalog exclusions keep their marked, never hidden
-   behaviour.
-   When the zones file is absent or the effective posture is `zone:
-   undeclared (closed)`, surface that to the user and offer to run **Set up
-   the free-use zones** below before this run relies on free routes: with
-   nothing declared, remote free routes (`:free`, `opencode/*`) are excluded
-   from this run. Offered every time it applies, never silently skipped —
-   the same discipline as the due policy in step 7.
+   the effective zone posture — `zone: open` or `zone: closed` — and a run
+   on an undeclared machine states `open` with no warning and no nag: open
+   unless declared is the default, and the zones file is only an opt-out
+   list of closed paths. A closed posture removes every remote Free route
+   before anything else happens: those candidates are never ranked, scored,
+   dealt or listed, and the `zone:` line is the explanation for their
+   absence, the reason named `blocked: free-use zone`. Locally served
+   models stay; the Exposure, Footprint and quota gates keep their marked,
+   never hidden behaviour. `--check-policy` and `--assert-allowed` report
+   the same effective posture.
    Done when: candidates are ranked by their share of the domain's traffic,
     prices and data timestamp shown. Cataloged
     OpenCode `opencode/*` models
@@ -95,9 +85,10 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
     on output. `local` Exposure resolves only for a loopback endpoint on
     this machine: a LAN-served instance reads as exposed (`trains`) until
     the policy's `exposure` override map declares it. A Free route without
-    a resolving summary remains
-    visible but is not selectable; OpenCode and local routes also need their
-    own catalog entries. The same run reads the account's daily free-request
+    a resolving summary stays in the table, marked as a Gap with one prose
+    line — editorial completeness is never an admission verdict (the
+    mechanical floor in **One interaction loop**). The same run reads the
+    account's daily free-request
     counter and reports it in the header (`free quota: used/limit`): the
     configured `scoring.free_quota_reserve` is protected, and `:free` routes
     leave the pick and deal only when remaining quota is below that reserve.
@@ -112,7 +103,7 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    (`scoring.free_risk`, default 0.35): that fraction of the pool's cheapest
    priced paid ticket, recomputed for each pool and shape. It is always above
    zero and below that paid ticket, so Free can win without winning by division
-   alone. Exposure does not move it; the Sensitive gate does. A Plan route
+   alone. Exposure does not move it; the Exposure gate does. A Plan route
    prices as risk of its list-priced Draw by the same one rule (ADR-0006);
    only where there is no Draw does the Nominal floor answer.
    The candidate set stays the popularity top; the score orders it.
@@ -231,172 +222,11 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
    Done when: a due policy has been surfaced to the user with an offer to
    update — never silently ignored.
 
-## Closed-zone protocol
-
-The machine-wide `zones.json` decides where free models may run: a path
-declares `open`, `sensitive` or `closed` for everything under it, the three
-order `open` < `sensitive` < `closed`, and anything undeclared is `closed`. The
-regime a run works under is the **stricter** of its working folder's zone and
-the zone of the repository the folder came from (the parent of
-`git rev-parse --git-common-dir`), so `closed` implies `sensitive` and every
-stricter regime dominates the milder ones in every dimension.
-Headers state the effective posture; an open zone tightened by `--sensitive`
-is shown as `zone: <path> (open; sensitive via --sensitive)`.
-
-A **closed area** is a path whose effective regime is `closed`. In a closed
-area:
-
-1. **Never read, list, grep, summarise or copy anything for any reason.**
-   Not to answer a question, not to check whether something is there, not
-   "just the headings". A closed zone is closed to free *and* to your own
-   reading — the free-route exclusion in the ranking is one consequence, not
-   the rule.
-2. **When a task cannot be completed without it, stop.** Say which zone blocks
-   it (`zone: <path> (closed)`) and why the content is unavoidable, and wait
-   for the user to open the zone or move the task. An undeclared path has the
-   default `closed` regime and blocks in the same way.
-3. **Never route around the block.** Do not substitute a paid model for a
-   closed zone — a closed zone is closed because of where the content is, not
-   because of what the route costs. Do not reclassify the shape (`--sensitive`
-   cannot loosen a zone, and asking is not a substitute for opening it), do not
-   copy the material elsewhere to get it out, and do not treat a Sensitive
-   verdict as permission.
-4. **Check before launching.** The ranking's header names the zone; when an
-   orchestrator holds a model id — from a plan, a previous run, another
-   agent — run the pre-flight below before launching it:
-
-   ```bash
-   scripts/modelbandit.py --assert-allowed --model <id> --working-dir <folder>
-   ```
-
-   Launch only when the pre-flight says `allowed` — an error, a missing
-   field, a malformed response, anything else means do not launch. The
-   verdict lines carry the answer, and every answer exits **0**: `allowed:
-   <id>`, `blocked by the free-use zone`, or `blocked: unknown serving
-   namespace` — with effective posture and regime named (never content) —
-   status says the pre-flight ran, the lines say what's true. The dispatch fails closed: with no shape stated the pre-flight assumes the
-   material is Sensitive and says so (`shape: sensitive (assumed)`), so only
-   a route whose Exposure is `local` is allowed by default — `no-retention`
-   leaves the machine too (ADR 0008) — when you know the
-   material is not Sensitive, say so explicitly with `--plain`
-   (`shape: plain (via --plain)`), and `--sensitive` merely restates the
-   default. The pre-flight reads
-   the zones file and, when present, the local policy's Exposure facts: no
-   policy file, no classification fetch, no network. Status **4** is a
-   policy/config error and **2** a usage error — neither is an answer, and
-   neither launches.
-
-Exposure exclusions stay visible: in a `sensitive` or `closed` zone the table
-marks every non-local route (`exposed (no-retention)`, `exposed (trains)`) with
-its reason and never picks or deals it,
-because that is the shape's decision, not the zone's prohibition.
-
-### Worktrees
-
-Worktrees are created by the harness, outside their repository. An **undeclared
-worktree root stays closed**: undeclared is closed and the stricter of the two
-zones wins, so a worktree living under an undeclared path is closed no matter
-how open its repository is. To let the origin repository's zone decide —
-package work should be judged by the content it holds — declare the directory
-the worktrees live in `open`:
-
-```json
-{"zones": [{"path": "~/.opencode/worktrees", "free": "open"}], "default": "closed"}
-```
-
-The effective regime is then the origin repository's (`closed` for a private
-repository, `open` or `sensitive` for one declared so), never the bare
-worktree path.
-
-## Set up the secrets file
-
-When `modelbandit.secrets.json` is missing, or the user wants to tighten it,
-conduct this interview before relying on project-specific rules:
-
-1. Scan the repository for candidate identifiers, not credential values:
-   `.gitignore` entries, `.env*` and key-material filenames, plus internal
-   hostnames and client codenames that appear in configuration and docs. Do not
-   assume a candidate is sensitive just because it appears; propose each one to
-   the user individually and record an explicit include/exclude decision.
-2. Ask for any additional free-form phrases or regex patterns. Phrases match
-   literally; patterns must be valid regular expressions. The built-in
-   credential and machine-fact rules already apply and cannot be disabled.
-3. Ask whether the confirmed entries identify a person, client, or internal
-   system, then ask directly: “Should this rules file be committed, or should
-   it be gitignored?” Send the confirmed rules and both decisions to the writer
-   as JSON on stdin:
-
-   ```json
-   {
-     "phrases": ["confirmed literal"],
-     "patterns": ["confirmed-regex"],
-     "identifying": false,
-     "commit": true
-   }
-   ```
-
-   Run `scripts/modelbandit.py --write-secrets --working-dir <folder>` with that JSON
-   on stdin. It writes `modelbandit.secrets.json` at the folder's git root (or
-   the folder itself outside a repository), reports rules added and already
-   present, and merges on every re-run: existing rules are never removed and
-   exact duplicates are kept once. Its report gives counts, never rule values.
-   If `identifying` is true **or** `commit` is false, it appends the file path
-   to `.gitignore` once; if the rules file is already tracked, it refuses and
-   tells you to run `git rm --cached modelbandit.secrets.json` first.
-   Otherwise it leaves `.gitignore` alone and says the rules file is meant to
-   be committed.
-4. Review the writer's report and show the resulting diff. Before a re-run,
-   retain the previous rules-file contents; afterwards show a unified
-   before/after diff as well as the `.gitignore` diff. An ignored, untracked
-   rules file will not appear in ordinary `git diff`.
-5. Run `scripts/modelbandit.py --check-secrets --working-dir <folder>` with the actual
-   shape material on stdin, adding `--outside-file PATH` for each named outside
-   source. The gate reads the rules file itself. Every verdict exits 0 and the
-   printed line says which — safe, Sensitive, **not certified** — **2** is a
-   usage error and **4** a rules/config error: empty material is not safe by
-   default, so obtain the material before claiming a safe shape.
-
-## Set up the free-use zones
-
-When `zones.json` is absent, or the user wants to move a folder's posture,
-conduct this interview before a run relies on free routes — the machine
-starts closed everywhere, so this is the interview's only opening move:
-
-1. Discover candidate folders: the working folder, its repositories, and
-   the worktree roots this machine's harnesses create ticket worktrees
-   under. Ask one question per folder, in the user's own terms: *"may free
-   models — some of which retain what you send — run on content here?"*
-   and record one of the three answers:
-   - `open` — free models may run on content here, whatever a route retains.
-   - `sensitive` — nothing may leave the machine: only models served on this
-     machine run here, every non-local route excluded (`no-retention` alike
-     with `trains`).
-   - `closed` — no remote free route may run here at all, and, stricter
-     still, only models served on this machine stay in.
-2. Carry the worktree-root rule from **Closed-zone protocol** into the
-   answers: an **undeclared worktree root stays closed** however open its
-   repository, so ask about the directory the worktrees live in and declare
-   it — that lets the origin repository's zone decide the worktree's
-   posture, never the bare path the worktree happens to sit on.
-3. Anything unasked stays `closed`: the interview can open less, never
-   more. `"default"` stays `"closed"` and the file lists only the folders
-   the user actually answered for.
-4. Propose the resulting JSON in full:
-
-   ```json
-   {"zones": [{"path": "~/work", "free": "open"}], "default": "closed"}
-   ```
-
-   Write it with `scripts/modelbandit.py --write-zones`, the JSON on stdin —
-   no mode ever needs this file hand-written. It validates before it writes:
-   an invalid config refuses with status 4 naming the offending entry and
-   writes nothing, so an attempt over an existing file cannot corrupt it.
-   Then have the user review the printed path and the file's contents before
-   anything relies on them, and verify afterwards — the next run's `zone:`
-   header, or `scripts/modelbandit.py --assert-allowed --model <id>
-   --working-dir <folder>`, states the posture now in force.
-
 ## Reference
+
+The glossary owns what the terms mean; the entries below keep the
+operational shapes only — readouts, flags, exit statuses — so no term is
+defined twice.
 
 - **Domains** — five, mapped to leaderboard tags in `policy.json`: research,
   writing, coding, orchestration, ops. A tag may serve two domains (a lens, not
@@ -407,13 +237,15 @@ starts closed everywhere, so this is the interview's only opening move:
   `local`), optional `summary_ref` (an exact key in `summaries`), and optional
   `max_completion_tokens` (a Free entry's completion cap when no endpoint
   reports one).
-  `opencode/*` and local entries need their own window and a resolving summary.
+  `opencode/*` and local entries carry their own window in the catalog; a
+  missing summary marks the route, it does not exclude it.
   A `local` exposure on an `opencode/*` or `:free` entry is a contradiction —
   those are remote serving identities — and stops the run naming the entry.
   Ranked OpenRouter `:free` routes use their own slug and may resolve a summary
   by longest prefix without a `free_models` entry; their context window comes
   from the OpenRouter model catalog when available. A Free route without a
-  resolving summary is never admitted. OpenCode entries are listed from this
+  resolving summary is marked in the table plus one prose line, never
+  excluded. OpenCode entries are listed from this
   catalog. An entry with `local` Exposure raises a candidate only for an id
   the harness listing carries (`lmstudio/*` classifies local by the namespace
   itself); its curated window and summary remain policy facts, while the
@@ -518,65 +350,48 @@ starts closed everywhere, so this is the interview's only opening move:
   its share whole. A Plan route is not a Free route: the zone gate does not
   refuse it and the free counter does not count it.
 
-- **Free-use zones** — `zones.json` at the machine's config root
+- **Free-use zones** — the zones file lives at the machine's config root
   (`$XDG_CONFIG_HOME/modelbandit/zones.json`, else
-  `~/.config/modelbandit/zones.json`): `{"zones": [{"path": ..., "free":
-  "open" | "sensitive" | "closed"}], "default": "closed"}`. `~` and
-  environment variables expand, paths compare the way the platform does, and
-  the longest covering prefix wins; anything undeclared takes `default`. A
-  missing file means the default everywhere. Validation is loud — an unknown
-  key, a non-list `zones`, a non-string path or an unknown regime stops the
-  run naming the entry index — and the built-in default is additive-only, so
-  no file can open what the machine closed. The regime a run works under is
-  the stricter of the working folder's zone and the origin repository's
-  (`git rev-parse --git-common-dir`, its parent); git missing or failing
-  leaves the working folder's zone alone. A `closed` zone removes every remote
-  Free route (`:free`, `opencode/*`) at source — never ranked, scored, dealt or
-  listed — and, `closed` implying `sensitive`, a `sensitive` or `closed` zone
-  admits only locally served models: every non-local route, paid included, is
-  excluded under ADR 0008. Exposure exclusions are the shape's, not the zone's,
-  so they mark and never hide: the table shows `exposed (no-retention)` or
-  `exposed (trains)` on each excluded row. For
-  setup, follow **Set up the free-use zones**; `--write-zones` reads the
-  interview's proposal from stdin, validates it through this loader's
-  rules, and writes the file atomically — no mode needs `zones.json`
-  hand-written.
+  `~/.config/modelbandit/zones.json`) and is a bare list of closed paths —
+  `{"zones": ["<path>", ...]}` — so the exception list is the whole schema.
+  `~` and environment variables expand, paths compare the way the platform
+  does, and the longest covering prefix wins. `--write-zones` reads that
+  JSON from stdin and writes the file validated and atomically — an invalid
+  file refuses with status 4 naming the offending entry and writes
+  nothing; no mode needs the file hand-written. The header states the
+  effective posture (`zone: open`, `zone: closed`) on every run; a closed
+  posture drops every remote Free route (`:free`, `opencode/*`) at source —
+  never ranked, scored, dealt or listed — and the `zone:` line is the
+  explanation for their absence, the reason named `blocked: free-use zone`.
 
 - **Pre-flight (`--assert-allowed`)** — `scripts/modelbandit.py --assert-allowed
   --model <id> --working-dir <folder>` answers one question for an
   orchestrator: may this model serve in that folder's effective zone? The
-  output answers — `allowed: <id>`, `blocked by the free-use zone`, or
+  output answers — `allowed: <id>`, `blocked: free-use zone`, or
   `blocked: unknown serving namespace` — and every verdict exits **0**
   (status says the tool ran; output says what's
   true); **4** is a policy/config error and **2** a usage error, and neither
   is an answer: default-deny, launch only on `allowed`. `--json` answers
   with one object (`allowed`, `zone`, `reason`) instead of the lines. The
-  output names the effective zone (`zone: <path> (<regime>)`, with
-  `sensitive via --sensitive` when the flag tightens `open`, and the resolved
-  place named when a link moved the judgement), states the shape
-  it judged — `shape: sensitive (assumed)` with none stated, because the
-  dispatch fails closed; `shape: plain (via --plain)` when `--plain` states
-  the material is not Sensitive; `shape: sensitive (via --sensitive)` when the
-  default is restated — and then
-  `allowed: <id>`, `blocked by the free-use zone`, or `blocked: unknown
-  serving namespace` with model and reason; it
+  output names the effective posture (`zone: open`, `zone: closed`) and
+  states the shape it judged — `shape: sensitive (assumed)` with none
+  stated, because the dispatch fails closed; `shape: plain (via --plain)`
+  when `--plain` states the material is not Sensitive;
+  `shape: sensitive (via --sensitive)` when the default is restated — and
+  then the verdict with model and reason; it
   never carries the shape's content. It needs no policy file, no classification
   fetch and no network —
   a missing policy is an empty policy, so a route the file does not describe
   resolves by the defaults (a `:free` or `opencode/*` route exposed, a paid
-  route no-retention, a cataloged `local` entry local). Localness is a serving
-  fact, never a catalogue claim: a `local` label counts only for an id the
-  Route kind does not classify as a remote serving — a `:free` slug, an
-  `opencode/*` model, an `opencode-go/*` plan route — so a catalogue label
-  cannot make a remote route local or skip the Sensitive gate.
-  `--plain` states a shape, never a zone — it cannot open a closed area.
+  route no-retention, a cataloged `local` entry local).
+  `--plain` states a shape, never a zone — it cannot open a closed place.
   Refuse to launch a model the pre-flight
   blocks instead of substituting one.
 
 - **Exit statuses** — **0** ran to completion: any verdict — safe,
-  sensitive, not certified, allowed, blocked by the free-use zone, unknown
-  serving namespace, over-budget, empty pool, no candidate admitted, blocked
-  (no eligible local candidate). **1** carries no contract
+  sensitive, not certified, allowed, blocked: free-use zone, blocked:
+  unknown serving namespace, over-budget, empty pool, blocked: no eligible
+  local candidate. **1** carries no contract
   meaning: what CPython and generic operational failures (network
   unreachable, unreadable input) produce — never an answer. **2** usage
   errors (argparse's own channel). **4** rules/config error (secrets rules,
@@ -697,63 +512,39 @@ starts closed everywhere, so this is the interview's only opening move:
   `opencode-go/*` or a local id unchanged. The deal's model column uses the
   same form; a pick that lands on a Twin names the Twin's qualified id.
 
-- **Secrets gate** — the collect-demand check that makes a shape Sensitive,
-  run as `scripts/modelbandit.py --check-secrets [--working-dir PATH]` with the
-  material on stdin and repeatable `--outside-file PATH` arguments for named
-  outside content. It needs no policy and no network; the material is the
-  agent's to supply (the tool never reads it for you). It prints the zone it
-  judged by (`zone: <path> (<regime>)`, with the resolved place named when a
-  link moved the judgement) and names the rule that tripped it.
-  Exit status (**0** for every verdict, **2** usage error, **4**
-  rules/config error; see **Exit statuses**) — the printed lines say which:
-  safe, sensitive, not certified (**not certified** = no material given,
-  never "safe"), or blocked by the free-use zone. The zone answer comes
-  before the content does and names the zone, never the material: a named
-  `--outside-file` whose effective regime is `closed` (declared or the default,
-  resolved with origin included), or a `--model` the effective zone cannot
-  admit. The tool assembles
-  everything mechanical: the project's `modelbandit.secrets.json` at the
-  working-folder root (the git root when in a repository, else the folder),
-  this machine's identifiers (hostname, login, home path, non-loopback local
-  address, each best effort and never shorter than four characters), and the
-  significant lines of the folder's gitignored untracked files
+- **Secrets gate** — the built-in credential, identifier, machine-fact and
+  gitignored-content rules, applied to the material a run is given:
+  automatically at deal time, when the run reads its own ticket files, and
+  manually via `scripts/modelbandit.py --check-secrets
+  [--working-dir PATH]` for a single material on stdin, with repeatable
+  `--outside-file PATH` arguments for named outside content. It needs no
+  policy and no network; the material is the agent's to supply (the tool
+  never reads it for you). The check assembles everything mechanical: this
+  machine's identifiers (hostname, login, home path, non-loopback local
+  address, each best effort and never shorter than four characters), the
+  significant lines of the working folder's gitignored untracked files
   (`git ls-files --others --ignored --exclude-standard`, twenty files of up
-  to 8 KB each), plus the capped content of every named outside file —
-  `.gitignore` is the repository's own list of what must not leave it. Rules
-  are additive only: `phrases` are literal inclusions,
-  `patterns` are regular expressions, both validated at load — an unknown key,
-  an empty phrase or a broken regex stops the check with status 4, and the
-  built-in credential rules always apply. The verdict echoes no rule *value*,
-  only its class or index (`phrase #1`), so its output is safe to quote back.
-  For setup or updates, follow **Set up the secrets file**; `--write-secrets` reads
-  confirmed JSON from stdin, merges additively, and applies the commit/gitignore
-  decision.
+  to 8 KB each), and the capped content of every named outside file. It
+  names the rule that tripped it and echoes no rule *value*, only its class
+  or index (`phrase #1`), so its output is safe to quote back. A named
+  `--outside-file` from a closed place is refused, and the refusal names
+  the zone, never the material. Exit status (**0** for every verdict, **2**
+  usage error, **4** rules/config error; see **Exit statuses**) — the
+  printed lines say which: safe, sensitive, not certified (**not
+  certified** = no material given, never "safe").
 
-- **Exposure & Sensitive** — Sensitive is the Ticket shape's fifth element,
-  bound per invocation (`--sensitive`) from the Secrets gate's verdict at
-  demand collection. Exposure is a candidate's data-handling class —
-  no-retention (input neither stored nor trained on), trains (input may be
-  stored, collected, or trained on), local (runs on this machine) — a
-  property of the serving route, never inferred from price: free does not
-  imply trains, paid does not imply no-retention, an unknown free route
-  defaults to trains. Localness is a serving fact, never a catalogue claim: a
-  `local` label counts only for an id the route predicate does not classify as
-  remote. On a Sensitive shape only Exposure `local` may serve (ADR 0008):
-  every non-local route — `no-retention` alike with `trains`, paid included —
-  is excluded from the pick and the deal, marked in the table with the reason
-  (`exposed (no-retention)`, `exposed (trains)`), never hidden; only local
-  models stay admitted, and a Sensitive shape with no eligible local candidate
-  stops with `blocked: no eligible local candidate` (exit 0 — the report is
-  the human escalation, never a re-gate). A deal touching Sensitive material
-  carries the standing non-leak note — a contract marker for the harness to
-  apply at prompt time; the prompt itself stays the harness's to author.
-  Exposure, not price, decides — and one admission
+- **Exposure & Sensitive** — on a sensitive shape only Exposure `local` may
+  serve (ADR 0008): every non-local route — `no-retention` alike with
+  `trains`, paid included — is excluded from the pick and the deal, marked
+  in the table with the reason (`exposed (no-retention)`, `exposed
+  (trains)`), never hidden; only local models stay admitted, and a
+  sensitive shape with no eligible local candidate stops with `blocked: no
+  eligible local candidate` (exit 0 — the report is the human escalation,
+  never a re-gate). A deal touching Sensitive material carries the standing
+  non-leak note — a contract marker for the harness to apply at prompt
+  time; the prompt itself stays the harness's to author. One admission
   verdict serves both the table and the deal, so the two never disagree
-  about what may serve a shape. A `sensitive` zone is the `--sensitive` flag
-  by another name, and a `closed` zone is at least that strict: it refuses
-  every non-local route a sensitive zone refuses — including a *paid*
-  route — on top of every remote free one. The flag can only tighten a zone;
-  it can never loosen one.
+  about what may serve a shape.
 
 - **Footprint & Difficulty** — two words for two different questions, never
   one word for both. Footprint is a Ticket shape's measured demand on a
