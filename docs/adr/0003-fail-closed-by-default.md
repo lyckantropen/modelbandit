@@ -1,5 +1,10 @@
 # Fail closed by default
 
+> **Superseded by [ADR-0010, Open unless declared](0010-open-unless-declared.md).**
+> The record below is kept as written; the default it describes is no longer
+> in force. Fail-closed survives only inside the checks — an unknown window,
+> an unknown serving namespace, an unknown exposure class.
+
 Free routes touch user content — prompts, files, the working tree — so where
 they may run must be opt-in, path by path, declared by somebody. The posture
 is enforced in code (`DEFAULT_REGIME = "closed"`) and
