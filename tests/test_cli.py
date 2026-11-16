@@ -3512,19 +3512,12 @@ class CliTests(unittest.TestCase):
         return self.run_cli(*argv, zones=zones, zones_default=zones_default,
                             zones_absent=zones_absent, policy_path=policy_path)
 
-    def write_secrets_file(self, payload):
-        path = os.path.join(self._tmp.name, "modelbandit.secrets.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-        return path
-
-    def test_status_reports_the_four_lines_for_a_provisioned_setup(self):
-        # AC1: one line each — zone, zones file, secrets file, policy age —
-        # for a machine with zones.json and a project secrets file in place.
-        # The zones line names this fixture's file (the exact spelling of
+    def test_status_reports_the_setup_lines_for_a_provisioned_setup(self):
+        # AC1: one line each — zone, zones file, the built-in secrets rules
+        # note, policy age — for a machine with zones.json in place. The
+        # zones line names this fixture's file (the exact spelling of
         # that path — zones_file_label()'s — is pinned by the absent-state
         # test below, whose home the helper can resolve).
-        secrets = self.write_secrets_file({"phrases": ["client-codename"]})
 
         out, err, code, calls = self.status(working_dir=self._tmp.name)
 
@@ -3534,31 +3527,31 @@ class CliTests(unittest.TestCase):
         self.assertTrue(lines[1].startswith("zones file: present ("), lines[1])
         self.assertTrue(lines[1].endswith("/config/modelbandit/zones.json)"),
                         lines[1])
-        self.assertEqual(lines[2], f"secrets file: present ({secrets})")
+        self.assertEqual(lines[2], "secrets: built-in rules apply")
         policy = os.path.join(self._tmp.name, "policy.json")
         self.assertEqual(lines[3], f"policy: {policy} — 0d old")
         self.assertEqual(err, "")
         self.assertEqual(calls, [])
 
-    def test_status_never_prints_the_secrets_file_contents(self):
-        # AC4: presence only — a real rules file whose contents carry a
-        # canary phrase must never surface in stdout or stderr.
-        canary = "CANARY-c0ffee-client-token-DO-NOT-PRINT"
-        secrets = self.write_secrets_file({"phrases": [canary]})
-
-        out, err, code, calls = self.status(working_dir=self._tmp.name)
+    def test_status_names_no_secrets_file_surface(self):
+        # The rules file is gone (spec #75): no file path, no presence
+        # line, and no setup-interview pointer anywhere in the report.
+        out, err, code, calls = self.status(working_dir=self._tmp.name,
+                                            zones_absent=True)
 
         self.assertEqual(code, 0)
-        self.assertIn(f"secrets file: present ({secrets})", out)
-        self.assertNotIn(canary, out)
-        self.assertNotIn(canary, err)
+        self.assertIn("secrets: built-in rules apply", out)
+        for gone in ("secrets file:", "modelbandit.secrets.json",
+                     "setup interview", "next:"):
+            self.assertNotIn(gone, out)
+        self.assertEqual(err, "")
         self.assertEqual(calls, [])
 
     def test_status_empty_setup_reports_absent_states_and_exits_zero(self):
-        # AC2: no zones, no secrets — the documented default, so exit 0,
-        # the same four lines in absent states, and exactly one actionable
-        # line for the zones file (batch A's absent wording plus the action
-        # that changes it).
+        # AC2: no zones file — the documented default, so exit 0, the same
+        # four lines in the absent state. No nag beyond the one sentence
+        # the ranking header prints (issue #38); the setup interview it
+        # used to point at is gone.
         out, err, code, calls = self.status(working_dir=self._tmp.name,
                                             zones_absent=True)
 
@@ -3569,16 +3562,9 @@ class CliTests(unittest.TestCase):
             lines[1],
             "zones file: absent (~/.config/modelbandit/zones.json) — "
             "undeclared paths are closed")
-        self.assertEqual(
-            lines[2],
-            "next: create ~/.config/modelbandit/zones.json — see the "
-            "skill's setup interview")
-        secrets = os.path.join(self._tmp.name, "modelbandit.secrets.json")
-        self.assertEqual(
-            lines[3],
-            f"secrets file: absent ({secrets}) — built-in default rules apply")
+        self.assertEqual(lines[2], "secrets: built-in rules apply")
         policy = os.path.join(self._tmp.name, "policy.json")
-        self.assertEqual(lines[4], f"policy: {policy} — 0d old")
+        self.assertEqual(lines[3], f"policy: {policy} — 0d old")
         self.assertEqual(err, "")
         self.assertEqual(calls, [])
 
@@ -3714,13 +3700,13 @@ class PolicyFileTests(CliTests):
 
     def assert_status_4_everywhere(self):
         """A policy no entry point can trust stops them all with status 4 and
-        a message naming the file — no traceback, no exit 1."""
+        a message naming the file — no traceback, no exit 1. The secrets
+        check is absent by design (the mode split): it answers material
+        questions only and reads no policy."""
         for argv in (["--domain", "writing"],           # the ranking run
                      ["--check-policy"],                # the policy check
                      ["--assert-allowed",
-                      "--model", "deepseek/deepseek-v4-pro"],
-                     ["--check-secrets",
-                      "--model", "deepseek/deepseek-v4-pro"]):
+                      "--model", "deepseek/deepseek-v4-pro"]):  # pre-flight
             with self.subTest(entry=argv[0]):
                 out, err, code, _ = self.run_gate(*argv)
                 self.assertEqual(code, 4)
@@ -3788,14 +3774,6 @@ class PolicyFileTests(CliTests):
         self.assertIn("unknown exposure", err)
         self.assertIn("deepseek/", err)
 
-        out, err, code, _ = self.run_gate("--check-secrets",
-                                          "--model", "deepseek/deepseek-v4-pro")
-        self.assertEqual(code, 4)
-        self.assertNotIn("secrets gate: sensitive", out)
-        self.assertIn("secrets gate: rules/config error", err)
-        self.assertIn("unknown exposure", err)
-        self.assertIn("deepseek/", err)
-
     def test_a_local_label_on_a_remote_prefix_stops_the_guards_with_status_4(self):
         # Localness is a serving fact, never a catalogue claim: the policy
         # stops the contradiction loudly, naming the entry, before any run.
@@ -3819,13 +3797,6 @@ class PolicyFileTests(CliTests):
                                           "--model", "deepseek/deepseek-v4-pro")
         self.assertEqual(code, 4)
         self.assertEqual(out, "")
-        self.assertIn("unknown exposure", err)
-
-        out, err, code, _ = self.run_gate("--check-secrets",
-                                          "--model", "deepseek/deepseek-v4-pro")
-        self.assertEqual(code, 4)
-        self.assertNotIn("secrets gate: sensitive", out)
-        self.assertIn("secrets gate: rules/config error", err)
         self.assertIn("unknown exposure", err)
 
 

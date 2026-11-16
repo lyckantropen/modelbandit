@@ -1,10 +1,11 @@
-"""Tests for the Secrets gate's wiring: the rules file, machine facts,
-gitignored content, and the CLI check that turns material into a verdict.
+"""Tests for the Secrets gate's wiring: machine facts, gitignored content,
+outside-file provenance, and the CLI check that turns material into a
+verdict.
 
 The decision stays pure (`secrets_gate`/`secrets_verdict`); the file reads and
 git calls live at the edges and are injected here, so every test is
-deterministic and network-free. The loader, the machine facts and the
-gitignored content are what give the project's rules file teeth.
+deterministic and network-free. The built-in rules have no project rules
+file anywhere — the material, this machine and the tree are the whole input.
 """
 
 import io
@@ -37,70 +38,6 @@ class TempDirMixin(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         return path
-
-    def write_rules(self, payload):
-        return self.write("modelbandit.secrets.json", json.dumps(payload))
-
-
-class SecretsRulesLoaderTests(TempDirMixin):
-    """`modelbandit.secrets.json` at the working-folder root, validated."""
-
-    def test_loads_phrases_and_patterns(self):
-        path = self.write_rules({"phrases": ["acme-internal", "Project Bluebird"],
-                                 "patterns": [r"ACME-\d{4}"]})
-        rules = modelbandit.load_secrets_rules(path)
-        self.assertEqual(rules["phrases"],
-                         ["acme-internal", "Project Bluebird"])
-        self.assertEqual(rules["patterns"], [r"ACME-\d{4}"])
-
-    def test_missing_file_is_a_no_op(self):
-        self.assertEqual(
-            modelbandit.load_secrets_rules(os.path.join(self.root, "absent.json")), {})
-
-    def test_unknown_top_level_key_fails_loudly(self):
-        path = self.write_rules({"phrase": ["typo"]})
-        with self.assertRaisesRegex(SystemExit, "phrase"):
-            modelbandit.load_secrets_rules(path)
-
-    def test_phrases_must_be_non_empty_strings(self):
-        cases = (({"phrases": "a string"}, "phrases"),
-                 ({"phrases": [""]}, "phrase #1"),
-                 ({"phrases": ["ok", 7]}, "phrase #2"))
-        for payload, expected in cases:
-            with self.subTest(payload=payload):
-                path = self.write_rules(payload)
-                with self.assertRaisesRegex(SystemExit, expected):
-                    modelbandit.load_secrets_rules(path)
-
-    def test_patterns_must_be_strings(self):
-        path = self.write_rules({"patterns": [42]})
-        with self.assertRaisesRegex(SystemExit, "pattern #1"):
-            modelbandit.load_secrets_rules(path)
-
-    def test_invalid_regex_reports_its_index_without_echoing_the_value(self):
-        invalid = r"broken-([unclosed"
-        path = self.write_rules({"patterns": [r"ok-\d+", invalid]})
-        with self.assertRaisesRegex(SystemExit,
-                                    "pattern #2 is not a valid regex") as raised:
-            modelbandit.load_secrets_rules(path)
-        self.assertNotIn(invalid, str(raised.exception))
-
-    def test_invalid_rule_value_is_never_echoed(self):
-        secret = "classified-project-code-9721"
-        path = self.write_rules({"phrases": [{"value": secret}]})
-
-        with self.assertRaisesRegex(SystemExit, "phrase #1") as raised:
-            modelbandit.load_secrets_rules(path)
-
-        self.assertNotIn(secret, str(raised.exception))
-
-    def test_loaded_rules_tighten_but_never_disable_the_built_ins(self):
-        path = self.write_rules({"phrases": ["ordinary fixture phrase"]})
-        rules = modelbandit.load_secrets_rules(path)
-        self.assertTrue(modelbandit.secrets_gate("ordinary fixture phrase",
-                                          rules=rules))
-        self.assertTrue(modelbandit.secrets_gate("password=still-sensitive",
-                                          rules=rules))
 
 
 HOST = "buildbox-7f2a"
@@ -300,18 +237,8 @@ class WorkingRootTests(TempDirMixin):
 
 
 class SecretsCheckTests(TempDirMixin):
-    """The edge composer: rules file, machine facts and gitignored content,
-    each injectable, assembled into one verdict."""
-
-    def test_a_rules_file_changes_the_verdict_for_the_same_material(self):
-        material = "Ship the Project Bluebird notes."
-        self.assertEqual(modelbandit.secrets_check(material, root=self.root,
-                                            machine={}, gitignored=[]),
-                         (False, ""))
-        self.write_rules({"phrases": ["Project Bluebird"]})
-        self.assertEqual(modelbandit.secrets_check(material, root=self.root,
-                                            machine={}, gitignored=[]),
-                         (True, "phrase #1"))
+    """The edge composer: built-in rules over machine facts and gitignored
+    content, each injectable, assembled into one verdict."""
 
     def test_machine_facts_are_gathered_when_not_injected(self):
         with mock.patch("modelbandit.machine_facts",
@@ -376,40 +303,49 @@ class SecretsCliTests(TempDirMixin):
                 self.assertIn("not certified", out)
                 self.assertNotIn("secrets gate: safe", out)
 
-    def test_project_rules_file_at_the_working_dir_applies(self):
-        self.write_rules({"phrases": ["Project Bluebird"]})
+    def test_write_secrets_is_gone_entirely(self):
+        # No compatibility shim: the flag is an unknown argument, a usage
+        # error, and no rules file is ever written (spec #75, ticket #80).
+        out, err, code = self.run_cli("--write-secrets", "--working-dir",
+                                      self.root, stdin='{"phrases": ["x"]}')
+        self.assertEqual(code, 2)
+        self.assertIn("--write-secrets", err)
+        self.assertFalse(os.path.exists(
+            os.path.join(self.root, "modelbandit.secrets.json")))
+
+    def test_no_rules_file_read_or_write_path_remains(self):
+        # The rules file is not read anywhere either: material that would
+        # have tripped a project rule comes back safe from the built-ins.
         out, _, code = self.run_cli("--check-secrets", "--working-dir",
                                     self.root,
                                     stdin="Ship the Project Bluebird notes.")
         self.assertEqual(code, 0)
-        self.assertIn("rule: phrase #1", out)
-        self.assertIn(os.path.join(self.root, "modelbandit.secrets.json"), out)
-
-    def test_another_working_dir_does_not_see_those_rules(self):
-        self.write_rules({"phrases": ["Project Bluebird"]})
-        with tempfile.TemporaryDirectory() as other:
-            out, _, code = self.run_cli("--check-secrets", "--working-dir", other,
-                                        stdin="Ship the Project Bluebird notes.")
-        self.assertEqual(code, 0)
         self.assertIn("secrets gate: safe", out)
+        self.assertNotIn("rules:", out)
 
-    def test_a_malformed_rules_file_stops_the_check_loudly(self):
-        self.write_rules({"phrase": ["typo"]})
-        _, err, code = self.run_cli("--check-secrets", "--working-dir",
-                                    self.root, stdin="anything at all")
-        self.assertEqual(code, 4)
-        self.assertIn("secrets gate: rules/config error", err)
-        self.assertIn("unknown secret rule key(s)", err)
+    def test_the_model_flag_is_read_only_by_assert_allowed(self):
+        # The mode split: the check answers material questions only; a
+        # model-and-zone question belongs to the pre-flight, so the flag is
+        # refused here rather than silently ignored.
+        out, err, code = self.run_cli("--check-secrets", "--model",
+                                      "opencode/glm-5.3-flash",
+                                      "--working-dir", self.root,
+                                      stdin="Summarize the public API")
+        self.assertEqual(code, 2)
+        self.assertIn("--model", err)
+        self.assertNotIn("secrets gate:", out)
 
-    def test_malformed_rules_file_is_reported_even_without_material(self):
-        self.write_rules({"patterns": ["invalid-([regex"]})
-        out, err, code = self.run_cli("--check-secrets", "--working-dir",
-                                      self.root, stdin="")
-
-        self.assertEqual(code, 4)
-        self.assertIn("pattern #1 is not a valid regex", err)
-        self.assertNotIn("not certified", out)
-        self.assertNotIn("invalid-([regex", err)
+    def test_a_broken_policy_does_not_stop_the_material_check(self):
+        # The check answers material questions only: it reads no policy, so
+        # a policy no other entry point can trust still answers the gate.
+        with open(os.path.join(self.root, "policy.json"), "w",
+                  encoding="utf-8") as f:
+            f.write("{oops")
+        out, _, code = self.run_cli("--check-secrets", "--working-dir",
+                                    self.root,
+                                    stdin="api_key: sk-1234567890abcdef")
+        self.assertEqual(code, 0)
+        self.assertIn("secrets gate: sensitive", out)
 
     def test_named_outside_file_content_trips_the_gate(self):
         with tempfile.TemporaryDirectory() as outside:
@@ -444,11 +380,105 @@ class SecretsCliTests(TempDirMixin):
         self.assertIn("secrets gate: safe", out)
 
 
+class JsonOutcomeVocabularyTests(TempDirMixin):
+    """The machine face speaks the stdout vocabulary: each `--json` check
+    `outcome` is the verdict word the printed `secrets gate:` line states —
+    safe, sensitive, not certified, blocked — pinned at the CLI seam."""
+
+    def run_cli(self, *argv, stdin="", zones_default="open"):
+        out, err = io.StringIO(), io.StringIO()
+        code = None
+        config_home = os.path.join(self.root, "config")
+        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
+        with open(os.path.join(config_home, "modelbandit", "zones.json"),
+                  "w", encoding="utf-8") as f:
+            json.dump({"zones": [], "default": zones_default}, f)
+        with mock.patch.object(sys, "argv", ["modelbandit", *argv]), \
+                mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
+                mock.patch("modelbandit.machine_facts",
+                           return_value={"identifiers": []}), \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
+                mock.patch("modelbandit.fetch_json",
+                           side_effect=AssertionError("no network in a gate")), \
+                redirect_stdout(out), redirect_stderr(err):
+            try:
+                modelbandit.main()
+            except SystemExit as exc:
+                code = exc.code
+        return out.getvalue(), err.getvalue(), code
+
+    def outcome_matches_the_printed_verdict(self, *argv, stdin="",
+                                            zones_default="open"):
+        plain, _, code = self.run_cli(*argv, stdin=stdin,
+                                      zones_default=zones_default)
+        self.assertEqual(code, 0)
+        line = next(ln for ln in plain.splitlines()
+                    if ln.startswith("secrets gate: "))
+        printed = line[len("secrets gate: "):]
+
+        payload, _, code = self.run_cli(*argv, "--json", stdin=stdin,
+                                        zones_default=zones_default)
+        self.assertEqual(code, 0)
+        outcome = json.loads(payload)["outcome"]
+
+        self.assertIn(outcome, ("safe", "sensitive", "not certified", "blocked"))
+        self.assertTrue(printed.startswith(outcome),
+                        f"stdout verdict {printed!r} does not state "
+                        f"outcome {outcome!r}")
+        return outcome
+
+    def test_safe(self):
+        self.assertEqual(
+            self.outcome_matches_the_printed_verdict(
+                "--check-secrets", "--working-dir", self.root,
+                stdin="Summarize the public API"),
+            "safe")
+
+    def test_sensitive(self):
+        self.assertEqual(
+            self.outcome_matches_the_printed_verdict(
+                "--check-secrets", "--working-dir", self.root,
+                stdin="api_key: sk-1234567890abcdef"),
+            "sensitive")
+
+    def test_not_certified(self):
+        self.assertEqual(
+            self.outcome_matches_the_printed_verdict(
+                "--check-secrets", "--working-dir", self.root, stdin=""),
+            "not certified")
+
+    def test_blocked_is_the_provenance_verdict(self):
+        # An outside file from an undeclared place blocks before the content
+        # verdict; the printed refusal names the zone, the outcome says
+        # `blocked` — the same word the stdout line prints.
+        line = "ORDINARY_PRIVATE_LINE_7f2a"
+        vault = os.path.join(self.root, "vault")
+        os.makedirs(vault)
+        path = os.path.join(vault, "notes.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+        self.assertEqual(
+            self.outcome_matches_the_printed_verdict(
+                "--check-secrets", "--working-dir", self.root,
+                "--outside-file", path,
+                stdin="Summarize it.",
+                zones_default="closed"),
+            "blocked")
+        payload = json.loads(
+            self.run_cli("--check-secrets", "--json", "--working-dir",
+                         self.root, "--outside-file", path,
+                         stdin="Summarize it.",
+                         zones_default="closed")[0])
+        self.assertEqual(payload["reason"], "material provenance from this zone")
+        self.assertNotIn(line, payload["reason"])
+
+
 class ZoneBlockedCheckTests(TempDirMixin):
-    """The check's free-use zone verdict: blocked when material provenance
-    lies in a path the zones file declares closed, or when the model the
-    shape will use is one the effective zone cannot admit — a verdict like
-    any other (exit 0, issue #41), and the material is never echoed."""
+    """The check's provenance verdict: blocked when material provenance lies
+    in a path the zones file declares closed — a verdict like any other
+    (exit 0, issue #41), and the material is never echoed. Model-and-zone
+    questions are the pre-flight's; the check runs none of them."""
 
     def setUp(self):
         super().setUp()
@@ -569,57 +599,6 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertEqual(code, 0)
         self.assertIn("secrets gate: sensitive", out)
 
-    def test_sensitive_zone_block_shares_the_zone_block_verdict(self):
-        # The same `blocked by the free-use zone` answer the pre-flight
-        # gives: posture and reason named, exit 0 like every verdict.
-        self.write_zones({"zones": [{"path": self.work, "free": "sensitive"}],
-                          "default": "closed"})
-        policy = os.path.join(self.root, "policy.json")
-        with open(policy, "w", encoding="utf-8") as f:
-            json.dump({"exposure": {"deepseek/": "trains"}}, f)
-
-        out, _, code = self.run_check("--working-dir", self.work,
-                                      "--model", "deepseek/model",
-                                      "--policy", policy,
-                                      stdin="Summarize the public API.")
-
-        self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
-        self.assertIn(f"zone: {self.work} (sensitive)", out)
-        self.assertIn("reason: exposed (trains)", out)
-
-    def test_the_model_the_shape_will_use_is_checked_against_the_zone(self):
-        out, _, code = self.run_check("--working-dir", self.closed,
-                                      "--model", "z-ai/glm-5.4:free",
-                                      stdin="Summarize the public API.")
-        self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
-        self.assertIn(f"zone: {self.closed} (closed)", out)
-        self.assertIn("remote free route is prohibited", out)
-
-    def test_a_paid_model_in_a_closed_zone_is_blocked_as_non_local(self):
-        # ADR 0008 reaches the secrets gate's zone check through the same
-        # shape rule: a closed regime is Sensitive, and only a local serving
-        # may serve it — the block comes from the Exposure clause (the zone
-        # clause alone never refuses an accountable market route).
-        out, _, code = self.run_check("--working-dir", self.closed,
-                                      "--model", "deepseek/deepseek-v4-pro",
-                                      stdin="Summarize the public API.")
-        self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
-        self.assertIn("reason: exposed (no-retention)", out)
-
-    def test_a_blocked_shape_is_not_certified_either(self):
-        # The zone answers before the content does: an empty shape in a
-        # closed folder with a free route is blocked, not uncertified —
-        # the verdict on stdout, exit 0 like every other answer.
-        out, _, code = self.run_check("--working-dir", self.closed,
-                                      "--model", "opencode/glm-5.3-flash",
-                                      stdin="")
-        self.assertEqual(code, 0)
-        self.assertIn("secrets gate: blocked by the free-use zone", out)
-        self.assertNotIn("not certified", out)
-
     # --- provenance judges the place a path reaches: links resolved ------
 
     def link(self, link, target):
@@ -668,60 +647,6 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
 
-    def test_by_default_the_gate_reads_the_skills_own_policy(self):
-        # The skill's policy travels with its script: no --policy given
-        # (the argparse default, DEFAULT_POLICY) and the gate still judges
-        # from it — never from an empty policy's assumptions. The exposure
-        # override in the default policy is what decides here.
-        self.write_zones({"zones": [{"path": self.work, "free": "sensitive"}],
-                          "default": "closed"})
-        policy = os.path.join(self.root, "policy.json")
-        with open(policy, "w", encoding="utf-8") as f:
-            json.dump({"exposure": {"deepseek/": "trains"}}, f)
-
-        with mock.patch.object(modelbandit, "DEFAULT_POLICY", policy):
-            out, _, code = self.run_check("--working-dir", self.work,
-                                          "--model", "deepseek/model",
-                                          stdin="Summarize the public API.")
-        self.assertEqual(code, 0)
-        self.assertIn("reason: exposed (trains)", out)
-
-        # The verdict tracks the file, not a stale fact: drop the override
-        # and the default exposure answers instead.
-        with open(policy, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-        with mock.patch.object(modelbandit, "DEFAULT_POLICY", policy):
-            out, _, code = self.run_check("--working-dir", self.work,
-                                          "--model", "deepseek/model",
-                                          stdin="Summarize the public API.")
-        self.assertEqual(code, 0)
-        self.assertIn("reason: exposed (no-retention)", out)
-
-    def test_a_direct_caller_stating_no_policy_gets_the_default_too(self):
-        # The edge default (policy_path=None) means "not stated", never
-        # "no policy" — the same skill-owned policy answers a library
-        # caller as answers the CLI (run_status spells the same rule).
-        policy = os.path.join(self.root, "policy.json")
-        with open(policy, "w", encoding="utf-8") as f:
-            json.dump({"exposure": {"deepseek/": "trains"}}, f)
-
-        printed = io.StringIO()
-        with mock.patch.object(modelbandit, "DEFAULT_POLICY", policy), \
-                mock.patch.object(modelbandit, "load_zones",
-                                  return_value={"zones": [],
-                                                "default": "closed"}), \
-                mock.patch.object(
-                    modelbandit, "effective_zone",
-                    return_value=modelbandit.Zone(path=self.work,
-                                                  regime="sensitive")), \
-                redirect_stdout(printed):
-            code = modelbandit.run_secrets_check(model="deepseek/model",
-                                                 policy_path=None,
-                                                 working_dir=self.work,
-                                                 material="Summarize it.")
-        self.assertEqual(code, 0)
-        self.assertIn("reason: exposed (trains)", printed.getvalue())
-
     def test_a_provenance_block_names_the_resolved_place_of_a_declared_link(self):
         # A zone declared through a link governs the place it reaches; the
         # block names both the resolved place and the declared path.
@@ -740,145 +665,6 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertEqual(code, 0)
         self.assertIn(f"zone: {self.closed} (closed) (declared: {link})", out)
         self.assertNotIn(line, out + err)
-
-
-class SecretsWriterCliTests(TempDirMixin):
-    """`--write-secrets` merges confirmed rules without removing prior rules."""
-
-    def run_writer(self, payload):
-        out, err, code = io.StringIO(), io.StringIO(), None
-        with mock.patch.object(sys, "argv", [
-                "modelbandit", "--write-secrets", "--working-dir", self.root]), \
-                mock.patch.object(sys, "stdin", io.StringIO(payload)), \
-                mock.patch("modelbandit.fetch_json",
-                           side_effect=AssertionError("no network in writer")), \
-                redirect_stdout(out), redirect_stderr(err):
-            try:
-                modelbandit.main()
-            except SystemExit as exc:
-                code = exc.code
-        return out.getvalue(), err.getvalue(), code
-
-    def test_writer_reports_rule_counts_without_echoing_values(self):
-        phrase = "rare-client-codename-7f2a"
-        pattern = r"private-case-\d{4}"
-        payload = json.dumps({"phrases": [phrase], "patterns": [pattern],
-                              "identifying": False, "commit": True})
-
-        out, _, code = self.run_writer(payload)
-
-        self.assertEqual(code, 0)
-        self.assertIn("added 1 phrase, 1 pattern", out)
-        self.assertNotIn(phrase, out)
-        self.assertNotIn(pattern, out)
-
-    def test_writer_invalid_regex_reports_index_without_echoing_value(self):
-        invalid = "client-regex-([secret"
-        payload = json.dumps({"phrases": [], "patterns": ["ok", invalid],
-                              "identifying": False, "commit": True})
-
-        _, _, code = self.run_writer(payload)
-
-        self.assertIn("pattern #2 is not a valid regex", str(code))
-        self.assertNotIn(invalid, str(code))
-
-    def test_rerun_keeps_existing_rules_and_deduplicates_exact_repeats(self):
-        self.write_rules({"phrases": ["existing client name"],
-                          "patterns": [r"old-key-\d+"]})
-        payload = json.dumps({
-            "phrases": ["existing client name", "new client name",
-                        "new client name"],
-            "patterns": [r"old-key-\d+", r"new-key-\d+",
-                         r"new-key-\d+"],
-            "identifying": False, "commit": True,
-        })
-
-        first, _, code = self.run_writer(payload)
-        second, _, second_code = self.run_writer(payload)
-
-        self.assertEqual(code, 0)
-        self.assertEqual(second_code, 0)
-        rules = modelbandit.load_secrets_rules(
-            os.path.join(self.root, "modelbandit.secrets.json"))
-        self.assertEqual(rules["phrases"],
-                         ["existing client name", "new client name"])
-        self.assertEqual(rules["patterns"],
-                         [r"old-key-\d+", r"new-key-\d+"])
-        self.assertIn("added 1 phrase, 1 pattern", first)
-        self.assertIn("already present 2 phrases, 2 patterns", second)
-
-    def test_identifying_rules_add_gitignore_entry_only_once(self):
-        self.write(".gitignore", "cache")
-        payload = json.dumps({"phrases": ["client codename"], "patterns": [],
-                              "identifying": True, "commit": True})
-
-        first, _, code = self.run_writer(payload)
-        second, _, second_code = self.run_writer(payload)
-
-        self.assertEqual(code, 0)
-        self.assertEqual(second_code, 0)
-        with open(os.path.join(self.root, ".gitignore"), encoding="utf-8") as f:
-            lines = f.read().splitlines()
-        self.assertEqual(lines, ["cache", "modelbandit.secrets.json"])
-        self.assertIn("gitignore: appended modelbandit.secrets.json", first)
-        self.assertIn("gitignore: already contains modelbandit.secrets.json", second)
-
-    def test_committed_rules_leave_gitignore_untouched(self):
-        original = "# Existing ignores\n.env\n"
-        self.write(".gitignore", original)
-        payload = json.dumps({"phrases": ["public codename"], "patterns": [],
-                              "identifying": False, "commit": True})
-
-        out, _, code = self.run_writer(payload)
-
-        self.assertEqual(code, 0)
-        with open(os.path.join(self.root, ".gitignore"), encoding="utf-8") as f:
-            self.assertEqual(f.read(), original)
-        self.assertIn("meant to be committed", out)
-
-    def test_commit_false_adds_gitignore_entry_even_when_not_identifying(self):
-        payload = json.dumps({"phrases": ["local project alias"], "patterns": [],
-                              "identifying": False, "commit": False})
-
-        out, _, code = self.run_writer(payload)
-
-        self.assertEqual(code, 0)
-        with open(os.path.join(self.root, ".gitignore"), encoding="utf-8") as f:
-            self.assertIn("modelbandit.secrets.json", f.read().splitlines())
-        self.assertIn("gitignore: appended", out)
-
-    @unittest.skipUnless(shutil.which("git"), "git is not installed")
-    def test_writer_refuses_to_gitignore_a_tracked_rules_file(self):
-        subprocess.run(["git", "-C", self.root, "init", "-q"], check=True,
-                       capture_output=True)
-        self.write_rules({"phrases": ["old phrase"]})
-        subprocess.run(["git", "-C", self.root, "add", "modelbandit.secrets.json"],
-                       check=True, capture_output=True)
-        rules_path = os.path.join(self.root, "modelbandit.secrets.json")
-        with open(rules_path, encoding="utf-8") as f:
-            original = f.read()
-        payload = json.dumps({"phrases": ["new phrase"], "patterns": [],
-                              "identifying": True, "commit": True})
-
-        _, _, code = self.run_writer(payload)
-
-        self.assertIn("git rm --cached modelbandit.secrets.json", str(code))
-        with open(rules_path, encoding="utf-8") as f:
-            self.assertEqual(f.read(), original)
-        self.assertFalse(os.path.exists(os.path.join(self.root, ".gitignore")))
-
-    def test_invalid_json_and_rule_shapes_fail_loudly(self):
-        cases = (("{", "invalid JSON"),
-                 (json.dumps({"phrases": "not a list", "patterns": [],
-                              "identifying": False, "commit": True}), "phrases"),
-                 (json.dumps({"phrases": [], "patterns": ["("],
-                              "identifying": False, "commit": True}), "pattern #1"))
-        for payload, problem in cases:
-            with self.subTest(problem=problem):
-                _, _, code = self.run_writer(payload)
-                self.assertIn(problem, str(code))
-                self.assertFalse(os.path.exists(
-                    os.path.join(self.root, "modelbandit.secrets.json")))
 
 
 class SecretsEndToEndTests(TempDirMixin):
@@ -909,19 +695,6 @@ class SecretsEndToEndTests(TempDirMixin):
     def git(self, *args):
         subprocess.run(["git", "-C", self.root, *args], check=True,
                        capture_output=True, text=True)
-
-    def test_a_rules_file_written_to_the_folder_changes_the_verdict(self):
-        material = "Ship the Project Bluebird notes to the client."
-        before, code = self.run_check(self.root, material)
-        self.assertEqual(code, 0, before)
-        self.assertIn("secrets gate: safe", before)
-
-        self.write_rules({"phrases": ["Project Bluebird"]})
-
-        after, code = self.run_check(self.root, material)
-        self.assertEqual(code, 0, after)
-        self.assertIn("secrets gate: sensitive", after)
-        self.assertIn("rule: phrase #1", after)
 
     @unittest.skipUnless(shutil.which("git"), "git is not installed")
     def test_a_gitignored_env_file_trips_the_gate_end_to_end(self):

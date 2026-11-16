@@ -234,12 +234,15 @@ class SharedLoaderSurfaceTests(unittest.TestCase):
 
 
 class PlansStatus4MatrixTests(unittest.TestCase):
-    """A malformed plans edit stops all four entry points with status 4.
+    """A malformed plans edit stops the policy-reading entry points with
+    status 4.
 
     The PolicyFileTests.assert_status_4_everywhere pattern, pointed at the
-    plans section: ranking run, status report, pre-flight and secrets check
-    each answer 4 with the message naming the offending entry — no
-    traceback, no exit 1, no verdict.
+    plans section: ranking run, status report and pre-flight each answer 4
+    with the message naming the offending entry — no traceback, no exit 1,
+    no verdict. The secrets check is absent by design: the mode split
+    (spec #75) leaves it answering material questions only, reading no
+    policy.
     """
 
     ENTRY_POINTS = (
@@ -247,8 +250,6 @@ class PlansStatus4MatrixTests(unittest.TestCase):
         ["--status"],                               # the status report
         ["--assert-allowed",
          "--model", "deepseek/deepseek-v4-pro"],    # the pre-flight
-        ["--check-secrets",
-         "--model", "deepseek/deepseek-v4-pro"],    # the secrets check
     )
 
     def setUp(self):
@@ -302,8 +303,6 @@ class PlansStatus4MatrixTests(unittest.TestCase):
             # a verdict rather than a load failure either way.
             (["--assert-allowed", "--model", "deepseek/deepseek-v4-pro",
               "--plain"], "allowed: deepseek/deepseek-v4-pro"),
-            (["--check-secrets", "--model", "deepseek/deepseek-v4-pro"],
-             "secrets gate: not certified"),
         )
         for argv, line in expectations:
             with self.subTest(entry=argv[0]):

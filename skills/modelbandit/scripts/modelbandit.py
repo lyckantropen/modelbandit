@@ -576,73 +576,6 @@ def _string_values(value) -> list[str]:
     return []
 
 
-RULES_FILE = "modelbandit.secrets.json"
-RULES_KEYS = ("phrases", "patterns")
-
-
-def validate_secrets_rules(payload, *, writer: bool = False,
-                           source: str = RULES_FILE) -> dict:
-    """Validate rule values once for both file loading and the writer."""
-    if not isinstance(payload, dict):
-        raise SystemExit(f"secrets rules {source} must be a JSON object with "
-                         f"{' / '.join(RULES_KEYS)}")
-    allowed = set(RULES_KEYS) | ({"identifying", "commit"} if writer else set())
-    unknown = sorted(set(payload) - allowed)
-    if unknown:
-        raise SystemExit(f"unknown secret rule key(s) in {source}: "
-                         f"{', '.join(unknown)}; known: "
-                         f"{', '.join(sorted(allowed))}")
-
-    rules: dict = {}
-    for key in RULES_KEYS:
-        if key not in payload and not writer:
-            continue
-        values = payload.get(key, [])
-        if not isinstance(values, list):
-            raise SystemExit(f"{key} in {source} must be a list of strings")
-        for index, entry in enumerate(values, 1):
-            kind = "phrase" if key == "phrases" else "pattern"
-            if not isinstance(entry, str) or not entry.strip():
-                raise SystemExit(f"{kind} #{index} is not a non-empty string")
-            if key == "patterns":
-                try:
-                    re.compile(entry)
-                except re.error:
-                    raise SystemExit(f"pattern #{index} is not a valid regex") \
-                        from None
-        rules[key] = list(values)
-
-    if writer:
-        # Either switch may stand alone: "identifying" implies gitignore, and
-        # plain rules mean a committed file. Only a present, non-boolean value
-        # is an error.
-        defaults = {"identifying": False, "commit": True}
-        for key, default in defaults.items():
-            value = payload.get(key, default)
-            if not isinstance(value, bool):
-                raise SystemExit(f"{key} must be a boolean")
-            rules[key] = value
-    return rules
-
-
-def load_secrets_rules(path: str) -> dict:
-    """The project's Secrets rules, validated — additive only.
-
-    `phrases` are literal inclusions, `patterns` regular expressions; both
-    tighten the built-in default and neither can disable it, so an empty or
-    absent file changes nothing. Anything else in the file is a loud stop:
-    a rule the tool silently ignores is a rule the user believes in.
-    """
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            payload = json.load(f)
-    except (OSError, ValueError):
-        raise SystemExit(f"cannot read secrets rules file {path}") from None
-    return validate_secrets_rules(payload, source=path)
-
-
 # Machine facts are matched as inclusions, so an identifier short enough to
 # occur in ordinary prose would make every shape Sensitive.
 MIN_IDENTIFIER_LEN = 4
@@ -737,16 +670,6 @@ def _run_git(root: str):
     return run
 
 
-def _rules_file_is_tracked(root: str) -> bool:
-    """Whether Git already tracks the project rules file in its index."""
-    try:
-        tracked = _run_git(root)(["ls-files", "--error-unmatch", "--",
-                                 RULES_FILE])
-    except Exception:
-        return False
-    return RULES_FILE in str(tracked or "").splitlines()
-
-
 def gitignored_facts(root: str, *, run=None, reader=None,
                      max_files: int = GITIGNORED_MAX_FILES,
                      max_bytes: int = GITIGNORED_MAX_BYTES) -> list[dict]:
@@ -829,8 +752,8 @@ def secrets_verdict(material: str, *, machine: dict | None = None,
     under ``gitignored`` ([{"path", "line"}] from the tree's gitignored
     files); ``rules`` adds literal ``phrases`` and regular-expression
     ``patterns``. Content-inclusion, any-of: a path mention by itself is not a
-    content inclusion. Returns (sensitive, rule) where rule names the class or
-    the project rule's index — never the matched value, which may itself be
+    content inclusion. Returns (sensitive, rule) where rule names the class
+    or the rule's index — never the matched value, which may itself be
     the secret.
     """
     if not isinstance(material, str) or not material:
@@ -870,11 +793,12 @@ def secrets_gate(material: str, *, machine: dict | None = None,
 
 
 def resolve_working_root(root: str | None = None, *, run=None) -> str:
-    """The working folder whose rules and gitignored files the gate reads.
+    """The working folder whose gitignored files the gate reads.
 
-    The git root when the folder is inside a repository — a project's rules
-    file belongs to the project — else the folder itself. A missing or failing
-    git leaves the folder as given, never blocks the check.
+    The git root when the folder is inside a repository — a project's
+    gitignored content belongs to the project — else the folder itself. A
+    missing or failing git leaves the folder as given, never blocks the
+    check.
     """
     base = os.path.abspath(root or os.getcwd())
     if run is None:
@@ -889,27 +813,27 @@ def resolve_working_root(root: str | None = None, *, run=None) -> str:
 
 
 def secrets_check(material: str, *, root: str | None = None,
-                  rules: dict | None = None, machine: dict | None = None,
+                  machine: dict | None = None,
                   gitignored: list | None = None,
                   outside_files=()) -> tuple[bool, str]:
-    """The collect-demand verdict, assembled at the edge.
+    """The one material-assessment entry point, assembled at the edge.
 
-    Rules come from `modelbandit.secrets.json` at the working-folder root,
-    machine facts are gathered here, and gitignored content is read from the
-    tree — so the gate holds without the agent assembling anything. Each part
-    is injectable, keeping the decision itself pure. Returns
-    (sensitive, rule) as `secrets_verdict` does.
+    The built-in rules only — credential patterns, this machine's
+    identifiers, gitignored content from the tree, and the capped content
+    of any named outside file — with no project rules file anywhere, so the
+    deal-time automatic run and the manual mode cannot classify
+    differently. Machine facts are gathered here; each part is injectable,
+    keeping the decision itself pure. Returns (sensitive, rule) as
+    `secrets_verdict` does.
     """
     working_root = resolve_working_root(root)
-    if rules is None:
-        rules = load_secrets_rules(os.path.join(working_root, RULES_FILE))
     facts = dict(machine_facts() if machine is None else machine)
     facts["gitignored"] = (gitignored_facts(working_root)
                            if gitignored is None else list(gitignored))
     facts["outside_file_contents"] = (
         _string_values(facts.get("outside_file_contents"))
         + outside_file_contents(working_root, outside_files))
-    return secrets_verdict(material, machine=facts, rules=rules)
+    return secrets_verdict(material, machine=facts)
 
 
 # Exit contract v2 (ADR-0004): status says whether the tool ran; the output
@@ -949,28 +873,26 @@ def closed_regime_provenance(sources, zones: dict, *, environ=None,
 
 def run_secrets_check(*, working_dir: str | None = None,
                       material: str | None = None,
-                      outside_files=(), model: str | None = None,
-                      policy_path: str | None = None,
+                      outside_files=(),
                       sensitive: bool = False, as_json: bool = False) -> int:
     """Print the Secrets gate's verdict for one shape's material.
 
-    Material is read from stdin; the zone the check judged by, the verdict,
-    the rule that tripped and the rules file in force are printed. Every
-    verdict exits 0 — safe, sensitive, not certified, or blocked by the
-    free-use zone — and the printed lines say which (exit contract v2,
-    ADR-0004); 4 is a rules/config error and 2 a usage error. A shape with
-    no material given cannot be certified — silence is never read as safe.
+    Material is read from stdin; the verdict and the rule that tripped it
+    are printed. Every verdict exits 0 — safe, sensitive, not certified, or
+    blocked on provenance — and the printed lines say which (exit contract
+    v2, ADR-0004); 4 is a rules/config error and 2 a usage error. A shape
+    with no material given cannot be certified — silence is never read as
+    safe.
 
-    The zone answers ahead of the content verdict: material whose
-    provenance has the effective closed regime, or a `--model` the
-    effective zone's regime cannot admit. The zone is named; the material
-    never is. With `as_json`, one JSON object replaces the lines (mode,
-    ok, verdict, outcome, zone, reason, rule).
+    Material questions only (the mode split, spec #75): the built-in rules
+    over the given material, plus outside-file provenance against closed
+    paths. Model-and-zone questions are the pre-flight's alone
+    (`--assert-allowed`); the check reads no policy and runs no zone block.
+    The zone of a provenance block is named; the material never is. With
+    `as_json`, one JSON object replaces the lines (mode, ok, verdict,
+    outcome, zone, reason, rule); the `outcome` values are the printed
+    verdict words (safe / sensitive / not certified / blocked).
     """
-    # One policy default for every entry point (run_status spells it the
-    # same way): None means "not stated", never "no policy" — the skill's
-    # own policy.json answers.
-    policy_path = policy_path or DEFAULT_POLICY
     if material is None:
         try:
             material = sys.stdin.read()
@@ -981,9 +903,7 @@ def run_secrets_check(*, working_dir: str | None = None,
     outside_paths = [path if os.path.isabs(path)
                      else os.path.join(path_base, path)
                      for path in outside_files]
-    rules_path = os.path.join(root, RULES_FILE)
     try:
-        rules = load_secrets_rules(rules_path)
         zones = load_zones()
     except SystemExit as exc:
         print(f"secrets gate: rules/config error ({exc.code})", file=sys.stderr)
@@ -996,25 +916,12 @@ def run_secrets_check(*, working_dir: str | None = None,
         blocked = closed_regime_provenance(outside_paths, zones)
         if blocked is not None:
             reason = "material provenance from this zone"
-    if reason is None and model:
-        try:
-            facts = policy_facts(policy_path)
-        except SystemExit as exc:
-            # The message, not the code: `exc.code` here carries the
-            # diagnostic itself ("cannot read policy file ..."), which the
-            # old code interpolated into `str()` and printed as "(...)"
-            # — the one detail the operator needs, swallowed.
-            print(f"secrets gate: rules/config error ({exc})",
-                  file=sys.stderr)
-            return RULES_CONFIG_ERROR
-        reason = zone_block(model, zone, policy=facts, sensitive=sensitive)
-        blocked = zone
     if reason is not None:
-        # A zone block is a verdict, not a failure: exit 0, the lines say
-        # blocked (v2). The zone is named; the material never is.
+        # A provenance block is a verdict, not a failure: exit 0, the lines
+        # say blocked (v2). The zone is named; the material never is.
         if as_json:
             emit_json({"mode": "check-secrets", "ok": True,
-                       "outcome": "zone-blocked", "verdict": False,
+                       "outcome": "blocked", "verdict": False,
                        "zone": zone_payload(blocked),
                        "reason": reason, "rule": None})
         else:
@@ -1025,13 +932,13 @@ def run_secrets_check(*, working_dir: str | None = None,
     if not isinstance(material, str) or not material.strip():
         if as_json:
             emit_json({"mode": "check-secrets", "ok": True,
-                       "outcome": "not-certified", "verdict": False,
+                       "outcome": "not certified", "verdict": False,
                        "zone": zone_payload(zone),
                        "reason": "no material given", "rule": None})
         else:
             print("secrets gate: not certified (no material given)")
         return 0
-    sensitive, rule = secrets_check(material, root=root, rules=rules,
+    sensitive, rule = secrets_check(material, root=root,
                                     outside_files=outside_paths)
     if sensitive:
         if as_json:
@@ -1049,104 +956,13 @@ def run_secrets_check(*, working_dir: str | None = None,
                    "reason": None, "rule": None})
     else:
         print("secrets gate: safe")
-    if not as_json and os.path.exists(rules_path):
-        print(f"rules: {rules_path}")
-    return 0
-
-
-def run_secrets_writer(*, working_dir: str | None = None,
-                       payload: str | None = None) -> int:
-    """Write or merge confirmed project rules and apply the gitignore choice."""
-    if payload is None:
-        try:
-            payload = sys.stdin.read()
-        except Exception as exc:
-            raise SystemExit(f"cannot read --write-secrets input: {exc}") from None
-    try:
-        submitted = json.loads(payload)
-    except (TypeError, ValueError):
-        raise SystemExit("invalid JSON for --write-secrets") from None
-    submitted = validate_secrets_rules(
-        submitted, writer=True, source="--write-secrets input")
-    incoming = {key: submitted[key] for key in RULES_KEYS}
-
-    root = resolve_working_root(working_dir)
-    rules_path = os.path.join(root, RULES_FILE)
-    existing = load_secrets_rules(rules_path)
-    if (submitted["identifying"] or not submitted["commit"]) \
-            and _rules_file_is_tracked(root):
-        raise SystemExit(f"{RULES_FILE} is already tracked; first run "
-                         f"`git rm --cached {RULES_FILE}`, then rerun "
-                         "--write-secrets")
-    merged = {}
-    added, present = {}, {}
-    for key in RULES_KEYS:
-        merged[key] = []
-        seen = set()
-        for value in existing.get(key, []):
-            if value not in seen:
-                seen.add(value)
-                merged[key].append(value)
-        added[key], present[key] = [], []
-        added_seen, present_seen = set(), set()
-        for value in incoming[key]:
-            if value in seen:
-                if value not in present_seen:
-                    present[key].append(value)
-                    present_seen.add(value)
-                continue
-            seen.add(value)
-            merged[key].append(value)
-            if value not in added_seen:
-                added[key].append(value)
-                added_seen.add(value)
-
-    with open(rules_path, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(merged, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-
-    def counts(values):
-        return ", ".join(
-            f"{len(values[key])} {key[:-1] if len(values[key]) == 1 else key}"
-            for key in RULES_KEYS)
-
-    # Keep the summary at the level of kinds and counts, never rule values.
-    print(f"added {counts(added)}; already present {counts(present)}")
-    print(f"secrets rules: {rules_path}")
-
-    ignore_path = os.path.join(root, ".gitignore")
-    try:
-        with open(ignore_path, encoding="utf-8") as f:
-            ignored_lines = f.read().splitlines()
-    except FileNotFoundError:
-        ignored_lines = []
-    already_ignored = any(line.strip() == RULES_FILE for line in ignored_lines)
-
-    if submitted["identifying"] or not submitted["commit"]:
-        if already_ignored:
-            print(f"gitignore: already contains {RULES_FILE}")
-        else:
-            with open(ignore_path, "a+b") as f:
-                f.seek(0, os.SEEK_END)
-                if f.tell():
-                    f.seek(-1, os.SEEK_END)
-                    if f.read(1) not in (b"\n", b"\r"):
-                        f.write(b"\n")
-                f.write((RULES_FILE + "\n").encode("utf-8"))
-            print(f"gitignore: appended {RULES_FILE} (identifying rules or commit=false)")
-    elif already_ignored:
-        # A later run does not re-assert the commit decision; say what is true.
-        print(f"gitignore: already lists {RULES_FILE}; left unchanged")
-    else:
-        print(f"gitignore: unchanged; {RULES_FILE} is meant to be committed")
     return 0
 
 
 def run_zones_writer(*, payload: str | None = None) -> int:
     """Validate the interview's zones proposal and write the machine's file.
 
-    The contract mirrors `--write-secrets`'s invocation — JSON on stdin —
-    but not its merge: zones are a whole-file posture, so the submitted
+    JSON comes in on stdin; zones are a whole-file posture, so the submitted
     config goes through `validate_zones` **before** anything is written.
     Invalid config refuses with status 4 naming the offending entry and
     writes nothing: a pre-existing `zones.json` is left byte-identical.
@@ -1857,19 +1673,21 @@ def load_policy_bundle(policy_path: str | None) -> dict:
 def run_status(*, working_dir: str | None = None,
                policy_path: str | None = None,
                sensitive: bool = False, as_json: bool = False) -> int:
-    """The offline setup report: zone, zones file, secrets file, policy age.
+    """The offline setup report: zone, zones file, built-in secrets rules,
+    policy age.
 
     The machine-readable companion to the README Setup section — read-only
-    and fully offline: no endpoint fetch, no classification, no quota, and
-    the secrets file's presence only, never its contents. `--working-dir`
+    and fully offline: no endpoint fetch, no classification, no quota. The
+    secrets surface is the built-in rules now in force — a note, never a
+    file: the project rules file is gone (spec #75). `--working-dir`
     judges the folder the way the pre-flight does, and the zones path is
     spelled the way the run header spells it.
 
-    Exit status: 0 whenever the setup files are absent — a missing zones or
-    secrets file is the documented default, not an answer the status must
-    carry; 4 only when a file that exists fails validation (zones or
-    policy), named on stderr. With `as_json`, one JSON object replaces the
-    lines (mode, ok, zone, zones_file, secrets_file, policy).
+    Exit status: 0 whenever the zones file is absent — a missing zones file
+    is the documented default, not an answer the status must carry; 4 only
+    when a file that exists fails validation (zones or policy), named on
+    stderr. With `as_json`, one JSON object replaces the lines (mode, ok,
+    zone, zones_file, secrets, policy).
     """
     policy_path = policy_path or DEFAULT_POLICY
     try:
@@ -1885,16 +1703,12 @@ def run_status(*, working_dir: str | None = None,
         print(f"status: config error ({exc.code})", file=sys.stderr)
         return RULES_CONFIG_ERROR
     label = zones_file_label()
-    root = resolve_working_root(working_dir)
-    secrets_path = os.path.join(root, RULES_FILE)
-    secrets_present = os.path.exists(secrets_path)
     age = policy_age_days(policy_path)
     if as_json:
         emit_json({"mode": "status", "ok": True,
                    "zone": zone_payload(zone),
                    "zones_file": {"path": label, "present": zones_present},
-                   "secrets_file": {"path": secrets_path,
-                                    "present": secrets_present},
+                   "secrets": {"rules": "built-in"},
                    "policy": {"path": policy_path, "age_days": age}})
         return 0
     print(f"zone: {zone_label(zone, sensitive=sensitive)}")
@@ -1902,17 +1716,11 @@ def run_status(*, working_dir: str | None = None,
         print(f"zones file: present ({label})")
     else:
         # Absent is the documented default (exit 0), never silence: the
-        # same line the ranking header prints (issue #38), plus the one
-        # action that changes it — create the file, via the skill's setup
-        # interview.
+        # same line the ranking header prints (issue #38).
         print(zones_absent_line())
-        print(f"next: create {label} — see the skill's setup interview")
-    if secrets_present:
-        # Presence only: the report never reads, parses or prints contents.
-        print(f"secrets file: present ({secrets_path})")
-    else:
-        print(f"secrets file: absent ({secrets_path}) — "
-              f"built-in default rules apply")
+    # The built-in rules are the whole secrets surface now in force — the
+    # report states them instead of a file it would have to find (spec #75).
+    print("secrets: built-in rules apply")
     age_txt = f"{age}d old" if age is not None else "unknown"
     print(f"policy: {policy_path} — {age_txt}")
     return 0
@@ -4830,10 +4638,15 @@ def main() -> None:
                     help="Secrets gate check: reads the shape's material from "
                          "stdin and prints the verdict and rule; repeat "
                          "--outside-file PATH for named outside content. "
-                         "Exit 0 for every verdict — safe, sensitive, not "
-                         "certified, or blocked by the free-use zone — the "
-                         "printed lines say which; 4 rules/config error, "
-                         "2 usage errors. --json answers with one object.")
+                         "Material questions only — the built-in rules over "
+                         "the material, plus provenance against closed "
+                         "paths; model-and-zone questions belong to "
+                         "--assert-allowed. It needs no policy and no "
+                         "network. Exit 0 for every verdict — safe, "
+                         "sensitive, not certified, or blocked by the "
+                         "free-use zone — the printed lines say which; "
+                         "4 rules/config error, 2 usage errors. --json "
+                         "answers with one object.")
     ap.add_argument("--outside-file", action="append", default=[], metavar="PATH",
                     help="include this outside file's capped content in --check-secrets "
                          "(repeatable; relative paths use --working-dir)")
@@ -4855,11 +4668,8 @@ def main() -> None:
                          "retains training data is refused by default. "
                          "Contradicts --sensitive.")
     ap.add_argument("--model", default=None, metavar="ID",
-                    help="the model a --assert-allowed or --check-secrets run "
-                         "will use (checked against the effective zone)")
-    ap.add_argument("--write-secrets", action="store_true",
-                    help="write or merge confirmed Secrets gate rules from "
-                         "JSON on stdin; apply the commit/gitignore decision")
+                    help="the model a --assert-allowed run will use (checked "
+                         "against the effective zone); read by no other mode")
     ap.add_argument("--write-zones", action="store_true",
                     help="write the machine's zones file from JSON on stdin "
                          "(the Set up the free-use zones interview's "
@@ -4869,8 +4679,8 @@ def main() -> None:
                          "atomically and the path written is printed")
     ap.add_argument("--working-dir", default=None, metavar="PATH",
                     help="working folder (default: cwd). Secrets gate "
-                         "commands read modelbandit.secrets.json and "
-                         ".gitignore from its git root; every run reads its "
+                         "commands gather machine facts and gitignored "
+                         "content from its git root; every run reads its "
                          "free-use zone from the machine's zones file")
     ap.add_argument("--check-policy", action="store_true",
                     help="report summary drift (ranked models without summaries, "
@@ -4878,8 +4688,8 @@ def main() -> None:
     ap.add_argument("--status", action="store_true",
                     help="offline setup report for this folder "
                          "(--working-dir): the effective zone, the zones "
-                         "file, the secrets file (presence only, never "
-                         "contents) and the policy age. No fetch, no "
+                         "file, the built-in secrets rules in force and the "
+                         "policy age. No fetch, no "
                          "classification, no quota. Exit 0 even when setup "
                          "files are absent (the documented default); 4 only "
                          "when an existing zones or policy file fails "
@@ -5004,7 +4814,7 @@ def main() -> None:
                                                or args.substitute is not None)
         served = (int(args.check_secrets) + int(args.assert_allowed)
                   + int(args.status) + int(domain_served))
-        riders = (args.write_secrets or args.write_zones or args.list_domains
+        riders = (args.write_zones or args.list_domains
                   or args.check_policy or args.scope
                   or args.anchors is not None
                   or (args.domain and not domain_served))
@@ -5031,6 +4841,11 @@ def main() -> None:
             print(f"substitution refused: {refusal}")
         raise SystemExit(0)
 
+    # `--model` is the pre-flight's question (the mode split, spec #75): the
+    # check answers material questions only, so the flag is refused here
+    # rather than silently ignored.
+    if args.model and not args.assert_allowed:
+        ap.error("--model is read only by --assert-allowed")
     if args.assert_allowed:
         # The pre-flight reads the zone and the local policy, never the board:
         # an orchestrator refuses a model the plan should not have produced
@@ -5048,20 +4863,14 @@ def main() -> None:
         # no board are needed to decide whether a shape is Sensitive.
         raise SystemExit(run_secrets_check(working_dir=args.working_dir,
                                            outside_files=args.outside_file,
-                                           model=args.model,
-                                           policy_path=args.policy,
                                            sensitive=args.sensitive,
                                            as_json=args.json))
-    if args.write_secrets:
-        raise SystemExit(run_secrets_writer(working_dir=args.working_dir))
     if args.write_zones:
         # The machine's zones file: the interview's proposal on stdin,
         # validated before anything is written — status 4 with the offending
         # entry named writes nothing, a valid config replaces the file
         # atomically. Needs no policy and no network.
         raise SystemExit(run_zones_writer())
-    if args.model:
-        ap.error("--model is read only by --assert-allowed and --check-secrets")
     if args.status:
         # The setup report reads the folder and the machine's files, never
         # the network: absent setup files are the documented default (exit
