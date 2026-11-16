@@ -4699,10 +4699,25 @@ def main() -> None:
     ap.add_argument("--out-tokens", type=int, help="override profile output tokens")
     ap.add_argument("--cached-share", type=float,
                     help="override profile cached share of input (0..1)")
-    ap.add_argument("--tickets", type=int, default=1, help="runs to project for")
+    ap.add_argument("--tickets", type=int, default=None,
+                    help="runs to project for")
     ap.add_argument("--deal", action="store_true",
                     help="deal tickets across the eligible pool by seeded draw "
-                         "from the preference-blended distribution")
+                         "from the preference-blended distribution; with "
+                         "--ticket-files the batch splits at collection — "
+                         "ordinary tickets are dealt and tripped ones are "
+                         "reported held, so the held lane runs again in one "
+                         "invocation")
+    ap.add_argument("--ticket-files", action="append", metavar="PATH",
+                    help="one per ticket: name this run's ticket files "
+                         "(repeatable); the script reads them itself at deal "
+                         "time and applies the built-in credential, "
+                         "identifier, machine-fact and gitignored-content "
+                         "rules to each one — scoped to that file's own "
+                         "directory — with no project rules file anywhere. A "
+                         "tripped ticket is reported `held: <ids> (sensitive)` "
+                         "for its local-only follow-up run; the rest of the "
+                         "batch is dealt across the eligible pool")
     ap.add_argument("--substitute", default=None, metavar="ID",
                     help="with --deal: re-derive this seeded deal and print "
                          "the substitution record — the named model's Spare "
@@ -4772,6 +4787,24 @@ def main() -> None:
         ap.error("--reason is read only by --substitute")
     if args.substitute is not None and not args.deal:
         ap.error("--substitute is read only by --deal")
+
+    # --ticket-files lives in the deal's shape too (the automatic material
+    # assessment runs at deal time): refused where it would say nothing, and
+    # a named path that is no ticket file is named before anything is
+    # fetched. The named files are the batch — one file, one ticket — so
+    # --tickets would restate the count the collection computes; it is
+    # refused rather than silently ignored.
+    if args.ticket_files and not args.deal:
+        ap.error("--ticket-files is read only by --deal")
+    if args.ticket_files and args.tickets is not None:
+        ap.error("--tickets is read only without --ticket-files "
+                 "(the named files are the batch)")
+    if args.tickets is None:
+        args.tickets = 1
+    if args.ticket_files:
+        for path in args.ticket_files:
+            if not os.path.isfile(path):
+                ap.error(f"--ticket-files: not a ticket file: {path}")
 
     # --json answers the verdict modes only; the ranking table is never
     # JSON-ized (issue #41), so anywhere else the flag would be silently
@@ -5328,7 +5361,41 @@ def main() -> None:
               f"(budget pressure moves within the ranking, by price)")
 
     local_share = None
+    held_ids: list[int] = []
     if args.deal:
+        # Deal-time material assessment (spec #75, ticket #86): the named
+        # ticket files are read here and each is assessed through the shared
+        # material-assessment entry point — built-in credential, identifier,
+        # machine-fact and gitignored-content rules, scoped to that file's
+        # own directory, with no project rules file anywhere. The verdict
+        # splits the batch at collection: a tripped ticket is reported held
+        # and excluded from this invocation's deal — never silently dropped,
+        # never dealt to a cloud route. A run that already states the
+        # Sensitive shape (the flag, or a closed place) is the held lane's
+        # follow-up, so its trips deal under the local-only fence instead of
+        # holding; the deal's seed math is untouched — one invocation still
+        # deals one shape.
+        if args.ticket_files:
+            ordinary = 0
+            for index, path in enumerate(args.ticket_files, 1):
+                try:
+                    with open(path, "rb") as f:
+                        material = f.read().decode("utf-8", "replace")
+                except OSError:
+                    ap.error(f"--ticket-files: cannot read: {path}")
+                tripped, _rule = secrets_check(
+                    material, root=os.path.dirname(os.path.abspath(path)))
+                if tripped and not sensitive_shape(shape):
+                    held_ids.append(index)
+                else:
+                    ordinary += 1
+            # The dealt batch is the tickets that passed, so the draw, the
+            # projection and the budget verdict speak this invocation's
+            # dealt count.
+            args.tickets = ordinary
+            if held_ids:
+                print(f"held: {', '.join(str(i) for i in held_ids)} "
+                      "(sensitive)")
         # Every pool member's base is the table's own scoring number: the
         # fit-adjusted task score, at score scale for the whole pool.
         fit_adjusted_task_scores = {
@@ -5480,6 +5547,10 @@ def main() -> None:
                                       "baseline": (base_per * args.tickets
                                                    if base_per else None)},
                        "zone": zone_payload(zone)}
+            if held_ids:
+                # The held report's machine twin (ticket #86): the ids this
+                # invocation held at collection, as the readout printed.
+                payload["held"] = held_ids
             if local_share is not None:
                 payload["local_share"] = local_share
                 # The Spares twin of the readout's spare column (issue #71):
