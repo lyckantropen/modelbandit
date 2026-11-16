@@ -103,26 +103,9 @@ candidate's band may come from.
 _Avoid_: registry, catalogue, inventory
 
 **Zone**
-The machine-wide declaration of where free models may run: a path with a
-regime for everything under it, resolved by longest prefix, with anything
-undeclared `closed`. A zone governs the place a path reaches - links resolved
-- never the string it is spelled with. A run's effective zone is the stricter of its working
-folder's and its origin repository's, so a worktree carries the posture of the
-content it holds. Additive-only: a file can open less, never more.
+The machine-wide declaration of where free models may run. A zone is a path with a regime for everything under it, resolved by longest prefix, with anything undeclared `closed`. The effective regime at any path combines all applicable regimes — from working folder settings and origin repository posture — taking the stricter (most restrictive) one, so a worktree's closed declaration covers its entire content tree without needing per-repository configuration. Zones are additive-only: a file can open less, never more.
+_Regimes_: The available regimes are `open`, `sensitive`, and `closed` — ordered by restrictiveness where each stricter level excludes everything milder ones do plus additional constraints. `closed` prohibits any remote free route from serving; `sensitive` requires local-only candidates. The zone's posture is ultimately binary in the sense that it either permits or blocks free routes, but the hierarchy provides three distinct levels of strictness to express different policies.
 _Avoid_: allowlist, permission (it is a place, not a grant)
-
-**Regime**
-One of the three zone levels — `open`, `sensitive`, `closed` — ordered, with a
-stricter regime dominating every milder one: `closed` excludes everything
-`sensitive` excludes, plus every remote free route.
-_Avoid_: level, tier (both suggest optional strength rather than order)
-
-**Closed area**
-A path whose effective regime is `closed`: no remote free route may serve it,
-and it is never read, listed, grepped, summarised or copied for any reason.
-Blocked work stops and reports the zone; it never substitutes a paid model or
-reclassifies the shape.
-_Avoid_: private folder (a folder name, not a posture), sensitive area
 
 **Secrets gate**
 The check run at collect-demand: the project's optional secrets file
@@ -169,28 +152,116 @@ limit, a route withdrawn mid-run, an outage. It is why free wins sometimes but
 not most of the time, and why it may win everything on a job it genuinely fits.
 _Avoid_: penalty, handicap, discount
 
-**Free share**
-The fraction of a deal's tickets that Free routes drew. Reported, never capped
-and never floored: some of the time on ordinary shapes, all of it on a shape
-free genuinely serves best, none when it does not stack up.
-_Avoid_: quota, free budget, cap
+**Share**
+The fraction of a deal's tickets drawn by each class — Free routes, this machine's own servings, or plan rows. Reported as `free share: N/M tickets (P%)`, `local share: N/M tickets (P%)`, or `plan share: N/M tickets (P%)`; never capped and never floored: some of the time on ordinary shapes, all of it on a shape that genuinely serves best, none when it does not stack up. The plan share is printed by code but has no dedicated entry here — this is where its concept lives.
+_Avoid_: quota, free budget, cap, local quota, hardware budget (the draw reports itself, never gates)
 
-**Local share**
-The fraction of a deal's tickets this machine's own servings drew, printed
-beside Free share and plan share as `local share: N/M tickets (P%)`.
-Reported, never capped and never floored: how much of the deal stays on
-local hardware reads at the same glance.
-_Avoid_: local quota, hardware budget (it reports the draw, never gates it)
+**Free route**
+A price class: a candidate served at $0 — an OpenRouter `:free` slug, an
+OpenCode `opencode/*` model, or a local model. The *serving* is free, not the
+model family — the same family may serve paid routes with different exposure.
+A curated serving (harness or local) inherits a discounted share of its
+family's popularity: a limited-time, rate-limited surrogate does not carry the
+family's full standing.
+_Avoid_: free model (the model isn't free, the serving is), route kind
 
-**Free quota**
-OpenRouter's daily free-request counter: one figure shared by every `:free`
-route on the account, reset at UTC midnight, spent only by the routes
-OpenRouter serves for nothing. Read before a plan is priced and reported in the
-run header; the reserve is protected, and `:free` routes leave the pool only
-when remaining quota is below it. Plan size does not gate eligibility because
-the deal may draw fewer Free tickets than planned. The provider's allowance,
-never a judgement of Free share.
-_Avoid_: free budget, cap, rate limit (that is per minute, and unqueryable)
+**Route kind**
+What serves a candidate — a serving identity, decided by the id and the
+serving alone: market (an OpenRouter paid slug), free-slug (an OpenRouter
+`:free` slug), harness (an OpenCode `opencode/*` model), plan (an OpenCode Go
+`opencode-go/*` model), or local (served on this machine). Never a price,
+never a policy claim; an unrecognized namespace fails closed. Plan and metered routes are captured here as route kinds — they're not separate concepts. The free-slug kind is also the Free route category.
+_Plan route_: A candidate served through a subscription plan (Route kind `plan`): $0 cash within its Allowance, scored as risk of its Draw. Not a Free route — the zone gate does not refuse it, the free counter does not count it, and it is the family model at full quality, not a rate-limited surrogate._
+_Metered route_: A candidate billed per ticket at its list price (Route kind `market`): Plan route's price-class counterpart, Free route's opposite. The default economics — nothing prepaid, every ticket on the bill._
+_Avoid_: provider, price class (that is Free route), catalogue label
+
+**Twin**
+The same family's serving in another market: a Plan route's Twin is its
+family's Metered route, and the reverse. Twins substitute for each other at
+cap — the model identity is preserved while the market flips.
+_Avoid_: alias, duplicate, fallback (substitution is one behaviour of a Twin)
+
+**Hint**
+A user observation about a model: a note, its fit per domain, and its evidence.
+Weighed, not obeyed; it annotates, never reorders.
+_Avoid_: verdict, preference, taste
+
+**Fit**
+The direction of a hint for one domain: favor, avoid, or neutral (explicitly no
+opinion). Omitted fit is an unanswered question; explicit neutral is an
+answered one. Only favor and avoid tilt the deal.
+_Avoid_: affinity score, weight (it is not numeric)
+
+**Evidence**
+How settled a hint is: validated (user-confirmed) or suspected (untested).
+_Avoid_: confidence, certainty
+
+**Affinity**
+The derived numeric tilt of the deal toward or away from a model, computed at run time from fit and evidence through the factors. Never stored. The four multipliers mapping fit × evidence to affinity are part of this concept.
+_Avoid_: weight table, preference score, factor weights (they multiply into affinity)
+
+**Rung**
+A position on a model's effort ladder, bound from the effort intent. Reasoning
+tokens bill as output, so the rung is a real cost lever.
+_Avoid_: effort level, tier
+
+**Endpoint spread**
+The ratio between the cheapest and dearest provider price for one model.
+_Avoid_: price range
+
+**Baseline**
+The price anchor model, used for Δ columns and nothing else.
+_Avoid_: reference model, benchmark (quality connotations)
+
+**Nominal floor**
+A marginal-zero ticket's effective price in the score: Free risk times the Draw
+it would burn — one rule, two cases. A Plan route prices as risk of its own
+list-priced Draw; a Free route has no Draw and prices against the pool's
+cheapest paid ticket. Never zero, so marginal zero cannot win by division, and
+always below a healthy paid row, so it can still win. Applied uniformly to Free
+routes regardless of Exposure — the Exposure difference is decided by the
+Sensitive gate, not by price. If the pool has no priced paid ticket, use the $1
+nominal reference ticket as the basis for Free risk.
+_Avoid_: free price, effective cost, shadow price
+
+**Allowance**
+The dollar budget a subscription plan grants per model, per window (a rolling
+5-hour window, a week, a month). Drawn down by use; not readable from an
+account balance. A plan route serves at $0 marginal only while its Allowance
+holds.
+_Avoid_: cap (the window is a property of the Allowance), quota (that counts
+free requests), budget (that is the user's spending limit)
+
+**Draw**
+What one ticket consumes of an Allowance: its cost counted at the plan's list
+price, independent of the $0 cash its Draw actually charges. The opportunity
+cost of a plan ticket — burning cheap Draw on one ticket leaves less for the
+next.
+_Avoid_: cost (that is cash or blended price), usage, spend
+
+**Anchor**
+A benchmark row carried into a research brief as a fact to verify or extend:
+first-party numbers for a model under review. Not the Baseline — that is the
+price anchor for Δ columns; anchors serve the research. Keep the two distinct.
+_Avoid_: price anchor, baseline
+
+**Gap**
+A model ranked on a domain board without a summary. Work the cycle should
+do, not a fault in the policy.
+_Avoid_: missing entry (implies error)
+
+**Stale**
+A summary or signal whose key no longer ranks on any domain board. The model
+may still rank below the depth the boards show; whether and where it does is
+something to look up at run time, not part of the state. A drift state of the
+policy, not of the model.
+_Avoid_: expired, deprecated (those are vendor statuses, not drift states)
+
+**Twin**
+The same family's serving in another market: a Plan route's Twin is its
+family's Metered route, and the reverse. Twins substitute for each other at
+cap — the model identity is preserved while the market flips.
+_Avoid_: alias, duplicate, fallback (substitution is one behaviour of a Twin)
 
 ### Taste
 
@@ -210,13 +281,8 @@ How settled a hint is: validated (user-confirmed) or suspected (untested).
 _Avoid_: confidence, certainty
 
 **Affinity**
-The derived numeric tilt of the deal toward or away from a model, computed at
-run time from fit and evidence through the factors. Never stored.
-_Avoid_: weight table, preference score
-
-**Factors**
-The four multipliers mapping fit × evidence to affinity.
-_Avoid_: weights, coefficients
+The derived numeric tilt of the deal toward or away from a model, computed at run time from fit and evidence through the factors. Never stored. The four multipliers mapping fit × evidence to affinity are part of this concept.
+_Avoid_: weight table, preference score, factor weights (they multiply into affinity)
 
 ### Cost
 
@@ -238,7 +304,9 @@ What serves a candidate — a serving identity, decided by the id and the
 serving alone: market (an OpenRouter paid slug), free-slug (an OpenRouter
 `:free` slug), harness (an OpenCode `opencode/*` model), plan (an OpenCode Go
 `opencode-go/*` model), or local (served on this machine). Never a price,
-never a policy claim; an unrecognized namespace fails closed.
+never a policy claim; an unrecognized namespace fails closed. Plan and metered routes are captured here as route kinds — they're not separate concepts. The free-slug kind is also the Free route category.
+_Plan route_: A candidate served through a subscription plan (Route kind `plan`): $0 cash within its Allowance, scored as risk of its Draw. Not a Free route — the zone gate does not refuse it, the free counter does not count it, and it is the family model at full quality, not a rate-limited surrogate._
+_Metered route_: A candidate billed per ticket at its list price (Route kind `market`): Plan route's price-class counterpart, Free route's opposite. The default economics — nothing prepaid, every ticket on the bill._
 _Avoid_: provider, price class (that is Free route), catalogue label
 
 **Free route**
@@ -275,49 +343,18 @@ price, independent of the $0 cash its Draw actually charges. The opportunity
 cost of a plan ticket — burning cheap Draw on one ticket leaves less for the
 next.
 _Avoid_: cost (that is cash or blended price), usage, spend
+**Zone gate**
+The mechanical check at the source: free-slug and harness candidates are dropped when the effective regime is `closed`. This is how zones prevent remote free routes from running.
+_Avoid_: route kind, admission (those say what survives; this says where it starts)
 
-**Plan route**
-A candidate served through a subscription plan (Route kind `plan`): $0 cash
-within its Allowance, scored as risk of its Draw. Not a Free route — the zone
-gate does not refuse it, the free counter does not count it, and it is the
-family model at full quality, not a rate-limited surrogate.
-_Avoid_: free route, subscription model
+**Exposure gate**
+The sensitivity filter that joins shape's flag with its place: non-local Exposures (`no-retention` and `trains`) are excluded when the effective regime is ≥ `sensitive`. This is how zones enforce local-only for sensitive work.
+_Avoid_: capability band, admission (those say what survives; this says where it starts)
 
-**Metered route**
-A candidate billed per ticket at its list price (Route kind `market`): Plan
-route's price-class counterpart, Free route's opposite. The default economics —
-nothing prepaid, every ticket on the bill.
-_Avoid_: paid route (a Plan route is also paid), OpenRouter row (that names the
-serving, not the economics)
+**Band gate**
+The domain check at pick time: a candidate's Capability band must include the ticket's domain. If not, the candidate is excluded with `band: {domains}` in the reason. This is how bands enforce domain boundaries.
+_Avoid_: eligibility (that's what survives; this says where it starts)
 
-**Twin**
-The same family's serving in another market: a Plan route's Twin is its
-family's Metered route, and the reverse. Twins substitute for each other at
-cap — the model identity is preserved while the market flips.
-_Avoid_: alias, duplicate, fallback (substitution is one behaviour of a Twin)
-
-### Refresh
-
-**Anchor**
-A benchmark row carried into a research brief as a fact to verify or extend:
-first-party numbers for a model under review. Not the Baseline — that is the
-price anchor for Δ columns; anchors serve the research. Keep the two distinct.
-_Avoid_: price anchor, baseline
-
-**Refresh scope**
-What a summaries-refresh cycle covers at the moment it runs: the gaps, the
-stale summaries and the stale signals current at that moment. A snapshot of
-what is due, not a standing queue.
-_Avoid_: backlog, to-do
-
-**Gap**
-A model ranked on a domain board without a summary. Work the cycle should
-do, not a fault in the policy.
-_Avoid_: missing entry (implies error)
-
-**Stale**
-A summary or signal whose key no longer ranks on any domain board. The model
-may still rank below the depth the boards show; whether and where it does is
-something to look up at run time, not part of the state. A drift state of the
-policy, not of the model.
-_Avoid_: expired, deprecated (those are vendor statuses, not drift states)
+**Quota gate**
+The free-request counter check at plan time: when remaining Free quota falls below a route's Draw, that free-slug candidate leaves the pool and exits with `quota exceeded`. This is how quotas enforce rate limits.
+_Avoid_: cap (that's what survives; this says where it starts)
