@@ -3687,6 +3687,66 @@ class CliTests(unittest.TestCase):
         self.assertIn("--status", joined)
         self.assertIn("offline", joined)
 
+    def test_the_same_folder_answers_the_same_posture_on_every_entry_point(self):
+        """Every entry point names one effective posture for its working folder.
+
+        Case A — an undeclared folder (ADR-0010): three commands against the
+        same --working-dir report `open`, and the exact string is identical in
+        every output.  No internal function call compares them; only raw lines do.
+
+        Case B — the same folder declared closed: the very same three outputs all
+        name `closed`.
+        """
+        def _posture(out_text):
+            zone_line = next(ln for ln in out_text.splitlines()
+                             if ln.startswith("zone: "))
+            return zone_line[zone_line.index("(") + 1:-1]
+
+        working = [self._tmp.name]
+
+        # --- Case A — no zones file present. The folder is open and every entry
+        # point names the same posture string. ----
+        s_out, _, s_code, _ = self.status(working_dir=working[0],
+                                           zones_absent=True)
+        a_out, _, a_code, _ = self.run_cli("--assert-allowed", "--model",
+                                            "deepseek/deepseek-v4-pro",
+                                            "--working-dir", *working,
+                                            zones=[])
+        d_out, _, d_code, _ = self.run_cli("--domain", "writing",
+                                            "--working-dir", *working,
+                                            zones=[])
+
+        posture_s, posture_a, posture_d = (_posture(s_out),
+                                            _posture(a_out),
+                                            _posture(d_out))
+        for desc, p in (("status", posture_s), ("assert-allowed", posture_a),
+                         ("rank", posture_d)):
+            self.assertEqual(p, "open")
+
+        # The exact posture string is identical across all three entry points.
+        self.assertEqual(posture_s, posture_a)
+        self.assertEqual(posture_s, posture_d)
+
+        # --- Case B — the same folder declared closed: every entry point names
+        # `closed`. ----
+        s_out2, _, _, _ = self.status(working_dir=working[0],
+                                       zones=[*working])
+        a_out2, _, _, _ = self.run_cli("--assert-allowed", "--model",
+                                        "deepseek/deepseek-v4-pro",
+                                        "--working-dir", *working,
+                                        zones=[*working])
+        d_out2, _, _, _ = self.run_cli("--domain", "writing",
+                                        "--working-dir", *working,
+                                        zones=[*working])
+
+        for desc, p in (("status", _posture(s_out2)), ("assert-allowed", _posture(a_out2)),
+                         ("rank", _posture(d_out2))):
+            self.assertEqual(p, "closed")
+
+        # The exact posture string is identical across all three entry points.
+        self.assertEqual(_posture(s_out2), _posture(a_out2))
+        self.assertEqual(_posture(s_out2), _posture(d_out2))
+
 
 class PolicyFileTests(CliTests):
     """One policy loader: every entry point reads the policy file the same
