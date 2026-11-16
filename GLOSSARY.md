@@ -261,48 +261,6 @@ something to look up at run time, not part of the state. A drift state of the
 policy, not of the model.
 _Avoid_: expired, deprecated (those are vendor statuses, not drift states)
 
-**Twin**
-The same family's serving in another market: a Plan route's Twin is its
-family's Metered route, and the reverse. Twins substitute for each other at
-cap — the model identity is preserved while the market flips.
-_Avoid_: alias, duplicate, fallback (substitution is one behaviour of a Twin)
-
-### Taste
-
-**Hint**
-A user observation about a model: a note, its fit per domain, and its evidence.
-Weighed, not obeyed; it annotates, never reorders.
-_Avoid_: verdict, preference, taste
-
-**Fit**
-The direction of a hint for one domain: favor, avoid, or neutral (explicitly no
-opinion). Omitted fit is an unanswered question; explicit neutral is an
-answered one. Only favor and avoid tilt the deal.
-_Avoid_: affinity score, weight (it is not numeric)
-
-**Evidence**
-How settled a hint is: validated (user-confirmed) or suspected (untested).
-_Avoid_: confidence, certainty
-
-**Affinity**
-The derived numeric tilt of the deal toward or away from a model, computed at run time from fit and evidence through the factors. Never stored. The four multipliers mapping fit × evidence to affinity are part of this concept.
-_Avoid_: weight table, preference score, factor weights (they multiply into affinity)
-
-### Cost
-
-**Rung**
-A position on a model's effort ladder, bound from the effort intent. Reasoning
-tokens bill as output, so the rung is a real cost lever.
-_Avoid_: effort level, tier
-
-**Endpoint spread**
-The ratio between the cheapest and dearest provider price for one model.
-_Avoid_: price range
-
-**Baseline**
-The price anchor model, used for Δ columns and nothing else.
-_Avoid_: reference model, benchmark (quality connotations)
-
 **Zone gate**
 The mechanical check at the source: free-slug and harness candidates are dropped when the effective posture is `closed`. This is how zones prevent remote free routes from running.
 _Avoid_: route kind, admission (those say what survives; this says where it starts)
