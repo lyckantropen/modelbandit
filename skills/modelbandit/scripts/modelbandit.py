@@ -2386,7 +2386,7 @@ def load_plans(policy: dict) -> dict:
     basis), its three Allowance window caps, its training/retention class,
     and an optional region opt-in. Each field could make a plan look safer
     or its Allowance look bigger than the policy says, so each refuses the
-    load loudly, naming the entry — nothing half-loaded (ADR-0003,
+    load loudly, naming the entry — nothing half-loaded (ADR-0010,
     ADR-0005). An unknown key is refused the same way: `caps` must state
     exactly the three Allowance windows, because a stray window would
     silently invent an unauthorized boundary in the crossing arithmetic,

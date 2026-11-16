@@ -10,18 +10,15 @@ for daily. Commands run from the repo checkout.
 Every run's header states the effective posture. Zones are open unless
 declared, so on a first run with nothing declared everything is open and free
 routes work without setup files
-([ADR-0010, Open unless declared](adr/0010-open-unless-declared.md)). The
-annotated output below is retained for re-verification in ticket #87; its
-current zone values are not the target first-run posture.
+([ADR-0010, Open unless declared](adr/0010-open-unless-declared.md)).
 
 ```text
 # Popularity ranking: writing
 
-zone: undeclared (closed)
-zones file: absent (~/.config/modelbandit/zones.json) — undeclared paths are closed
-profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=worst | policy: 0d old | source: OpenRouter (openrouter.ai/rankings), as of 2026-10-26
+zone: /path/to/your/project (open)
+profile=authoring (in=20,000 out=12,000 cached=40%) | effort=measured | basis=worst | policy: 0d old | source: OpenRouter (openrouter.ai/rankings), as of 2026-11-15
 
-free quota: unavailable | :free routes excluded by the closed zone
+free quota: 0/1000 used (1000 left) | reserve 5 protected; plan size does not gate
 ```
 
 The ranking table reports share, score, price, context window, and Exposure.
