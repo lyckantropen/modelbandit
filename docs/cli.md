@@ -7,7 +7,7 @@ for daily. Commands run from the repo checkout.
 
 ## First run, annotated
 
-Before [Setup](../README.md#setup), the header of a first run reads:
+Before the effective free-use posture is declared (a path in `zones.json`), the header of a first run reads:
 
 ```text
 # Popularity ranking: writing
@@ -47,9 +47,7 @@ Every line of that output, in order (the blank lines are only spacing):
   reachable counter the same line carries the day's figures instead
   (`used`/`limit`, left, protected reserve).
 
-The table that follows is the ranking itself — share, score, price, context
-window, Exposure. No remote free route appears in it until a path is
-declared: **free routes wait for [Setup](../README.md#setup)**.
+The table that follows is the ranking itself — share, score, price, context window, Exposure. No remote free route appears in it until a path is declared; before then every run states its effective zone and excludes remote free routes at source — **posture over ceremony** — the single interaction loop owns this sentence: [the one interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop).
 
 ## Command gallery
 

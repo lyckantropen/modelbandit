@@ -1,9 +1,8 @@
 # Setup in detail
 
 The expanded companion to the README's [Setup](../README.md#setup) section:
-what each file is, the full zone rules, and the offline status mode. Both
-files are normally written for you — the skill runs the two interviews that
-produce them, linked from each section.
+what each file is, the full zone rules, and the offline status mode. The files
+are normally written for you — both are described in each section below.
 
 ## API key
 
@@ -84,20 +83,18 @@ over an existing file cannot corrupt it.
 
 The posture governs where free routes may run, not where you may work: zones
 only ever remove remote free routes at source, and **paid routes work
-from the first run**. Free routes wait: until a path is declared, remote free
-routes are excluded — visibly, never silently. Why the default is `closed`
+from the first run**. Remote free routes are excluded until a path is declared;
+where that rule lives: [the single interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop). Why the default is `closed`
 rather than an opening one is a recorded decision:
 [ADR-0003, Fail closed by default](adr/0003-fail-closed-by-default.md).
 
 ### Writing the file
 
-The skill's **"Set up the free-use zones"** interview asks, per folder,
-*"may free models — some of which retain what you send — run on content
-here?"*, proposes the resulting JSON in full, and writes it through
+The loop presents your answer as JSON and writes it through
 `--write-zones` — no mode ever needs this file hand-written. Then review the
 printed path and the file's contents, and verify afterwards: the next run's
 `zone:` header, or `--assert-allowed`, states the posture now in force.
-[Interview](../skills/modelbandit/SKILL.md#set-up-the-free-use-zones).
+[The loop](../skills/modelbandit/SKILL.md#one-interaction-loop).
 
 ## Secrets file
 
@@ -108,11 +105,12 @@ for project-specific phrases and patterns.
 - **Optional by design.** While the file is missing, the built-in credential
   rules alone decide, and the project's own rules are never applied until it
   exists.
-- **Built by interview.** The skill's
-  [Set up the secrets file](../skills/modelbandit/SKILL.md#set-up-the-secrets-file)
-  interview scans the repository for candidate identifiers (not credential
-  values), records your include/exclude decision per candidate, and writes
-  the file through `--write-secrets`.
+- **Written at check time.** `--check-secrets --write-secrets` scans your repository for candidate identifiers (not credential
+  values), records your include/exclude decision per candidate, writes the file — no ceremony: the assessment runs once and the loop carries its verdict forward. No setup files, no pre-flight choreography. The built-in credential rules always apply.
+- **Additive merges.** Existing rules are never removed, exact duplicates are
+  kept once, and the writer's report gives counts, never rule values. The
+  built-in credential and machine-fact rules always apply and cannot be
+  disabled.
 - **Additive merges.** Existing rules are never removed, exact duplicates are
   kept once, and the writer's report gives counts, never rule values. The
   built-in credential and machine-fact rules always apply and cannot be
@@ -141,7 +139,7 @@ file, policy age — plus, while the zones file is absent, one actionable line:
 ```text
 zone: undeclared (closed)
 zones file: absent (~/.config/modelbandit/zones.json) — undeclared paths are closed
-next: create ~/.config/modelbandit/zones.json — see the skill's setup interview
+next: create ~/.config/modelbandit/zones.json — see [the single interaction loop](../skills/modelbandit/SKILL.md#one-interaction-loop) for how this file fits into every run's posture
 secrets file: absent (<working dir>/modelbandit.secrets.json) — built-in default rules apply
 policy: <policy path> — 0d old
 ```
