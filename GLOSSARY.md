@@ -32,6 +32,11 @@ One deal deals one shape; same-shape tickets share one task-fit assessment by
 construction.
 _Avoid_: batch, group
 
+**ordinary ticket**
+A ticket that is not sensitive: the default posture for most work, with no
+special constraints at any gate — only what every ticket has.
+_Avoid_: ordinary request (it names a class of ticket; this defines the shape)
+
 **Spare**
 A candidate the deal names but does not deal: the highest-Score eligible
 candidate that missed the draw behind a dealt model, standing by to take the
@@ -87,11 +92,11 @@ _Avoid_: privacy, data policy (an account rule, not a model property), training 
 
 **Sensitive**
 A ticket only a local candidate may serve — because its material trips the
-secrets gate, or because its place sits in a `sensitive` or `closed` zone,
+secrets gate, or because its place sits in an `open` or `closed` zone,
 whichever is stricter. Every non-local Exposure is excluded alike:
 no-retention is a promise about storage, not about transit. A join of the
 shape — the fifth shape element, bound per invocation (`--sensitive`) — and
-the place's regime; never a mood declared mid-run.
+the place's posture; never a mood declared mid-run.
 _Avoid_: confidential, "sensitive stuff" (fuzzy), secret material
 
 **Local roster**
@@ -103,8 +108,7 @@ candidate's band may come from.
 _Avoid_: registry, catalogue, inventory
 
 **Zone**
-The machine-wide declaration of where free models may run. A zone is a path with a regime for everything under it, resolved by longest prefix, with anything undeclared `closed`. The effective regime at any path combines all applicable regimes — from working folder settings and origin repository posture — taking the stricter (most restrictive) one, so a worktree's closed declaration covers its entire content tree without needing per-repository configuration. Zones are additive-only: a file can open less, never more.
-_Regimes_: The available regimes are `open`, `sensitive`, and `closed` — ordered by restrictiveness where each stricter level excludes everything milder ones do plus additional constraints. `closed` prohibits any remote free route from serving; `sensitive` requires local-only candidates. The zone's posture is ultimately binary in the sense that it either permits or blocks free routes, but the hierarchy provides three distinct levels of strictness to express different policies.
+The machine-wide declaration of where free models may run. A zone is a path with a posture for everything under it, resolved by longest prefix, with anything undeclared `closed`. The effective posture at any path combines all applicable postures — from working folder settings and origin repository stance — taking the stricter (most restrictive) one, so a worktree's closed declaration covers its entire content tree without needing per-repository configuration. Zones are additive-only: a file can open less, never more.
 _Avoid_: allowlist, permission (it is a place, not a grant)
 
 **Secrets gate**
@@ -299,56 +303,12 @@ _Avoid_: price range
 The price anchor model, used for Δ columns and nothing else.
 _Avoid_: reference model, benchmark (quality connotations)
 
-**Route kind**
-What serves a candidate — a serving identity, decided by the id and the
-serving alone: market (an OpenRouter paid slug), free-slug (an OpenRouter
-`:free` slug), harness (an OpenCode `opencode/*` model), plan (an OpenCode Go
-`opencode-go/*` model), or local (served on this machine). Never a price,
-never a policy claim; an unrecognized namespace fails closed. Plan and metered routes are captured here as route kinds — they're not separate concepts. The free-slug kind is also the Free route category.
-_Plan route_: A candidate served through a subscription plan (Route kind `plan`): $0 cash within its Allowance, scored as risk of its Draw. Not a Free route — the zone gate does not refuse it, the free counter does not count it, and it is the family model at full quality, not a rate-limited surrogate._
-_Metered route_: A candidate billed per ticket at its list price (Route kind `market`): Plan route's price-class counterpart, Free route's opposite. The default economics — nothing prepaid, every ticket on the bill._
-_Avoid_: provider, price class (that is Free route), catalogue label
-
-**Free route**
-A price class: a candidate served at $0 — an OpenRouter `:free` slug, an
-OpenCode `opencode/*` model, or a local model. The *serving* is free, not the
-model family — the same family may serve paid routes with different exposure.
-A curated serving (harness or local) inherits a discounted share of its
-family's popularity: a limited-time, rate-limited surrogate does not carry the
-family's full standing.
-_Avoid_: free model (the model isn't free, the serving is), route kind
-
-**Nominal floor**
-A marginal-zero ticket's effective price in the score: Free risk times the Draw
-it would burn — one rule, two cases. A Plan route prices as risk of its own
-list-priced Draw; a Free route has no Draw and prices against the pool's
-cheapest paid ticket. Never zero, so marginal zero cannot win by division, and
-always below a healthy paid row, so it can still win. Applied uniformly to Free
-routes regardless of Exposure — the Exposure difference is decided by the
-Sensitive gate, not by price. If the pool has no priced paid ticket, use the $1
-nominal reference ticket as the basis for Free risk.
-_Avoid_: free price, effective cost, shadow price
-
-**Allowance**
-The dollar budget a subscription plan grants per model, per window (a rolling
-5-hour window, a week, a month). Drawn down by use; not readable from an
-account balance. A plan route serves at $0 marginal only while its Allowance
-holds.
-_Avoid_: cap (the window is a property of the Allowance), quota (that counts
-free requests), budget (that is the user's spending limit)
-
-**Draw**
-What one ticket consumes of an Allowance: its cost counted at the plan's list
-price, independent of the $0 cash its Draw actually charges. The opportunity
-cost of a plan ticket — burning cheap Draw on one ticket leaves less for the
-next.
-_Avoid_: cost (that is cash or blended price), usage, spend
 **Zone gate**
-The mechanical check at the source: free-slug and harness candidates are dropped when the effective regime is `closed`. This is how zones prevent remote free routes from running.
+The mechanical check at the source: free-slug and harness candidates are dropped when the effective posture is `closed`. This is how zones prevent remote free routes from running.
 _Avoid_: route kind, admission (those say what survives; this says where it starts)
 
 **Exposure gate**
-The sensitivity filter that joins shape's flag with its place: non-local Exposures (`no-retention` and `trains`) are excluded when the effective regime is ≥ `sensitive`. This is how zones enforce local-only for sensitive work.
+The sensitivity filter that joins shape's flag with its place: non-local Exposures (`no-retention` and `trains`) are excluded when the effective posture is ≥ `sensitive`. This is how zones enforce local-only for sensitive work.
 _Avoid_: capability band, admission (those say what survives; this says where it starts)
 
 **Band gate**
