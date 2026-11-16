@@ -668,6 +668,60 @@ class ZoneBlockedCheckTests(TempDirMixin):
         self.assertEqual(code, 0)
         self.assertIn("rule: outside-file content", out)
 
+    def test_by_default_the_gate_reads_the_skills_own_policy(self):
+        # The skill's policy travels with its script: no --policy given
+        # (the argparse default, DEFAULT_POLICY) and the gate still judges
+        # from it — never from an empty policy's assumptions. The exposure
+        # override in the default policy is what decides here.
+        self.write_zones({"zones": [{"path": self.work, "free": "sensitive"}],
+                          "default": "closed"})
+        policy = os.path.join(self.root, "policy.json")
+        with open(policy, "w", encoding="utf-8") as f:
+            json.dump({"exposure": {"deepseek/": "trains"}}, f)
+
+        with mock.patch.object(modelbandit, "DEFAULT_POLICY", policy):
+            out, _, code = self.run_check("--working-dir", self.work,
+                                          "--model", "deepseek/model",
+                                          stdin="Summarize the public API.")
+        self.assertEqual(code, 0)
+        self.assertIn("reason: exposed (trains)", out)
+
+        # The verdict tracks the file, not a stale fact: drop the override
+        # and the default exposure answers instead.
+        with open(policy, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        with mock.patch.object(modelbandit, "DEFAULT_POLICY", policy):
+            out, _, code = self.run_check("--working-dir", self.work,
+                                          "--model", "deepseek/model",
+                                          stdin="Summarize the public API.")
+        self.assertEqual(code, 0)
+        self.assertIn("reason: exposed (no-retention)", out)
+
+    def test_a_direct_caller_stating_no_policy_gets_the_default_too(self):
+        # The edge default (policy_path=None) means "not stated", never
+        # "no policy" — the same skill-owned policy answers a library
+        # caller as answers the CLI (run_status spells the same rule).
+        policy = os.path.join(self.root, "policy.json")
+        with open(policy, "w", encoding="utf-8") as f:
+            json.dump({"exposure": {"deepseek/": "trains"}}, f)
+
+        printed = io.StringIO()
+        with mock.patch.object(modelbandit, "DEFAULT_POLICY", policy), \
+                mock.patch.object(modelbandit, "load_zones",
+                                  return_value={"zones": [],
+                                                "default": "closed"}), \
+                mock.patch.object(
+                    modelbandit, "effective_zone",
+                    return_value=modelbandit.Zone(path=self.work,
+                                                  regime="sensitive")), \
+                redirect_stdout(printed):
+            code = modelbandit.run_secrets_check(model="deepseek/model",
+                                                 policy_path=None,
+                                                 working_dir=self.work,
+                                                 material="Summarize it.")
+        self.assertEqual(code, 0)
+        self.assertIn("reason: exposed (trains)", printed.getvalue())
+
     def test_a_provenance_block_names_the_resolved_place_of_a_declared_link(self):
         # A zone declared through a link governs the place it reaches; the
         # block names both the resolved place and the declared path.

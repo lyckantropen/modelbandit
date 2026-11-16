@@ -91,9 +91,26 @@ FREE_SHARE_CHECK_TICKETS = 100
 FREE_SHARE_CHECK_SEED = "policy-check-free-share"
 FREE_SHARE_HISTORY_LIMIT = 10
 
-DEFAULT_POLICY = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "policy.json"
-)
+# The skill's own policy.json: where it sits depends on how the script is
+# deployed. The shipped layout is skill/scripts/modelbandit.py (policy two
+# levels up), a flat copy is skill/modelbandit.py (policy beside the script),
+# and either spelling may be reached through a link — so every spelling is
+# offered and the first one that exists wins. When none exists the canonical
+# two-up path is kept: that is the path --status and the status-4 messages
+# name when the policy really is missing.
+def _default_policy(script: str) -> str:
+    """The first existing candidate for the policy `script` travels with."""
+    bases = tuple(dict.fromkeys(
+        (os.path.abspath(script), os.path.realpath(script))))
+    candidates = [os.path.join(os.path.dirname(os.path.dirname(base)),
+                               "policy.json") for base in bases]
+    candidates += [os.path.join(os.path.dirname(base), "policy.json")
+                   for base in bases]
+    return next((path for path in candidates if os.path.exists(path)),
+                candidates[0])
+
+
+DEFAULT_POLICY = _default_policy(__file__)
 
 
 def api_key() -> str | None:
@@ -950,6 +967,10 @@ def run_secrets_check(*, working_dir: str | None = None,
     never is. With `as_json`, one JSON object replaces the lines (mode,
     ok, verdict, outcome, zone, reason, rule).
     """
+    # One policy default for every entry point (run_status spells it the
+    # same way): None means "not stated", never "no policy" — the skill's
+    # own policy.json answers.
+    policy_path = policy_path or DEFAULT_POLICY
     if material is None:
         try:
             material = sys.stdin.read()
@@ -979,7 +1000,11 @@ def run_secrets_check(*, working_dir: str | None = None,
         try:
             facts = policy_facts(policy_path)
         except SystemExit as exc:
-            print(f"secrets gate: rules/config error ({exc.code})",
+            # The message, not the code: `exc.code` here carries the
+            # diagnostic itself ("cannot read policy file ..."), which the
+            # old code interpolated into `str()` and printed as "(...)"
+            # — the one detail the operator needs, swallowed.
+            print(f"secrets gate: rules/config error ({exc})",
                   file=sys.stderr)
             return RULES_CONFIG_ERROR
         reason = zone_block(model, zone, policy=facts, sensitive=sensitive)
@@ -1765,6 +1790,10 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
     fetched. With `as_json`, one JSON object replaces the lines (mode, ok,
     allowed, model, shape, zone, reason).
     """
+    # One policy default for every entry point (run_status spells it the
+    # same way): None means "not stated", never "no policy" — the skill's
+    # own policy.json answers.
+    policy_path = policy_path or DEFAULT_POLICY
     try:
         zone = effective_zone(working_dir)
         facts = policy_facts(policy_path)
@@ -4931,7 +4960,8 @@ def main() -> None:
     ap.add_argument("--budget", type=float, help="run budget in USD")
     ap.add_argument("--top", type=int, default=8, help="ranking rows to show")
     ap.add_argument("--policy", default=DEFAULT_POLICY,
-                    help="policy file: domains + baseline (default: beside script)")
+                    help="policy file: domains + baseline "
+                         "(default: the skill's own policy.json)")
     ap.add_argument("--refresh", action="store_true", help="bypass the 24h cache")
     args = ap.parse_args()
 
