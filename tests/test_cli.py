@@ -2304,6 +2304,38 @@ class CliTests(unittest.TestCase):
                         "the loopback control never measured — the "
                         "fixture cannot tell the surfaces apart")
 
+    def test_the_check_policy_record_carries_the_runs_sensitivity(self):
+        # The record carries the deal's real sensitivity in its key: a
+        # --sensitive check-policy run must never interleave its measurement
+        # into the plain-shape series, or one flagged diagnostic run resets
+        # the plain zero-streak and masks a real drift signal. (On a
+        # Sensitive shape only Exposure local may serve and a local counts
+        # as a Free route, so a sensitive deal's remote-free share cannot
+        # zero - the series separation is what keeps the report's plain
+        # history honest.) The deal itself still runs the run's own shape:
+        # one serving fact, one answer, whichever surface asks.
+        mid = self.listed_local_policy()
+        models = {mid: {"id": mid, "context_length": 262_144}}
+        captured = []
+        real_record = modelbandit.record_free_share_measurement
+
+        def recording(shape, zero):
+            captured.append(dict(shape))
+            return real_record(shape, zero)
+
+        with mock.patch.object(modelbandit, "record_free_share_measurement",
+                               side_effect=recording):
+            _, _, code, _ = self.run_cli(
+                "--check-policy", "--sensitive",
+                local_listing={mid}, local_models=models)
+
+        self.assertIsNone(code)
+        self.assertTrue(captured,
+                        "the check never measured - the fixture cannot "
+                        "pin the key")
+        self.assertTrue(all(entry["sensitive"] for entry in captured),
+                        f"recorded keys claim plain shapes: {captured}")
+
     def test_the_exposure_override_can_declare_a_non_loopback_local_serving(self):
         # The one escape hatch: the policy's exposure-override map declares
         # the serving local explicitly, and it is then judged local — the

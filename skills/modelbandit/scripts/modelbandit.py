@@ -3887,10 +3887,12 @@ def policy_age_days(policy_path: str) -> int | None:
 
 
 def record_free_share_measurement(shape: dict, zero: bool) -> tuple[bool, int]:
-    """Persist the last measurements for a non-Sensitive ticket shape.
+    """Persist the last measurements for one ticket shape, keyed honestly.
 
     Returns (had_prior_measurement, trailing_zero_count). History is diagnostic
-    cache data only; it never changes policy or Deal eligibility.
+    cache data only; it never changes policy or Deal eligibility. Whether a
+    shape's zero reaches the report is the caller's ruling - a Sensitive
+    deal's remote-free zero is structural, not drift.
     """
     encoded = json.dumps(shape, sort_keys=True, separators=(",", ":"))
     key = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -4369,7 +4371,9 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                 coverage.append(f"{key} ranks in {name} ({hit}) but has no fit there")
 
     # The safe diagnostic Deal is report-only. Its per-shape history is cache
-    # data and cannot mutate policy or eligibility.
+    # data and cannot mutate policy or eligibility. The deal itself judges the
+    # run's own shape - one serving fact, one answer, whichever surface asks -
+    # while the record carries that shape honestly in its key.
     free_share_zeros = []
     for name in domains:
         profile_name = DOMAIN_PROFILE.get(name, "agentic")
@@ -4418,7 +4422,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         shape_key = {"domain": name, "profile": profile_name,
                      "input_tokens": in_tok, "output_tokens": out_tok,
                      "cached_share": cached, "effort": intent,
-                     "pricing_basis": basis, "sensitive": False,
+                     "pricing_basis": basis, "sensitive": sensitive,
                      "eligibility_top_k": pool_k,
                      "blend_weight": config.deal.blend_weight,
                      "scoring": {"alpha": config.alpha, "beta": config.beta,
@@ -4430,9 +4434,13 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      "domain_hints": {
                          key: value for key, value in signals.items()
                          if name in value.get("fit", {})}}
-        had_history, zero_streak = record_free_share_measurement(
-            shape_key, dealt_tickets > 0 and free_tickets == 0)
-        if dealt_tickets and free_tickets == 0:
+        # A Sensitive deal's remote-free zero is structural - only Exposure
+        # local may serve a Sensitive shape - so it is drift for no series:
+        # the report below is a plain-shape instrument and never lists one.
+        # The measurement itself still lands, under its honest key.
+        zero = dealt_tickets > 0 and free_tickets == 0
+        had_history, zero_streak = record_free_share_measurement(shape_key, zero)
+        if zero and not sensitive:
             free_share_zeros.append((name, profile_name, dealt_tickets,
                                      had_history, zero_streak))
     age = policy_age_days(policy_path)
