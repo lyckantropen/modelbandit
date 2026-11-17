@@ -1523,7 +1523,8 @@ def policy_facts(path: str | None) -> dict:
 
 
 def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
-               sensitive: bool = False, loopback: bool = True) -> str | None:
+               material_sensitive: bool = False,
+               loopback: bool = True) -> str | None:
     """The effective zone's reason this model may not serve here, or None.
 
     The whole pre-flight rule, and the pre-flight's caller of the one zone
@@ -1546,7 +1547,7 @@ def zone_block(model_id: str, zone: Zone, *, policy: dict | None = None,
     reads the harness's declared endpoint (a file read, still no serving
     observed) and a non-loopback serving fails closed as exposed.
     """
-    shape = Shape(sensitive=sensitive, posture=zone.posture)
+    shape = Shape(material_sensitive=material_sensitive, posture=zone.posture)
     model_id = norm_id(model_id)
     policy = policy or {}
     candidate = candidate_for(model_id, policy, loopback=loopback)
@@ -1632,7 +1633,8 @@ def run_assert_allowed(*, model: str, working_dir: str | None = None,
         _print_preflight_posture(zone, plain=plain, restated=restated)
         _print_verdict(STOP_UNKNOWN_SERVING_NAMESPACE, model=model_id)
         return 0
-    reason = zone_block(model_id, zone, policy=facts, sensitive=not plain,
+    reason = zone_block(model_id, zone, policy=facts,
+                        material_sensitive=not plain,
                         loopback=loopback_endpoint(harness_serving_endpoint()))
     if as_json:
         emit_json({"mode": "assert-allowed", "ok": True,
@@ -2811,20 +2813,20 @@ EXPOSURES = ("no-retention", "trains", "local")
 class Shape:
     """A Ticket shape's admission-relevant elements.
 
-    Sensitive is decided here, exactly once, from the material (`--sensitive`)
-    or the place (a closed zone) - a join the run owns when its shape is built
-    and nothing downstream ever re-derives differently: gates read this object's verdict, so an exclusion prints its banner whatever made the shape Sensitive. `posture` is the free-use zone the run works under —
-    `open` unless a closed declaration covers the place (ADR 0010). `domain`
-    and `intent` are the ticket facts the Local roster's band judges against:
-    which domain the run works (None when nothing judges one) and which effort
+    Sensitive is decided from the material (`--sensitive`, carried as
+    `material_sensitive`) or the place (a closed zone) and stays derived,
+    never stored: `sensitive` is a read-only property, so the verdict cannot
+    drift from its causes, no caller can read the raw input as the verdict,
+    and gates cannot re-derive the join differently from one another (ADR
+    0012). An exclusion prints its banner whatever made the shape Sensitive.
+    `posture` is the free-use zone the run works under — `open` unless a
+    closed declaration covers the place (ADR 0010). `domain` and `intent`
+    are the ticket facts the Local roster's band judges against: which
+    domain the run works (None when nothing judges one) and which effort
     rung it asks for.
     """
 
-    def __post_init__(self):
-        # The one derivation - flag or place, either firing is enough (ADR 0008). Computed here rather than per gate so a Sensitive shape behaves the same whether constructed from its stated material or from the zone that made it Sensitive.
-        object.__setattr__(self, "_sensitive", self.sensitive or self.posture == "closed")
-
-    sensitive: bool = False
+    material_sensitive: bool = False
     input_tokens: int | None = None
     context_headroom: float = 2.0
     context_margin: float = 0.5
@@ -2832,6 +2834,13 @@ class Shape:
     posture: str = "open"
     domain: str | None = None
     intent: str = "measured"
+
+    @property
+    def sensitive(self) -> bool:
+        """The Sensitive verdict: the material flag or a closed place,
+        either firing is enough (ADR 0008). Derived on read, never stored
+        (ADR 0012)."""
+        return self.material_sensitive or self.posture == "closed"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3055,15 +3064,11 @@ class Decision:
 ADMITTED = Decision(True)
 
 
-# The one question every gate asks about a run's shape (ADR 0008): the flag or
-# a closed place makes it Sensitive. Shape decides that verdict once when the
-# shape is constructed - nothing downstream re-derives the join, so an
-# exclusion prints its banner whatever made the shape Sensitive.
-
-def sensitive_shape(shape: Shape) -> bool:
-    """Whether this run's shape is Sensitive — material or place."""
-    return shape._sensitive
-
+# The one question every gate asks about a run's shape (ADR 0008) is the
+# Shape's own property: `sensitive` is the material flag or a closed place,
+# derived on read and never stored (ADR 0012) - nothing downstream re-derives
+# the join, so an exclusion prints its banner whatever made the shape
+# Sensitive.
 
 def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     """The Exposure clause: why a non-local candidate may not serve a
@@ -3078,7 +3083,7 @@ def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     by definition, so it refuses every non-local route on top of every
     remote free one.
     """
-    if not sensitive_shape(shape):
+    if not shape.sensitive:
         return None
     if candidate.exposure == "local":
         return None
@@ -4319,7 +4324,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
                      intent: str, basis: str, config: PolicyConfig,
                     zone: Zone, local_ids=(),
-                    sensitive: bool = False,
+                    material_sensitive: bool = False,
                     ranks=None, local_listing=None,
                     roster=None, loopback: bool = True) -> None:
     summaries = policy.get("summaries", {})
@@ -4378,7 +4383,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     for name in domains:
         profile_name = DOMAIN_PROFILE.get(name, "agentic")
         in_tok, out_tok, cached = PROFILES[profile_name]
-        shape = Shape(sensitive=sensitive, input_tokens=in_tok,
+        shape = Shape(material_sensitive=material_sensitive, input_tokens=in_tok,
                       context_headroom=config.context.headroom,
                       context_margin=config.context.margin,
                       posture=zone.posture, domain=name, intent=intent)
@@ -4422,7 +4427,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         shape_key = {"domain": name, "profile": profile_name,
                      "input_tokens": in_tok, "output_tokens": out_tok,
                      "cached_share": cached, "effort": intent,
-                     "pricing_basis": basis, "sensitive": sensitive,
+                     "pricing_basis": basis, "sensitive": material_sensitive,
                      "eligibility_top_k": pool_k,
                      "blend_weight": config.deal.blend_weight,
                      "scoring": {"alpha": config.alpha, "beta": config.beta,
@@ -4440,7 +4445,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         # The measurement itself still lands, under its honest key.
         zero = dealt_tickets > 0 and free_tickets == 0
         had_history, zero_streak = record_free_share_measurement(shape_key, zero)
-        if zero and not sensitive:
+        if zero and not material_sensitive:
             free_share_zeros.append((name, profile_name, dealt_tickets,
                                      had_history, zero_streak))
     age = policy_age_days(policy_path)
@@ -5002,7 +5007,7 @@ def main() -> None:
                          args.top, args.policy,
                          args.effort, args.pricing_basis,
                          config, local_ids=local_ids, zone=zone,
-                         sensitive=args.sensitive, ranks=ranks,
+                         material_sensitive=args.sensitive, ranks=ranks,
                          local_listing=local_listing, roster=roster,
                          loopback=loopback)
         return
@@ -5036,7 +5041,7 @@ def main() -> None:
     for mid in share:
         if mid in models and (is_free_route(mid) or is_plan_route(mid)):
             matches[mid] = "catalog"
-    shape = Shape(sensitive=args.sensitive, input_tokens=in_tok,
+    shape = Shape(material_sensitive=args.sensitive, input_tokens=in_tok,
                   output_tokens=out_tok,
                   context_headroom=config.context.headroom,
                   context_margin=config.context.margin,
@@ -5146,7 +5151,7 @@ def main() -> None:
     decisions = {mid: admit(shape, candidate, quota=verdict)
                  for mid, candidate in candidates.items()}
     admitted = frozenset(mid for mid, d in decisions.items() if d.admitted)
-    show_admission = sensitive_shape(shape) or any(
+    show_admission = shape.sensitive or any(
         not decisions[mid].admitted or decisions[mid].reason
         for mid, _ in ranked)
     # One eligibility pool: the deal plays it, and this run prices it, so a
@@ -5160,7 +5165,7 @@ def main() -> None:
     # deal draws it down (the whole batch).
     ledger = AllowanceLedger(policy["plans"], local=local_ids)
 
-    if sensitive_shape(shape):
+    if shape.sensitive:
         # ADR 0008: a Sensitive shape with no eligible local candidate is
         # announced up front - whatever made it Sensitive.
         print("shape: sensitive — non-local candidates are excluded from the "
@@ -5337,7 +5342,7 @@ def main() -> None:
                 print(f"  {mid}: {note}")
 
     if pick is None:
-        if sensitive_shape(shape):
+        if shape.sensitive:
             # ADR 0008: a Sensitive shape with no eligible local candidate
             # stops with the blocked report — the report is the human
             # escalation, never a re-gate — and, like every verdict, exits
@@ -5412,7 +5417,7 @@ def main() -> None:
                     ap.error(f"--ticket-files: cannot read: {path}")
                 tripped, _rule = secrets_check(
                     material, root=os.path.dirname(os.path.abspath(path)))
-                if tripped and not sensitive_shape(shape):
+                if tripped and not shape.sensitive:
                     held_ids.append(index)
                 else:
                     ordinary += 1
@@ -5463,7 +5468,7 @@ def main() -> None:
             # alike).
             raise SystemExit(run_substitution(
                 args.substitute, args.reason or "mechanical", rows,
-                local=local_ids, sensitive=sensitive_shape(shape),
+                local=local_ids, sensitive=shape.sensitive,
                 roster=roster, zone=zone, as_json=args.json,
                 assign=assign))
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
@@ -5474,7 +5479,7 @@ def main() -> None:
         # on it. `-` marks the rows that missed the draw themselves; `none`
         # (and a `spare:` note below) records a dealt row with no Spare left.
         spares = deal_spares(rows, local=local_ids,
-                             sensitive=sensitive_shape(shape))
+                             sensitive=shape.sensitive)
         print("| # | model | pop% | score | pref | draw% | tickets | spare | "
               "$/ticket | subtotal |")
         print("|---|---|---|---|---|---|---|---|---|---|")
@@ -5506,7 +5511,7 @@ def main() -> None:
             if row["tickets"] and spares.get(row["mid"]) is None:
                 print("spare: " + spare_exhaustion_text(
                     qualified_id(row["mid"], local=row["mid"] in local_ids),
-                    sensitive=sensitive_shape(shape)))
+                    sensitive=shape.sensitive))
         # The batch's ticket map and the single strict lane (issue #72):
         # every ticket id's model, then the local-dealt ids grouped by
         # served model — one local run at a time, minimal load churn.
@@ -5547,7 +5552,7 @@ def main() -> None:
         local_share = {"tickets": local_tickets, "dealt": local_dealt,
                        "percent": (100.0 * local_tickets / local_dealt
                                    if local_dealt else 0.0)}
-        if sensitive_shape(shape):
+        if shape.sensitive:
             # Standing contract marker for a deal touching Sensitive
             # material (ADR 0008): the harness applies it at prompt time —
             # the prompt itself stays the harness's to author.

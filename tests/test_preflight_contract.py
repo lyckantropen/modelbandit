@@ -115,7 +115,7 @@ class PreflightNeverLooserThanPlanTests(EgressVerdictMixin,
                 allowed, printed = self.preflight_answer(
                     mid, zone, policy, sensitive_preflight=sensitive_preflight)
                 shape = modelbandit.Shape(
-                    sensitive=sensitive_plan, posture=zone.posture)
+                    material_sensitive=sensitive_plan, posture=zone.posture)
                 plan = modelbandit.admit(shape, modelbandit.candidate_for(mid, policy,
                                                             local=local))
                 if allowed:
@@ -165,7 +165,8 @@ class LocalLabelRefusedByBothGatesTests(EgressVerdictMixin,
             policy = policy_for(prefix, exposure)
             with self.subTest(kind=kind):
                 # The plan's source filter: the route never enters the pool.
-                shape = modelbandit.Shape(sensitive=True, posture="open")
+                shape = modelbandit.Shape(material_sensitive=True,
+                                          posture="open")
                 plan = modelbandit.admit(shape, modelbandit.candidate_for(mid, policy,
                                                             local=local))
                 self.assertFalse(plan.admitted)
@@ -215,7 +216,7 @@ class SensitivePreflightIsLocalOnlyTests(EgressVerdictMixin,
                 # The plan's admission refuses the same route for the same
                 # shape: the pre-flight never answers looser than the plan.
                 shape = modelbandit.Shape(
-                    sensitive=sensitive_preflight, posture=zone.posture)
+                    material_sensitive=sensitive_preflight, posture=zone.posture)
                 plan = modelbandit.admit(
                     shape, modelbandit.candidate_for("vendor/paid", policy,
                                                      local=False))

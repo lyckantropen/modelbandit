@@ -241,7 +241,7 @@ class PlanCatalogFactTests(unittest.TestCase):
         candidate = modelbandit.candidate_for(
             PLAN, {"plans": {PLAN: plan_entry(exposure="trains")}})
         self.assertEqual(candidate.exposure, "trains")
-        sensitive = modelbandit.Shape(sensitive=True)
+        sensitive = modelbandit.Shape(material_sensitive=True)
         self.assertFalse(modelbandit.admit(sensitive, candidate).admitted)
 
     def test_resolve_exposure_reads_the_plans_fact(self):

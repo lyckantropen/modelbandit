@@ -573,7 +573,8 @@ class SubmoduleFixtureTests(TempDirMixin):
                       "(trains)",
                       modelbandit.zone_block("qwen/qwen3-coder-30b:free",
                                              open_zone,
-                                             policy=policy, sensitive=True))
+                                             policy=policy,
+                                             material_sensitive=True))
 
     def make_link(self, link, target):
         if os.name == "nt":
@@ -604,7 +605,7 @@ def candidate(mid, *, exposure="no-retention", is_free=False, local=False):
 
 
 def shape(posture="open", *, sensitive=False):
-    return modelbandit.Shape(sensitive=sensitive, posture=posture)
+    return modelbandit.Shape(material_sensitive=sensitive, posture=posture)
 
 
 class BinaryZoneGateTests(unittest.TestCase):
@@ -685,8 +686,9 @@ class BinaryZoneGateTests(unittest.TestCase):
                                         remote_free).reason)
 
     def test_the_shape_defaults_to_open(self):
-        self.assertEqual(modelbandit.Shape(), modelbandit.Shape(sensitive=False,
-                                                               posture="open"))
+        self.assertEqual(modelbandit.Shape(),
+                         modelbandit.Shape(material_sensitive=False,
+                                           posture="open"))
 
     def test_sensitive_does_not_move_the_zone_posture(self):
         # A shape's sensitivity is not a place: the zone payload stays
@@ -696,7 +698,7 @@ class BinaryZoneGateTests(unittest.TestCase):
         self.assertEqual(modelbandit.zone_payload(zone)["posture"], "open")
         self.assertEqual(
             modelbandit.zone_block("deepseek/deepseek-v4-pro", zone,
-                                   sensitive=True),
+                                   material_sensitive=True),
             "only Exposure local may serve a Sensitive shape (no-retention)")
 
     def test_the_gate_is_on_the_admission_path(self):

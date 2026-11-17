@@ -30,8 +30,8 @@ FREE_MODELS = {
 OVERRIDES = {"z-ai/glm-5.3-flash:free": "no-retention",
              "z-ai/glm-5.3": "no-retention"}
 
-SENSITIVE = modelbandit.Shape(sensitive=True)
-ORDINARY = modelbandit.Shape(sensitive=False)
+SENSITIVE = modelbandit.Shape(material_sensitive=True)
+ORDINARY = modelbandit.Shape(material_sensitive=False)
 
 
 def candidate(mid, exposure):
@@ -129,7 +129,7 @@ class ExposureResolutionTests(unittest.TestCase):
         facts = modelbandit.candidate_for("lmstudio/qwen/qwen3-4b", policy,
                                    local=True, loopback=False)
         self.assertEqual(facts.exposure, "trains")
-        decision = modelbandit.admit(modelbandit.Shape(sensitive=True), facts)
+        decision = modelbandit.admit(modelbandit.Shape(material_sensitive=True), facts)
         self.assertFalse(decision.admitted)
         self.assertEqual(decision.reason, "exposed (trains)")
 
@@ -164,7 +164,7 @@ class ExposureResolutionTests(unittest.TestCase):
                 "summaries": {"qwen": "fixture summary"}}
             with self.subTest(mid=mid):
                 facts = modelbandit.candidate_for(mid, policy)
-                decision = modelbandit.admit(modelbandit.Shape(sensitive=True), facts)
+                decision = modelbandit.admit(modelbandit.Shape(material_sensitive=True), facts)
                 self.assertFalse(decision.admitted)
                 self.assertIn("exposed (trains)", decision.reason)
 
