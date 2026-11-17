@@ -1088,7 +1088,7 @@ class Zone:
 
 
 def zone_label(zone: Zone) -> str:
-    """The run header's statement: `<path> (<posture>)` — the place the
+    """The run header's statement: `<path> (<posture>)` - the place the
     judgement landed and the binary `open` / `closed` posture, never the
     shape. When a link moved the judgement, the header names the resolved
     place - with the declared path noted, or `undeclared` when no
@@ -1099,6 +1099,30 @@ def zone_label(zone: Zone) -> str:
         return f"{zone.label()} ({zone.posture})"
     declared = f"declared: {zone.path}" if zone.path else "undeclared"
     return f"{zone.resolved} ({zone.posture}) ({declared})"
+
+
+@dataclasses.dataclass(frozen=True)
+class RunContext:
+    """The run's posture, built once in the dispatch and passed whole: the
+    zone it works under, the local candidates the harness listed, the
+    serving endpoint's loopback fact, the Local roster, and the effort
+    intent the run asks for. One value, so an entry point cannot re-spell a
+    subset of the posture from loose scalars and have two surfaces disagree
+    about where the run stands. The data inputs - models, policy,
+    configuration, ranks, the listing - stay separate parameters: they are
+    what the run judges, not where it stands. A surface that deliberately
+    scopes differently (the anchors' drift set works with empty locals and
+    measured intent) states its own overrides at its call, visibly.
+    """
+    zone: Zone
+    local_ids: tuple = ()
+    loopback: bool = True
+    roster: dict | None = None
+    intent: str = "measured"
+
+    @property
+    def posture(self) -> str:
+        return self.zone.posture
 
 
 def zone_payload(zone: Zone) -> dict:
@@ -3788,8 +3812,8 @@ def band_line(mid: str, band: dict | None) -> str:
 
 
 def run_substitution(target: str, reason: str, rows: list[dict], *,
-                     local=(), sensitive: bool = False, roster=None,
-                     zone: Zone, as_json: bool = False,
+                     ctx: RunContext, sensitive: bool = False,
+                     as_json: bool = False,
                     assign: list | None = None) -> int:
     """The substitution record (issue #71): the named model's Spare takes
     the ticket over whole, the fence restated, the reason recorded — and
@@ -3809,6 +3833,9 @@ def run_substitution(target: str, reason: str, rows: list[dict], *,
     terminal for Sensitive (never re-gated), reported only after the
     no-load preference has had its pick elsewhere.
     """
+    # The posture facts travel as one context; bind the names the body
+    # already reads, so the single source stays visible at the signature.
+    local, roster, zone = ctx.local_ids, ctx.roster, ctx.zone
     local = set(local)
     mid = norm_id(target)
     by_id = {row["mid"]: row for row in rows}
@@ -4195,16 +4222,19 @@ def scope_facts(key: str, exact: bool, models: dict, by_canon: dict,
 
 def anchor_scope(explicit: list, models: dict, by_canon: dict, classif: dict,
                  domains: dict, policy: dict, top: int, config: PolicyConfig,
-                 zone: Zone, posture: str) -> list[str]:
+                 posture: str) -> list[str]:
     """The anchor model set: explicit ids when given (deduplicated, in given
     order), else the check's drift set — gaps, then stale summaries, then
     stale signals, via the shared drift_keys helper over the same
     free-merged, zone-filtered boards the check judges.
 
-    Explicit ids resolve through resolve_model like every other id in this
-    file, so a dated-catalog form (…-0813) lands on the same id a gap would
-    carry; an id that resolves to nothing keeps its given form and falls
-    through to the no-rows line in the anchors output."""
+    The scope is deliberately not the run's full posture: it judges with
+    empty locals and measured intent, stated here rather than smuggled in
+    through the context. Explicit ids resolve through resolve_model like
+    every other id in this file, so a dated-catalog form (…-0813) lands on
+    the same id a gap would carry; an id that resolves to nothing keeps its
+    given form and falls through to the no-rows line in the anchors
+    output."""
     if explicit:
         out, seen = [], set()
         for mid in explicit:
@@ -4276,13 +4306,13 @@ def anchor_row(source: str, row: dict) -> str:
 
 def run_anchors(explicit: list, models: dict, by_canon: dict, classif: dict,
                 domains: dict, policy: dict, top: int, refresh: bool,
-                config: PolicyConfig, zone: Zone, posture: str) -> None:
+                config: PolicyConfig, ctx: RunContext) -> None:
     """First-party benchmark anchors for the scope: one unfiltered,
     authenticated, cached fetch of the combined feed; one table per source
     in that source's own schema, rows in scope order; a trailing line naming
     scoped models the feed does not cover. Facts only — nothing persists."""
     scope = anchor_scope(explicit, models, by_canon, classif, domains,
-                         policy, top, config, zone, posture)
+                         policy, top, config, posture=ctx.zone.posture)
     feed = fetch_json(BENCHMARKS_URL, "benchmarks.json", auth=True,
                       refresh=refresh)
     rows = feed.get("data", []) if isinstance(feed, dict) else (feed or [])
@@ -4329,11 +4359,13 @@ def run_anchors(explicit: list, models: dict, by_canon: dict, classif: dict,
 
 def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                      policy: dict, top: int, policy_path: str,
-                     intent: str, basis: str, config: PolicyConfig,
-                    zone: Zone, local_ids=(),
-                    material_sensitive: bool = False,
-                    ranks=None, local_listing=None,
-                    roster=None, loopback: bool = True) -> None:
+                     basis: str, config: PolicyConfig,
+                     ctx: RunContext, material_sensitive: bool = False,
+                     ranks=None, local_listing=None) -> None:
+    # The posture facts travel as one context; bind the names the body
+    # already reads, so the single source stays visible at the signature.
+    zone, local_ids = ctx.zone, ctx.local_ids
+    roster, loopback, intent = ctx.roster, ctx.loopback, ctx.intent
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
@@ -4967,8 +4999,6 @@ def main() -> None:
     except SystemExit as exc:
         print(f"zones/config error: {exc}", file=sys.stderr)
         raise SystemExit(RULES_CONFIG_ERROR) from None
-    posture = zone.posture
-
     models_raw = fetch_json(MODELS_URL, "models.json", auth=False, refresh=args.refresh)
     model_rows = models_raw["data"] if isinstance(models_raw, dict) else models_raw
     models = {norm_id(m["id"]): m for m in model_rows}
@@ -4979,22 +5009,26 @@ def main() -> None:
 
     classif = fetch_json(CLASS_URL, "classifications.json", auth=True,
                          refresh=args.refresh)["data"]
-    if args.anchors is not None:
-        run_anchors(args.anchors, models, by_canon, classif, domains, policy,
-                    args.top, args.refresh, config, zone, posture)
-        return
-    # The local universe arrives from the harness — passed in with
-    # --local-listing — and the serving endpoint from the harness's config:
+    # The local universe arrives from the harness - passed in with
+    # --local-listing - and the serving endpoint from the harness's config:
     # one fact each, no discovery channel of our own (the probe below stays
     # two narrow facts about already-listed candidates: is it serving, at
     # what window). `loopback` is the condition `local` Exposure resolves
-    # under, and `listed` is empty whenever the harness never spoke.
+    # under, and `listed` is empty whenever the harness never spoke. These
+    # are file and config reads, so they precede every dispatch that needs
+    # them - the run's posture is built once, here, and passed whole.
     serving_endpoint = harness_serving_endpoint()
     loopback = loopback_endpoint(serving_endpoint)
     local_listing = parse_local_listing(args.local_listing)
     listed = sorted(local_listing) if local_listing is not None else []
-    served_local = probe_local_models(url=models_url(serving_endpoint))
     local_ids = local_candidate_ids(listed, policy["free_models"])
+    ctx = RunContext(zone=zone, local_ids=local_ids, loopback=loopback,
+                     roster=roster, intent=args.effort)
+    if args.anchors is not None:
+        run_anchors(args.anchors, models, by_canon, classif, domains, policy,
+                    args.top, args.refresh, config, ctx)
+        return
+    served_local = probe_local_models(url=models_url(serving_endpoint))
     if args.check_policy or args.scope:
         # The scope path needs the daily token rankings for window totals; the
         # bare check never consults them and stays one fetch lighter.
@@ -5012,11 +5046,10 @@ def main() -> None:
             inheritance=config.free_share_inheritance)
         run_check_policy(models, by_canon, classif, domains, policy,
                          args.top, args.policy,
-                         args.effort, args.pricing_basis,
-                         config, local_ids=local_ids, zone=zone,
-                         material_sensitive=args.sensitive, ranks=ranks,
-                         local_listing=local_listing, roster=roster,
-                         loopback=loopback)
+                         args.pricing_basis,
+                         config, ctx, material_sensitive=args.sensitive,
+                         ranks=ranks,
+                         local_listing=local_listing)
         return
 
     tags = domains[args.domain]
@@ -5052,7 +5085,7 @@ def main() -> None:
                   output_tokens=out_tok,
                   context_headroom=config.context.headroom,
                   context_margin=config.context.margin,
-                  posture=posture,
+                  posture=ctx.zone.posture,
                   domain=args.domain, intent=args.effort)
     # Zone prohibitions filter at source: a candidate the zone forbids outright
     # never enters the candidate set — not ranked, not scored, not dealt, not
@@ -5061,8 +5094,8 @@ def main() -> None:
     # catalog) still mark, never hide. The loopback fact travels with the
     # candidate so the row the table later marks is the row admission judged.
     share = filter_zone_candidates(
-        share, models, policy, local_ids=local_ids,
-        posture=posture, intent=args.effort, loopback=loopback)
+        share, models, policy, local_ids=ctx.local_ids,
+        posture=ctx.zone.posture, intent=ctx.intent, loopback=ctx.loopback)
     missing = set(tags) - known_tags
     if missing:
         print(f"warning: tags absent from the current board: {', '.join(sorted(missing))}",
@@ -5118,7 +5151,7 @@ def main() -> None:
         # free routes genuinely remain, the line is unchanged, as are the
         # quota figures above.
         pool = (":free routes excluded by the closed zone"
-                if posture == "closed"
+                if ctx.zone.posture == "closed"
                 else ":free routes stay in the pool")
         print(f"free quota: unavailable | {pool}")
     if not verdict.eligible:
@@ -5250,7 +5283,7 @@ def main() -> None:
                 out_cell += " (no endpoint data)"
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else m.get("context_length")
-        ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
+        ctx_cell = f"{context_length / 1024:.0f}K" if context_length else "?"
         if free_details or is_free_route(mid, local=mid in local_ids) or plan_row:
             # The column shows the exposure admission judged: resolved
             # through the same precedence, loopback fact included — a
@@ -5278,7 +5311,7 @@ def main() -> None:
         shown_mid = _shown_mid(mid, candidates[mid])
         print(f"| {i} | {shown_mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
-              f"{delta} | {ctx} | {exposure} | {rung} |{admit_cell}")
+              f"{delta} | {ctx_cell} | {exposure} | {rung} |{admit_cell}")
         if decisions[mid].admitted:
             if pick is None:
                 # The pick is one task: it takes the top of the task order
@@ -5319,14 +5352,14 @@ def main() -> None:
             admit_cell = f" {decisions[mid].reason or '—'} |"
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else None
-        ctx = f"{context_length / 1024:.0f}K" if context_length else "?"
+        ctx_cell = f"{context_length / 1024:.0f}K" if context_length else "?"
         exposure = (row_exposure(mid, policy, local_ids=local_ids,
                                  loopback=loopback)
                     if free_details or is_free_route(mid, local=mid in local_ids)
                     else "—")
         shown_mid = _shown_mid(mid, candidates[mid])
         print(f"| {i} | {shown_mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
-              f"— unresolved to a priced model | | | {ctx} | {exposure} | |{admit_cell}")
+              f"— unresolved to a priced model | | | {ctx_cell} | {exposure} | |{admit_cell}")
 
     if any(candidate.summary_missing for candidate in candidates.values()):
         print("\n† Gap: editorial completeness is not an admission verdict.")
@@ -5475,8 +5508,7 @@ def main() -> None:
             # alike).
             raise SystemExit(run_substitution(
                 args.substitute, args.reason or "mechanical", rows,
-                local=local_ids, sensitive=shape.sensitive,
-                roster=roster, zone=zone, as_json=args.json,
+                ctx=ctx, sensitive=shape.sensitive, as_json=args.json,
                 assign=assign))
         print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
