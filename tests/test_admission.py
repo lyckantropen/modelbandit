@@ -1,7 +1,7 @@
-"""Unit tests for the admission seam: Exposure resolution and the Sensitive gate.
+"""Unit tests for the admission seam: Exposure resolution and the Exposure gate.
 
 `admit(shape, candidate)` is the seam: one pure decision shared by the ranked
-table and the Deal path. Behind it sits the Exposure<->Sensitive gate; excluded
+table and the Deal path. Behind it sits the Exposure gate; excluded
 candidates stay visible with a reason, never hidden.
 
 Fixture style follows test_deal.py: plain dicts for the policy facts
@@ -153,7 +153,7 @@ class ExposureResolutionTests(unittest.TestCase):
 
     def test_a_remote_free_route_labelled_local_is_refused_for_sensitive(self):
         # The same admission call the ranking uses: a stale policy's label
-        # must not slip a remote Free route past the Sensitive gate.
+        # must not slip a remote Free route past the Exposure gate.
         for mid, prefix in (("qwen/qwen3-coder-30b:free",
                              "qwen/qwen3-coder-30b"),
                             ("opencode/qwen3-coder-30b",

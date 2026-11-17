@@ -17,7 +17,7 @@ route kind (paid, `:free`, `opencode/*`, locally served).
 The matrix includes the stale-policy cells a `local` catalogue label on a
 remote serving identity would produce (constructed directly, bypassing the
 policy boundary on purpose): localness is a serving fact, never a catalogue
-claim, so neither gate may let such a label skip the Sensitive gate or the
+claim, so neither gate may let such a label skip the Exposure gate or the
 closed-zone prohibition.
 
 The one deliberate exception to the property is the explicit `--plain`

@@ -52,6 +52,13 @@ constraint of the ticket it backs: substitution swaps the model, never the
 fence.
 _Avoid_: fallback, backup, alternate
 
+**Fence**
+The restated, never re-gated statement of what already bound a dealt ticket,
+printed on its substitution record: the band ceiling, the sensitive
+local-only rule (ADR 0008) and the non-leak note. The fence describes the
+constraints the Spare was chosen under; it never re-judges.
+_Avoid_: re-gate, re-check, new gate
+
 **Concurrency lane**
 The deal's statement of mutual exclusion: every local-dealt ticket id in
 one strict lane — no two local runs concurrent, same model or not. Printed

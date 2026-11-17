@@ -157,7 +157,7 @@ class PlansCatalogTests(unittest.TestCase):
             self.load({PLAN_ID: entry})
 
     def test_an_unknown_training_retention_value_is_refused(self):
-        # A misspelt class would silently widen the Sensitive gate, so it
+        # A misspelt class would silently widen the Exposure gate, so it
         # stops the load exactly as a misspelt free_models Exposure does.
         with self.assertRaisesRegex(
                 SystemExit,

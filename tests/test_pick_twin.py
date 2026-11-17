@@ -144,7 +144,7 @@ class PickTwinCliTests(unittest.TestCase):
                       f"{PLAN} ($0.0000/ticket; Draw $0.01/ticket)", printed)
 
     def test_a_twin_cannot_rescue_a_sensitive_run_of_non_local_rows(self):
-        # The declared link can never bypass the Sensitive gate (ADR 0008):
+        # The declared link can never bypass the Exposure gate (ADR 0008):
         # under --sensitive every non-local row — the at-cap plan row, its
         # metered Twin and the fallback alike — is excluded, so nothing may
         # serve and the run stops with the blocked report instead of

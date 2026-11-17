@@ -99,7 +99,7 @@ python3 skills/modelbandit/scripts/modelbandit.py --check-policy --scope
 
 Pre-flight a model against the machine's free-use zones
 (`$XDG_CONFIG_HOME/modelbandit/zones.json`) before launching it — the output
-says `allowed: <id>` or `blocked by the free-use zone`, and either verdict
+says `allowed: <id>` or `blocked: free-use zone`, and either verdict
 exits 0, so read the verdict, not the status; no policy file, classification
 or network needed:
 

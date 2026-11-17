@@ -12,13 +12,21 @@ network, no machine state.
 
 import os
 import re
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "skills", "modelbandit", "scripts"))
+import modelbandit  # noqa: E402
+
 SKILL_PATH = os.path.join(ROOT, "skills", "modelbandit", "SKILL.md")
+GATES_PATH = os.path.join(ROOT, "docs", "gates.md")
 
 with open(SKILL_PATH, encoding="utf-8") as f:
     TEXT = f.read()
+
+with open(GATES_PATH, encoding="utf-8") as f:
+    GATES_DOC = f.read()
 
 HEADINGS = [part for part in re.split(r"(?m)^(?=## )", TEXT)
             if part.startswith("## ")]
@@ -331,3 +339,37 @@ class SparesWordingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GateInventoryTests(unittest.TestCase):
+    """docs/gates.md is the single-source gate inventory (spec #90): the
+    document is derived from the code's canonical gate tuple and pinned to
+    it here, so the inventory and the gates it inventories cannot drift.
+    The prose stays hand-written; the structure is what the pin holds."""
+
+    def test_the_inventory_names_every_gate_the_code_runs(self):
+        for gate in modelbandit.GATES:
+            with self.subTest(gate=gate.__name__):
+                self.assertIn(gate.__name__, GATES_DOC)
+        for special in ("quota_gate", "secrets_check", "classify_route"):
+            with self.subTest(special=special):
+                self.assertIn(special, GATES_DOC)
+
+    def test_the_inventory_uses_the_canonical_headwords(self):
+        for name in ("Zone gate", "Exposure gate", "Band gate",
+                     "Context gate", "Quota gate", "Secrets gate"):
+            with self.subTest(name=name):
+                self.assertIn(name, GATES_DOC)
+
+    def test_the_inventory_states_which_entry_points_run_what(self):
+        flat_doc = " ".join(GATES_DOC.split())
+        for mode in ("--assert-allowed", "--check-policy", "--check-secrets",
+                     "--anchors", "--substitute", "--deal"):
+            with self.subTest(mode=mode):
+                self.assertIn(mode, flat_doc)
+        self.assertIn("never re-gated", flat_doc)
+
+    def test_the_inventory_keeps_the_retired_vocabulary_out(self):
+        flat_doc = " ".join(GATES_DOC.split())
+        for gone in ("regime", "Sensitive gate", "Footprint gate"):
+            self.assertNotIn(gone, flat_doc)

@@ -13,3 +13,13 @@ Considered: local-preferred with a no-retention cloud fallback. Rejected
 because the secrets gate trips on real secrets (keys, tokens, identifiers) and
 containment beats availability there; "prompted to never leak" stays as
 defense-in-depth, never as the only line.
+
+## Vocabulary note
+
+This decision predates ADR-0010, and its wording predates the vocabulary
+that replaced it: "regime" — including the `sensitive` regime named above —
+is retired. The Zone is a binary posture (`open` / `closed`), and Sensitive
+is a property of the ticket shape: material that trips the Secrets gate, an
+explicit `--sensitive` flag, or a closed place. The rule this ADR states —
+Sensitive work is served only by candidates whose Exposure is `local` —
+stands unchanged; read the retired words through ADR-0010's.

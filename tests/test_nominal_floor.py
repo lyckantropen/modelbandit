@@ -2,7 +2,7 @@
 
 Free risk is a policy fraction (`scoring.free_risk`) of the pool's cheapest
 paid ticket, applied to every Free route in the pool. It stays above zero and
-below that paid ticket. Exposure does not move it: that is the Sensitive gate's
+below that paid ticket. Exposure does not move it: that is the Exposure gate's
 business.
 
 Fixture style follows test_score.py: plain dicts for the policy, literal

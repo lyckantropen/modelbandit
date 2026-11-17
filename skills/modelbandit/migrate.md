@@ -17,7 +17,7 @@ an old invocation. This file lists the old names on purpose.
   `~/.config/modelbandit/`): the tool never finds a zones file, every path
   reads as undeclared, and undeclared is `closed` — **zones fall back to
   `closed` everywhere**. No error names the move; runs just stop at the zone
-  gate with `blocked by the free-use zone` in the output — an answer, exit 0
+  gate with `blocked: free-use zone` in the output — an answer, exit 0
   like any verdict, not a failure (ADR-0004).
 - **Secrets file not renamed** (`modelrouter.secrets.json` → `modelbandit.secrets.json` in each project): delete them — the gate applies built-in credential/identifier/machine-fact/gitignored-content rules to the material a run is given, automatically at deal time and via `--check-secrets` on a single material. No project rules file participates, by design (spec #75's mode split).
 - **Skill symlink not re-pointed** (`~/.agents/skills/openrouter-model-router`
