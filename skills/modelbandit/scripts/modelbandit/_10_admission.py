@@ -145,13 +145,31 @@ def known_exposure(mid: str, value: str) -> str:
 
 def row_exposure(mid: str, policy: dict, *, local_ids, loopback: bool) -> str:
     """One ranked table row's Exposure cell: the same precedence admission
-    judged — override map, local serving, catalogs and the loopback fact
-    included — so the column can never disagree with the gate."""
+    judged - override map, local serving, catalogs and the loopback fact
+    included - so the column can never disagree with the gate."""
     return resolve_exposure(mid, free_models=policy["free_models"],
                             overrides=policy.get("exposure", {}),
                             local=mid in local_ids,
                             plans=policy["plans"],
                             loopback=loopback)
+
+
+def exposure_cell(mid: str, policy: dict, *, local_ids, loopback: bool,
+                  plan: bool = False) -> str:
+    """The ranked table's Exposure cell for one row, shared by both table
+    loops (the priced rows and the rows unresolved to a priced model), so
+    the two loops cannot disagree about what a row shows.
+
+    The cell shows the exposure admission judged - resolved through the
+    same precedence, loopback fact included - whenever it is resolvable:
+    a Free route's catalog details, the Free price class, or a plan
+    serving's catalog fact (`plan` - the plans catalog states the route's
+    Exposure whatever became of its pricing). Anything else prints the em
+    dash - no figure is invented."""
+    if (plan or free_candidate_details(mid, policy, local=mid in local_ids)
+            or is_free_route(mid, local=mid in local_ids)):
+        return row_exposure(mid, policy, local_ids=local_ids, loopback=loopback)
+    return "—"
 
 
 def candidate_for(mid: str, policy: dict, *, local: bool = False,

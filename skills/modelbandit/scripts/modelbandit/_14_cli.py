@@ -644,15 +644,8 @@ def main() -> None:
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else m.get("context_length")
         ctx_cell = f"{context_length / 1024:.0f}K" if context_length else "?"
-        if free_details or is_free_route(mid, local=mid in local_ids) or plan_row:
-            # The column shows the exposure admission judged: resolved
-            # through the same precedence, loopback fact included — a
-            # cataloged `local` the endpoint cannot back reads as the
-            # exposed fallback it was refused as.
-            exposure = row_exposure(mid, policy, local_ids=local_ids,
-                                    loopback=loopback)
-        else:
-            exposure = "—"
+        exposure = exposure_cell(mid, policy, local_ids=local_ids,
+                                 loopback=loopback, plan=plan_row)
         if plan_row:
             # The catalog states no effort ladder for a plan serving.
             rung = "—"
@@ -713,10 +706,9 @@ def main() -> None:
         free_details = free_candidate_details(mid, policy, local=mid in local_ids)
         context_length = free_details[0] if free_details else None
         ctx_cell = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = (row_exposure(mid, policy, local_ids=local_ids,
-                                 loopback=loopback)
-                    if free_details or is_free_route(mid, local=mid in local_ids)
-                    else "—")
+        exposure = exposure_cell(mid, policy, local_ids=local_ids,
+                                 loopback=loopback,
+                                 plan=is_plan_route(mid, local=mid in local_ids))
         shown_mid = _shown_mid(mid, candidates[mid])
         print(f"| {i} | {shown_mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx_cell} | {exposure} | |{admit_cell}")
