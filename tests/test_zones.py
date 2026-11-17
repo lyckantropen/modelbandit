@@ -746,13 +746,16 @@ class ZonePredicateTests(unittest.TestCase):
                 gated = modelbandit.zone_gate(shape("closed"), candidate_)
                 self.assertEqual(bool(filtered), gated.admitted)
 
-    def test_exactly_three_callers_ask_the_predicate(self):
-        # The reconciliation constraint (ticket #82): the pre-flight block,
-        # the candidate source filter and the Zone gate — the provenance
-        # closed-path question routes through the gate, never a fourth.
+    def test_exactly_four_callers_ask_the_predicate(self):
+        # The reconciliation constraint (ticket #82, amended by spec #90):
+        # the pre-flight block, the candidate source filter, the Zone gate
+        # and provenance's closed-place question - the ask is direct there,
+        # without a fabricated shape walking through the gate, and it is
+        # still the one predicate, never a re-derivation.
         source = inspect.getsource(modelbandit)
-        self.assertEqual(source.count("zone_prohibition("), 4)  # def + three
-        for name in ("zone_block", "filter_zone_candidates", "zone_gate"):
+        self.assertEqual(source.count("zone_prohibition("), 5)  # def + four
+        for name in ("zone_block", "filter_zone_candidates", "zone_gate",
+                     "closed_place"):
             self.assertIn("zone_prohibition(", inspect.getsource(
                 getattr(modelbandit, name)))
 

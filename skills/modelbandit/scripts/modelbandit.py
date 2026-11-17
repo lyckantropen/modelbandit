@@ -895,16 +895,16 @@ def closed_place(sources, zones, *, environ=None, run=None) -> Zone | None:
     (`--outside-file`), and it resolves the way a run resolves its working
     folder: the stricter of the source's folder and the repository it came
     from, so a source in a worktree carries the posture of the content it
-    holds. The closed-path question is asked through the Zone gate — the
-    same three-caller machinery admission and the source filter use — never
-    by re-deriving the predicate here.
+    holds. The closed-path question is asked through the one zone predicate
+    - the same ask the pre-flight block, the source filter and the Zone gate
+    make - never by re-deriving the predicate here.
     """
     probe = candidate_for("provenance/model:free", {})
     for source in sources:
         folder = source if os.path.isdir(source) else os.path.dirname(source)
         zone = effective_zone(folder or os.curdir, zones=zones, run=run,
                               environ=environ)
-        if not zone_gate(Shape(posture=zone.posture), probe).admitted:
+        if zone_prohibition(zone.posture, probe) is not None:
             return zone
     return None
 
@@ -3074,10 +3074,15 @@ def exposed_prohibition(shape: Shape, candidate: Candidate) -> str | None:
     """The Exposure clause: why a non-local candidate may not serve a
     Sensitive shape, or None.
 
+    This is the clause's canonical statement in code (ADR 0008 is the
+    decision; the Shape property is where the join lives): everything else
+    - the pre-flight, the spares' fence, the substitution record - points
+    here, never re-derives.
+
     Only Exposure `local` may serve Sensitive work, whether Sensitive came
     from place or material (ADR 0008): `no-retention` is a vendor promise
-    about storage, not about transit — Sensitive material leaves the
-    machine on any remote route — so it is excluded alike with `trains`.
+    about storage, not about transit - Sensitive material leaves the
+    machine on any remote route - so it is excluded alike with `trains`.
     Exposure, never price, decides; an excluded candidate is marked with
     its Exposure in the table and never hidden. A closed place is Sensitive
     by definition, so it refuses every non-local route on top of every
@@ -3189,8 +3194,10 @@ def zone_prohibition(posture: str, candidate: Candidate) -> str | None:
     harness kinds - whatever their price, while a market or plan serving is
     accountable and a model this machine serves never leaves it and stays in.
     An open posture forbids nothing; Exposure and the quota answer for the
-    rest. Three askers call it: the pre-flight block, the candidate source
-    filter and the Zone gate.
+    rest. Four askers call it: the pre-flight block, the candidate source
+    filter, the Zone gate, and provenance's closed-place question - the
+    probe candidate there exists so this predicate's route-kind facets are
+    the only judge.
 
     A candidate it names never enters the candidate set, so it is not ranked,
     scored, dealt or listed. The header states the zone that made it absent
