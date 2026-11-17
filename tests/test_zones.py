@@ -26,6 +26,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import modelbandit  # noqa: E402
 from test_cli import POLICY, build_world, make_model  # noqa: E402
 
+
+def implementation_source():
+    """The implementation's source, wherever it now lives: the package
+    composes the _NN_*.py parts into one namespace (scripts/modelbandit/),
+    so the source-scanning pins read the parts, concatenated in composition
+    order - the same text inspect.getsource(modelbandit) read when the
+    implementation was one file."""
+    package = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "skills", "modelbandit", "scripts",
+        "modelbandit")
+    names = sorted(name for name in os.listdir(package)
+                   if name.startswith("_") and name.endswith(".py"))
+    return "\n".join(
+        open(os.path.join(package, name), encoding="utf-8").read()
+        for name in names)
+
+
 HOME = os.path.join(os.sep, "home", "fixture-user") if os.name != "nt" \
     else r"C:\Users\fixture-user"
 ENV = {"HOME": HOME, "USERPROFILE": HOME,
@@ -752,7 +769,7 @@ class ZonePredicateTests(unittest.TestCase):
         # and provenance's closed-place question - the ask is direct there,
         # without a fabricated shape walking through the gate, and it is
         # still the one predicate, never a re-derivation.
-        source = inspect.getsource(modelbandit)
+        source = implementation_source()
         self.assertEqual(source.count("zone_prohibition("), 5)  # def + four
         for name in ("zone_block", "filter_zone_candidates", "zone_gate",
                      "closed_place"):
@@ -760,7 +777,7 @@ class ZonePredicateTests(unittest.TestCase):
                 getattr(modelbandit, name)))
 
     def test_the_retired_regime_vocabulary_is_gone(self):
-        source = inspect.getsource(modelbandit)
+        source = implementation_source()
         for gone in ("REGIMES", "DEFAULT_REGIME", "known_regime",
                      "regime_at_least", "shape_regime",
                      "closed_regime_provenance", "def stricter", "stricter("):

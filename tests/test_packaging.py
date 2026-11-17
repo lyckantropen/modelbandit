@@ -42,6 +42,12 @@ def inventory(root):
 
 class PackagingInvariantTests(unittest.TestCase):
     def test_skill_subtree_is_exactly_the_deployable_set(self):
+        package = os.path.join("scripts", "modelbandit")
+        parts = ["_01_core.py", "_02_harness.py", "_03_facts_secrets.py",
+                 "_04_contract.py", "_05_zones.py", "_06_roster.py",
+                 "_07_entrypoints.py", "_08_cost.py", "_09_policy.py",
+                 "_10_admission.py", "_11_quota_deal.py",
+                 "_12_substitution.py", "_13_policycheck.py", "_14_cli.py"]
         with self.subTest("subtree top level is exactly the deployables"):
             self.assertEqual(set(os.listdir(SKILL_DIR)),
                              {"SKILL.md", "scripts", "policy.json",
@@ -50,6 +56,10 @@ class PackagingInvariantTests(unittest.TestCase):
                              {"SKILL.md", "policy.json", "scripts",
                               "migrate.md", "steering",
                               os.path.join("scripts", "modelbandit.py"),
+                              package,
+                              os.path.join(package, "__init__.py"),
+                              *(os.path.join(package, part)
+                                for part in parts),
                               os.path.join("steering", "README.md"),
                               os.path.join("steering",
                                            "operating-discipline.md"),
@@ -68,6 +78,11 @@ class PackagingInvariantTests(unittest.TestCase):
         with self.subTest("script directory contains the CLI"):
             self.assertTrue(
                 os.path.isfile(os.path.join(SKILL_DIR, "scripts", "modelbandit.py")))
+        with self.subTest("the package composes the parts in order"):
+            init = open(os.path.join(SKILL_DIR, package, "__init__.py"),
+                        encoding="utf-8").read()
+            for part in parts:
+                self.assertIn(repr(part), init)
 
         with self.subTest("no skill file at the repository root"):
             self.assertFalse(os.path.exists(os.path.join(ROOT, "SKILL.md")))
