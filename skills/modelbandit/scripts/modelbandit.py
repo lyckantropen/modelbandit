@@ -4590,7 +4590,39 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     print(f"coefficient re-tune due: {'yes' if re_tune else 'no'}")
 
 
+def _harden_stdio(stdout=None, stderr=None) -> None:
+    """Make this run speak UTF-8 on stdout and stderr, whatever the
+    machine's code page says.
+
+    The printed tables carry the `Δ` baseline column and other characters no
+    legacy console code page can encode: on a cp1250 pipe or a redirected
+    file the ranking died with a UnicodeEncodeError the moment the header
+    line was written - the crash the PYTHONUTF8=1 environment workaround
+    existed for. The CLI owns its encoding instead: any stream not already
+    speaking UTF-8 is reconfigured to UTF-8 (lossless), with replacement
+    characters as the last resort so no byte can abort a run. A stream that
+    already speaks UTF-8, or one that cannot be reconfigured at all
+    (StringIO, a test double), is left untouched - this is a guard, not a
+    policy for anything but the process running this script.
+    """
+    for stream in (sys.stdout if stdout is None else stdout,
+                   sys.stderr if stderr is None else stderr):
+        encoding = getattr(stream, "encoding", None)
+        if encoding is None or encoding.lower().replace("-", "") == "utf8":
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            # A stream that refuses reconfiguration keeps its own encoding;
+            # the run is no worse off than before the guard ran.
+            pass
+
+
 def main() -> None:
+    # Before anything prints: the tables carry `Δ`, which cp1250 and
+    # friends cannot encode - the run sets its own encoding, never the
+    # console's code page (see _harden_stdio).
+    _harden_stdio()
     ap = argparse.ArgumentParser(prog="modelbandit",
                                  description=__doc__.splitlines()[0])
     ap.add_argument("--domain", help="domain from policy.json (see --list-domains)")
