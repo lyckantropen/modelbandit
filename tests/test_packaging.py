@@ -2,8 +2,9 @@
 
 The skill folder is the unit of deployment: skills/modelbandit/
 carries exactly the deployable set (skill file, script directory, policy
-file, migration file), the repository root keeps the research, tests and
-docs. Layout only — no selection, pricing or deal behavior is asserted here.
+file, migration file, steering briefs), the repository root keeps the
+research, tests and docs. Layout only — no selection, pricing or deal
+behavior is asserted here.
 
 Policy resolution belongs to layout too: the deployed skill must read its
 own policy.json from wherever the script landed, so each deployment shape
@@ -44,11 +45,25 @@ class PackagingInvariantTests(unittest.TestCase):
         with self.subTest("subtree top level is exactly the deployables"):
             self.assertEqual(set(os.listdir(SKILL_DIR)),
                              {"SKILL.md", "scripts", "policy.json",
-                              "migrate.md"})
+                              "migrate.md", "steering"})
             self.assertEqual(inventory(SKILL_DIR),
                              {"SKILL.md", "policy.json", "scripts",
-                              "migrate.md",
-                              os.path.join("scripts", "modelbandit.py")})
+                              "migrate.md", "steering",
+                              os.path.join("scripts", "modelbandit.py"),
+                              os.path.join("steering", "README.md"),
+                              os.path.join("steering",
+                                           "operating-discipline.md"),
+                              os.path.join("steering", "mimo-v2-6-distill-"
+                                           "qwen-9b.md"),
+                              os.path.join("steering", "abliterated-mimo-"
+                                           "v2-6-distill-qwen-9b.md"),
+                              os.path.join("steering", "gemma-4-12b-it-"
+                                           "qat.md"),
+                              os.path.join("steering", "deepseek-v4-pro-"
+                                           "qwen3-5-9b-uncensored-heretic-"
+                                           "mtp.md"),
+                              os.path.join("steering", "qwen36-35b-a3b-"
+                                           "distill.md")})
 
         with self.subTest("script directory contains the CLI"):
             self.assertTrue(

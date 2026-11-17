@@ -65,6 +65,16 @@ dependency claim — the lane record is the truth.
 _Avoid_: dependency chain, execution order (those say why tickets wait;
 the lane says what may not run together)
 
+**Steering block**
+The brief material a local-dealt row carries into its run: the shared
+operating-discipline skeleton (edit discipline, evidence-per-criterion
+reporting, environment workarounds, stop rules) plus the model's own
+clauses — its observed failure modes and the prompt lines that answer
+them. Filed per model under `steering/`; every clause cites the run record
+it came from, and a run record cites the revision its brief carried.
+_Avoid_: system prompt, persona (it is evidence-derived run guidance, not
+model configuration)
+
 **Score**
 A model's per-task baseline value: popularity share to the α power over priced
 cost to the β power. Deterministic and taste-free; it orders candidates and

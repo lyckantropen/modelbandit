@@ -192,6 +192,14 @@ remote routes are absent. No ceremony beyond that.
     `opencode models` for a harness id); if it does not, substitute the
     nearest cataloged sibling of the same family. The script never shells out
     to a harness — this residual check is yours.
+    A local row that survives to a run is briefed from `steering/` beside
+    this file: `steering/operating-discipline.md` — the shared skeleton
+    (edit discipline, evidence-per-criterion reporting, environment
+    workarounds, orchestrator stop rules) — plus `steering/<model>.md` for
+    that row's failure-mode clauses and prompting facts. Compose the spawn
+    brief from both, citing the run record the clauses come from, and treat
+    a local model's self-reported success as telemetry: verification
+    against the ticket's criteria is the only delivery signal.
    Done when: a single task names one pick (score and fit both shown), or a
    batch names its deal with per-model ticket counts and a combined projection.
 

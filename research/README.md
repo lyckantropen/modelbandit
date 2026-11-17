@@ -36,7 +36,11 @@ accepts — `SKILL.md` step 7 is the trigger, this is the procedure.
   **benchmark standing** (the step-1 anchor tables carry the first-party
   numbers; the agent verifies and extends them), **opinions**
   (community and press, every claim cited with a URL), **known for** (one
-  sentence), **caveats** (quality, quantization, provider routing, licensing).
+  sentence), **caveats** (quality, quantization, provider routing, licensing),
+  and **prompting guidance** (how to get the best out of it: recommended
+  sampling, chat-template or reasoning-mode quirks, steering tips the
+  community or the model card documents; every claim cited, and a finetune
+  inherits its base family's guidance only when a source says so).
 - The brief demands honesty over completeness: when sources disagree or a
   fact is unavailable (stealth and preview models often have none), the agent
   states that rather than guessing.
@@ -51,6 +55,13 @@ accepts — `SKILL.md` step 7 is the trigger, this is the procedure.
   that change a decision. Prices and index numbers are dated snapshots —
   date them.
 - Delete summaries that are stale beyond use; keep dated exclusions.
+- **Prompting guidance has two homes.** Where it changes a decision it
+  belongs in the summary's caveat sentence; the full cited guidance goes in
+  the model's steering file, `skills/modelbandit/steering/<model>.md`,
+  dated and sourced. Steering files are research output like summaries —
+  update them in the same commit as the summaries they qualify. Failure-mode
+  clauses in those files come from run post-mortems, not research: keep
+  them, cite and all, when refreshing.
 - **Never write `hints`** in a refresh: fit and evidence are user taste, not
   research. Do report what `--check-policy` says about them — stale fit keys
   and signal coverage gaps — and the user edits the taste. A refresh reconciles
