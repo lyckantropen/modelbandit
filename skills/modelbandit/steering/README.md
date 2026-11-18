@@ -31,8 +31,6 @@ Every clause traces to evidence, named in the file that carries it:
 
 ## Maintenance
 
-The summaries-refresh procedure (see `research/README.md`) researches
-prompting guidance alongside model facts and lands updates here — dated,
-cited, per model. Failure-mode clauses come from post-mortems of terminated
-or overclaiming runs: a new incident should add its clause to the model's
-file before that model is redealt.
+Clause updates land here from the summaries-refresh procedure
+(`research/README.md`): dated, cited, per model. A new incident adds its
+clause to the model's file before that model is redealt.

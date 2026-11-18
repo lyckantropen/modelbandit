@@ -1,7 +1,7 @@
 ---
 name: modelbandit
 description: Pick OpenRouter models by domain popularity and price them live. Use when choosing a model for a domain — research, writing, coding, orchestration, ops — when ranking candidates by what traffic actually runs, or when costing a batch of agent runs against a budget. Use when asked to migrate from the old names — `modelrouter`, `modelbind`, `bind.py`, old paths.
-compatibility: "Python 3, stdlib only — no dependencies, no environment to provision. The summaries-refresh procedure and the unit test suite live in the repository checkout (research/, tests/), not in this skill folder: with a skill-folder-only install the refresh offer reports what is due and where the procedure lives instead of running it."
+compatibility: "Python 3, stdlib only — no dependencies, no environment to provision. The summaries-refresh procedure and the unit test suite live in the repository checkout (research/, tests/), not in this skill folder."
 ---
 
 # Modelbandit
@@ -21,14 +21,12 @@ On a migrate request or old-name keywords, read `migrate.md` and follow it.
 The skill runs one loop, stated once: **assess** silently, **deal**,
 **present** the deal, and **offer changes**. Assessing is the run's own
 work — you name the run's ticket files and the script reads them itself,
-applying the built-in checks at deal time: the Secrets gate's credential,
-identifier, machine-fact and gitignored-content rules over the material
-each ticket carries, with no pre-flight choreography and no setup files.
-Tickets that are not Sensitive are ordinary tickets and are dealt across the
-eligible pool; tickets that trip are reported held — `held: <ids> (sensitive)` —
-never silently dropped and never escalated to a cloud route; a follow-up
-run deals them local-only, one shape per invocation. Presenting and
-offering changes are the only places you are asked: when a held ticket has
+applying the built-in checks at deal time (the rules and their modes: step
+1 and **Secrets gate**). Tickets that are not Sensitive are ordinary tickets
+and are dealt across the eligible pool; tickets that trip are reported held
+— `held: <ids> (sensitive)` — and wait for a follow-up local-only run.
+Presenting and offering changes are the only places you are asked: when a
+held ticket has
 no eligible local candidate, or when you want a change to the presented
 deal.
 
@@ -81,21 +79,13 @@ remote routes are absent. No ceremony beyond that.
     The script silently probes the serving endpoint the harness config
     declares for two narrow facts only (the live context window the Context
     gate judges, and whether a listed id serves right now); probe results
-    are not cached or written to policy, and a missing server has no effect
-    on output. `local` Exposure resolves only for a loopback endpoint on
-    this machine: a LAN-served instance reads as exposed (`trains`) until
-    the policy's `exposure` override map declares it. A Free route without
-    a resolving summary stays in the table, marked as a Gap with one prose
-    line — editorial completeness is never an admission verdict (the
-    mechanical floor in **One interaction loop**). The same run reads the
-    account's daily free-request
-    counter and reports it in the header (`free quota: used/limit`): the
-    configured `scoring.free_quota_reserve` is protected, and `:free` routes
-    leave the pick and deal only when remaining quota is below that reserve.
-    Plan size does not gate eligibility because the draw may use fewer Free
-    tickets than the plan size. Harness `opencode/*`
-    models and locally served models spend none of it. An unreachable key
-    endpoint warns once and leaves the pool unchanged.
+    are not cached or written to policy. `local` Exposure resolves only for
+    a loopback endpoint on this machine: a LAN-served instance reads as
+    exposed (`trains`) until the policy's `exposure` override map declares
+    it. A Gap-marked Free route stays in the table, never excluded (see
+    **Free catalog**). The same run reads the account's daily free-request
+    counter and reports it in the header (`free quota: used/limit`); the
+    reserve, the exclusion rules and the failure shapes are **Free quota**'s.
 
 3. **Order by task score.** Each candidate scores `share^α / cost^β` —
    popularity priced at its rung for the effort intent (α, β from `policy.json`
@@ -108,9 +98,8 @@ remote routes are absent. No ceremony beyond that.
    only where there is no Draw does the Nominal floor answer.
    The candidate set stays the popularity top; the score orders it.
    Rung rules: `glance`→floor, `measured`→default, `thorough`→above-default,
-   `exhaustive`→ceiling; a rung the model lacks collapses to its nearest, and
-   the output multiplier discounts toward `glance`'s in proportion to the rung
-   achieved.
+   `exhaustive`→ceiling; a rung the model lacks collapses to its nearest
+   (discount math: **Prices**).
    Done when: candidates are in task order with share, score, price, context
     window, Exposure and rung visible (Exposure is `—` for paid routes).
 
@@ -152,7 +141,8 @@ remote routes are absent. No ceremony beyond that.
    servings drew — so how much of the deal stays on local hardware reads
    at the same glance. On a shape a band-passing local candidate fits,
    that local row carries a **standing favor** in the draw — the affinity
-   factors' validated favor multiplied into its pref — so small tickets
+   factors' validated favor multiplied into its pref (the caller's local
+   rows only — never eligibility, never score) — so small tickets
    genuinely land on local hardware instead of losing to discounted
    popularity; the seeded draw still decides which row takes each ticket,
    and score, Nominal floor and balance are untouched. A plan row at
@@ -170,14 +160,9 @@ remote routes are absent. No ceremony beyond that.
    dead model never strands the ticket; when the served model fails,
    re-run the deal's own flags with `--substitute <model>` to record the
    Spare taking the ticket over whole, reason and fence restated (see
-   **Spares & substitution**). The deal also states the **lane**: one
-   strict lane, no two local runs concurrent — `ticket ids: <ids> ->
-   <model>` lines map the batch (numbered from 1 in the deal's assignment
-   order) to its models, and `lane: <ids> -> <model>` lines group the
-   local-dealt ids by served model, so execution runs one model load at
-   a time (see **Concurrency lane**). Substitution moves lane membership
-   with the serve — a cloud Spare's ids exit the lane, a local Spare's
-   join — and the record says which.
+   **Spares & substitution**). The deal also states the **lane** — one
+   strict lane, no two local runs concurrent — and substitution moves ids
+   with the serve (see **Concurrency lane**).
    One invocation deals one ticket shape — a run's domain, effort, token
    profile, `--fit` and `--sensitive` combination — so tickets of the same
    shape share one task-fit assessment by construction: the step-4 judgments
@@ -245,8 +230,7 @@ defined twice.
   `local`), optional `summary_ref` (an exact key in `summaries`), and optional
   `max_completion_tokens` (a Free entry's completion cap when no endpoint
   reports one).
-  `opencode/*` and local entries carry their own window in the catalog; a
-  missing summary marks the route, it does not exclude it.
+  `opencode/*` and local entries carry their own window in the catalog.
   A `local` exposure on an `opencode/*` or `:free` entry is a contradiction —
   those are remote serving identities — and stops the run naming the entry.
   Ranked OpenRouter `:free` routes use their own slug and may resolve a summary
@@ -281,29 +265,17 @@ defined twice.
   id's shape. The section is its own catalog — `free_models` keeps refusing
   plan-kind entries in parallel.
 
-- **What popularity is** — revealed preference of real traffic: request share
-  per task tag, with token share as the long-form weighting. It is not
-  quality. The boards carry only each tag's top models, so the long tail is
-  invisible and a miss there means "unranked", not "bad".
+- **What popularity is** — revealed preference of real traffic, not quality.
+  The boards carry only each tag's top models, so a miss there means
+  "unranked", not "bad".
 
-- **Score** — the task order: `share^α / cost^β`, cost at the candidate's rung
-  for the effort intent. The exponent *ratio* decides the ordering, their
-  *scale* the sharpness. α, β live in `policy.json` `scoring` and are accepted
-  only against the balance thresholds (top-1 score mass 20–50%, top-2 ≤ 75% per
-  paid pool): neither uniform nor dominated by one or two entries. Balance is
-  measured on the paid competition — a Free route enters no balance pool, its
-  participation is the Free share signal's answer, and a pool with fewer than
-  three paid candidates is reported not judgeable rather than judged.
-  `--check-policy` re-measures and calls for a re-tune when the paid balance
-  drifts; that drift is a diagnosed re-tune.
-
-- **Nominal floor** — the score's cost term for a Free route:
-  `scoring.free_risk` times the pool's cheapest priced paid ticket (default
-  0.35), recomputed per pool and shape and applied to every Free route whatever
-  its Exposure. The risk must be strictly between zero and one, which keeps the
-  derived floor positive and strictly below the paid ticket. Only the score
-  uses it — price columns and projections still report what a route costs to
-  run.
+- **Score** — the task order (formula and rung rules: step 3; exponents,
+  thresholds and their meaning: `policy.json` `scoring` and the glossary).
+  Balance is measured on the paid competition — a Free route enters no
+  balance pool, its participation is the Free share signal's answer, and a
+  pool with fewer than three paid candidates is reported not judgeable
+  rather than judged. `--check-policy` re-measures and calls for a re-tune
+  when the paid balance drifts; that drift is a diagnosed re-tune.
 
 - **Risk of Draw** — the one marginal-zero rule at the score (ADR-0006): a
   marginal-zero ticket prices as risk of its Draw, never at $0. A Plan route
@@ -312,7 +284,9 @@ defined twice.
   flows to the workhorse. Where there is no Draw — a Free route, a zero-Draw
   plan serving, a plan route the catalog does not price — the **Nominal floor**
   answers (Free risk times the pool's cheapest paid ticket, or the $1 reference
-  when the pool has none). The Free case keeps its exact current numbers.
+  when the pool has none). The Free case keeps its exact current numbers. The
+  floor moves only the score — price columns and projections still report
+  what a route costs to run.
 
 - **Free quota** — OpenRouter's daily free-request counter
   (`free_model_daily_requests` on the key payload): one figure shared by every
@@ -367,10 +341,7 @@ defined twice.
   JSON from stdin and writes the file validated and atomically — an invalid
   file refuses with status 4 naming the offending entry and writes
   nothing; no mode needs the file hand-written. The header states the
-  effective posture (`zone: open`, `zone: closed`) on every run; a closed
-  posture drops every remote Free route (`:free`, `opencode/*`) at source —
-  never ranked, scored, dealt or listed — and the `zone:` line is the
-  explanation for their absence, the reason named `blocked: free-use zone`.
+  effective posture (`zone: open`, `zone: closed`) on every run.
 
 - **Pre-flight (`--assert-allowed`)** — `scripts/modelbandit.py --assert-allowed
   --model <id> --working-dir <folder>` answers one question for an
@@ -410,15 +381,6 @@ defined twice.
   `--json`), not `$?` (ADR-0004). A block is never reported as sensitive,
   safe or over budget.
 
-- **Hints** — user observations in `policy.json`, structured: a `note` (shown
-  beside the ranking), `fit` (favor/avoid/neutral, per domain), and `evidence`
-  (validated/suspected). Weighed, not obeyed — a hint may contradict the crowd
-  or age out. Shown beside the ranking; never a reordering force. A domain the
-  hint names — including an explicit `neutral`, "no opinion here" — is an
-  answered question; a domain it omits is an open one, flagged by
-  `--check-policy` until the user answers. Either way a non-favor/avoid fit
-  tilts nothing.
-
 - **Deal (multi-ticket diversity)** — a project that runs one model for
   everything carries one model's failure modes, so batches are spread across
   the popular candidates. Eligibility stays popularity: the top-K selectable
@@ -429,20 +391,12 @@ defined twice.
   for a reproducible deal. **Affinity** is derived at run time, never stored: a
   hint's fit for the domain and its evidence map through `affinity.factors`
   (favor/validated ×3.0, favor/suspected ×2.0, avoid/validated ×0.3,
-  avoid/suspected ×0.5). Longest prefix wins. A band-passing local row
-  additionally carries a **standing favor**: the factors' validated favor
-  multiplied into its pref by the deal (the caller's local rows only —
-  never eligibility, never score), so a qualifying shape genuinely deals
-  local hardware while the seeded draw still picks the row. The deal is the
+  avoid/suspected ×0.5). Longest prefix wins. The deal is the
   only place taste acts — the ranking itself is never reordered. Every dealt
-  row is named by its provider-qualified id (see **Pick line**), so a row is
-  a dispatch, not an interpretation. Its Free share — the fraction
-  of tickets Free routes drew — is a report, never a cap and never a floor:
-  some tickets, all of them, or none, as the draw falls. Beside it, the deal
-  always prints `plan share: N/M tickets (P%)` — plan tickets over dealt
-  tickets, an absorbed ticket counted metered — and
-  `local share: N/M tickets (P%)` — this machine's own servings over dealt
-  tickets.
+  row is named by its provider-qualified id, so a row is a dispatch, not an
+  interpretation. Its Free share is a report, never a cap and never a floor.
+  The deal always prints `plan share: N/M tickets (P%)` and
+  `local share: N/M tickets (P%)`.
 
 - **Spares & substitution** — every dealt row names exactly one **Spare**:
   the highest-Score eligible candidate that missed the draw, shown in the
@@ -457,15 +411,13 @@ defined twice.
   shape the Spare is drawn from local candidates only: the fence is
   restated, never re-gated, so substitution can never loosen the gate.
   Substitution is an invocation, not stored state — modelbandit is
-  stateless and the draw is seed-deterministic, so re-run the deal's own
+  stateless, so re-run the deal's own
   flags plus `--substitute <dealt-id>` and the identical deal re-derives;
   the record replaces the deal readout's tail and the run exits 0:
-  `substitution: <model> -> <spare>`, then indented `reason:` (mechanical —
-  unreachable, out of quota or allowance, unloadable, substituted
-  automatically; or dead-attempt — the harness's explicit failed-attempt
-  report), `takeover:` (the spare restarts the ticket whole) and `fence:`
-  lines — the Spare's band, `sensitive — local-only (ADR 0008)` and the
-  non-leak note on a Sensitive ticket. Reasons distinguish class:
+  `substitution: <model> -> <spare>`, then indented `reason:` (class
+  distinguished below), `takeover:` (the spare restarts the ticket whole)
+  and `fence:` lines — the Spare's band, `sensitive — local-only (ADR 0008)`
+  and the non-leak note on a Sensitive ticket. Reasons distinguish class:
   `--reason mechanical` (the default — unreachable, out of quota or
   allowance, unloadable) substitutes automatically; `--reason dead-attempt`
   carries the harness's explicit failed-attempt report — the only way a
@@ -514,12 +466,6 @@ defined twice.
   task order): <model>`. The projection keeps its dollar total unchanged:
   plan-aware totals come later.
 
-- **Pick line** — the pick names its market as the provider-qualified id a
-  model config dispatches (`<provider>/<model>`): `openrouter/<slug>` for an
-  OpenRouter serving (a `:free` slug included), and `opencode/*`,
-  `opencode-go/*` or a local id unchanged. The deal's model column uses the
-  same form; a pick that lands on a Twin names the Twin's qualified id.
-
 - **Secrets gate** — the built-in credential, identifier, machine-fact and
   gitignored-content rules, applied to the material a run is given:
   automatically at deal time, when the run reads its own ticket files, and
@@ -554,22 +500,10 @@ defined twice.
   verdict serves both the table and the deal, so the two never disagree
   about what may serve a shape.
 
-- **Footprint & Difficulty** — two words for two different questions, never
-  one word for both. Footprint is a Ticket shape's measured demand on a
-  candidate — input × `context_gate.headroom` against the context window,
-  rung-priced output against the completion cap, each against a
-  `context_gate.margin` share of capacity. Headroom applies only to input
-  growth; output demand is already inflated by the rung multiplier. Footprint
-  is measured, never judged; a Free route's exclusion reason names the bound (`over window`,
-  `over completion cap`). A paid route is flagged with the same reasons and
-  stays in — capacity is buyable. Difficulty is how much deliberation a
-  ticket needs — the effort intent plus the task-fit judgment; judged, never
-  measured, and never compared to a window.
-
-- **Token profiles** — cost is output-weighted for authoring: a `.md` research
-  note is mostly completion tokens (authoring: 20K in / 12K out / 40% cached),
-  while tool loops are input-heavy and cached (agentic: 40K in / 4K out / 75%).
-  Output price, not input price, decides who is expensive at authoring.
+- **Token profiles** — cost is output-weighted for authoring (a `.md` note is
+  mostly completion tokens) while tool loops are input-heavy and cached;
+  output price decides who is expensive. Profile numbers and the domain
+  default live in the script (`--profile` overrides).
 
 - **Prices** — per 1M tokens: input, output, cache-read, cache-write. Some
   models tier prices by context size; the table prices the base tier. The
@@ -583,9 +517,3 @@ defined twice.
 - **Attribution** — rankings data is CC BY 4.0. When quoting figures outside
   the table, carry "Source: OpenRouter (openrouter.ai/rankings), as of
   `<meta.as_of>`".
-
-- **Tests** — repository-checkout material: the suite lives in `tests/` at the
-  repo root, beyond this skill folder. stdlib unittest; run
-  `python3 -m unittest discover -s tests` from the repo root before shipping
-  any script change. `tests/live_smoke.py` is a manual check against the real
-  API.

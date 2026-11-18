@@ -7,7 +7,6 @@ cached=40%, effort multiplier 1.0 at `measured`) unless stated.
 import io
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +16,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from fakes import KEY_URL, make_junction, world_fetch  # noqa: E402
+from policy_fixture import scoring_block  # noqa: E402
 
 
 def make_model(mid, prompt, completion, cache_read, canonical=None,
@@ -182,15 +183,7 @@ POLICY = {
         "writing": ["content_writing", "roleplay_fiction", "gone_tag"],
         "coding": ["math"],
     },
-    "scoring": {"alpha": 1.0, "beta": 0.0,
-                "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
-                               "top2_max": 0.75}},
-    "affinity": {
-        "blend_weight": 0.6,
-        "eligibility_top_k": 2,
-        "factors": {"favor_validated": 3.0, "favor_suspected": 2.0,
-                    "avoid_validated": 0.3, "avoid_suspected": 0.5},
-    },
+    **scoring_block(eligibility_top_k=2),
 }
 
 
@@ -303,6 +296,8 @@ class CliTests(unittest.TestCase):
         calls = []
         real_fetch = modelbandit.fetch_json  # captured before the mock patches it
 
+        dispatch = world_fetch(world, benchmarks=True)
+
         def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
             calls.append((url, cache_name, auth, refresh))
             if real_benchmarks and cache_name == "benchmarks.json":
@@ -315,20 +310,9 @@ class CliTests(unittest.TestCase):
                 if key_payload is None:
                     # No key, or an unreachable endpoint: the counter is not
                     # reported and the run carries on without it.
-                    raise SystemExit("cannot reach https://openrouter.ai/api/v1/key")
+                    raise SystemExit(KEY_URL)
                 return key_payload
-            if cache_name == "benchmarks.json":
-                return world["benchmarks"]
-            if cache_name == "models.json":
-                return {"data": world["models"]}
-            if cache_name == "classifications.json":
-                return {"data": world["classifications"]}
-            if cache_name == "rankings.json":
-                return world["rankings"]
-            if url.endswith("/endpoints"):
-                slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
-                return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
-            raise AssertionError(f"unexpected fetch: {url}")
+            return dispatch(url, cache_name, auth=auth, refresh=refresh)
 
         out, err = io.StringIO(), io.StringIO()
         code = None
@@ -2936,13 +2920,8 @@ class CliTests(unittest.TestCase):
     def link(self, link, target):
         """A junction on Windows (`mklink /J` needs no privileges), a symlink
         elsewhere."""
-        if os.name == "nt":
-            completed = subprocess.run(
-                ["cmd", "/d", "/c", "mklink", "/J", link, target],
-                capture_output=True, text=True)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-        else:
-            os.symlink(target, link)
+        ok, err = make_junction(link, target)
+        self.assertTrue(ok, err)
         return link
 
     def test_pre_flight_judges_a_link_by_the_place_it_reaches(self):

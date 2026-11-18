@@ -443,8 +443,8 @@ def main() -> None:
             matches[mid] = "catalog"
     shape = Shape(material_sensitive=args.sensitive, input_tokens=in_tok,
                   output_tokens=out_tok,
-                  context_headroom=config.context.headroom,
-                  context_margin=config.context.margin,
+                  context_headroom=config.headroom,
+                  context_margin=config.margin,
                   posture=ctx.zone.posture,
                   domain=args.domain, intent=args.effort)
     # Zone prohibitions filter at source: a candidate the zone forbids outright
@@ -557,13 +557,24 @@ def main() -> None:
     # One eligibility pool: the deal plays it, and this run prices it, so a
     # favored model below --top still scores at the same scale as the rows
     # above it.
-    pool = (eligibility_pool(share, models, aff, config.deal.eligibility_top_k,
+    pool = (eligibility_pool(share, models, aff, config.eligibility_top_k,
                              admitted, local=local_ids, plans=policy["plans"])
             if args.deal else [])
     # The run's allowance ledger: prospective and in-run, so it starts empty
     # and nothing leaves this process. The pick asks it (one task) and the
     # deal draws it down (the whole batch).
     ledger = AllowanceLedger(policy["plans"], local=local_ids)
+
+    def row_cells(mid, *, plan_row, fallback=None):
+        """One row's shared cells: shown id, ctx, Exposure, admit reason."""
+        details = free_candidate_details(mid, policy, local=mid in local_ids)
+        length = details[0] if details else fallback
+        ctx_cell = f"{length / 1024:.0f}K" if length else "?"
+        exposure = exposure_cell(mid, policy, local_ids=local_ids,
+                                 loopback=loopback, plan=plan_row)
+        admit_cell = (f" {decisions[mid].reason or '—'} |"
+                      if show_admission else "")
+        return _shown_mid(mid, candidates[mid]), ctx_cell, exposure, admit_cell
 
     if shape.sensitive:
         # ADR 0008: a Sensitive shape with no eligible local candidate is
@@ -600,7 +611,7 @@ def main() -> None:
     eff_costs = effective_costs(
         pers,
         free_risk=config.free_risk,
-        free=free_route_ids(pers, policy, local=local_ids),
+        free=free_route_ids(pers, local=local_ids),
         plans=policy["plans"])
 
     rows_out = []
@@ -641,11 +652,8 @@ def main() -> None:
             out_cell = f"{pr['out_min']:.2f}–{pr['out_max']:.2f}{spread}"
             if pr["n_eps"] == 0:
                 out_cell += " (no endpoint data)"
-        free_details = free_candidate_details(mid, policy, local=mid in local_ids)
-        context_length = free_details[0] if free_details else m.get("context_length")
-        ctx_cell = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = exposure_cell(mid, policy, local_ids=local_ids,
-                                 loopback=loopback, plan=plan_row)
+        shown_mid, ctx_cell, exposure, admit_cell = row_cells(
+            mid, plan_row=plan_row, fallback=m.get("context_length"))
         if plan_row:
             # The catalog states no effort ladder for a plan serving.
             rung = "—"
@@ -658,10 +666,6 @@ def main() -> None:
         if fit_map:
             shown = f"{fit:.1f}" if fit is not None else "—"
             fit_cell = f" {shown} | {adj:.2f} |"
-        admit_cell = ""
-        if show_admission:
-            admit_cell = f" {decisions[mid].reason or '—'} |"
-        shown_mid = _shown_mid(mid, candidates[mid])
         print(f"| {i} | {shown_mid} | {s:.2%} | {sc:.2f} |{fit_cell} "
               f"{tokens_30d.get(mid, 0) / 1e9:.0f}B | {out_cell} | ${per:.4f} | "
               f"{delta} | {ctx_cell} | {exposure} | {rung} |{admit_cell}")
@@ -700,16 +704,8 @@ def main() -> None:
     for mid, s in sorted(((mid, s) for mid, s in ranked if mid not in priced),
                          key=lambda t: -t[1]):
         i += 1
-        admit_cell = ""
-        if show_admission:
-            admit_cell = f" {decisions[mid].reason or '—'} |"
-        free_details = free_candidate_details(mid, policy, local=mid in local_ids)
-        context_length = free_details[0] if free_details else None
-        ctx_cell = f"{context_length / 1024:.0f}K" if context_length else "?"
-        exposure = exposure_cell(mid, policy, local_ids=local_ids,
-                                 loopback=loopback,
-                                 plan=is_plan_route(mid, local=mid in local_ids))
-        shown_mid = _shown_mid(mid, candidates[mid])
+        shown_mid, ctx_cell, exposure, admit_cell = row_cells(
+            mid, plan_row=is_plan_route(mid, local=mid in local_ids))
         print(f"| {i} | {shown_mid} | {s:.2%} | — | {tokens_30d.get(mid, 0) / 1e9:.0f}B | "
               f"— unresolved to a priced model | | | {ctx_cell} | {exposure} | |{admit_cell}")
 
@@ -836,8 +832,8 @@ def main() -> None:
         favor = {mid: config.factors["favor_validated"]
                  for mid in local_ids if mid in admitted}
         deal_parameters = DealParameters(
-            blend_weight=config.deal.blend_weight,
-            top_k=config.deal.eligibility_top_k,
+            blend_weight=config.blend_weight,
+            top_k=config.eligibility_top_k,
             seed=args.seed,
             tickets=args.tickets,
             fit_adjusted_task_scores=fit_adjusted_task_scores,
@@ -862,7 +858,7 @@ def main() -> None:
                 args.substitute, args.reason or "mechanical", rows,
                 ctx=ctx, sensitive=shape.sensitive, as_json=args.json,
                 assign=assign))
-        print(f"\ndeal (seed '{args.seed}', blend {config.deal.blend_weight} from policy "
+        print(f"\ndeal (seed '{args.seed}', blend {config.blend_weight} from policy "
               f"affinity; eligibility stays popularity — the deal tilts by "
               f"preference):")
         # Every dealt row names its Spare (issue #71): the best candidate
@@ -928,8 +924,7 @@ def main() -> None:
                   f"${monthly['cap']:.2f} "
                   f"({monthly['drawn'] / monthly['cap']:.1%} of monthly; "
                   f"{five_hour['drawn'] / five_hour['cap']:.1%} of 5h)")
-        free_tickets, dealt_tickets = deal_free_share(
-            rows, policy, local=local_ids)
+        free_tickets, dealt_tickets = deal_free_share(rows, local=local_ids)
         print(share_line("free share", free_tickets, dealt_tickets))
         plan_tickets = sum(row["tickets"] for row in rows
                            if is_plan_route(row["mid"],
@@ -938,7 +933,10 @@ def main() -> None:
         # The local share (issue #69): the third readout line, beside free
         # and plan — how many of the batch's tickets never leave the
         # machine. It always prints; zero is an answer, not an absence.
-        local_tickets, local_dealt = deal_local_share(rows, local=local_ids)
+        local_set = set(local_ids)
+        local_dealt = sum(row["tickets"] for row in rows)
+        local_tickets = sum(row["tickets"] for row in rows
+                            if row["mid"] in local_set)
         print(share_line("local share", local_tickets, local_dealt))
         local_share = {"tickets": local_tickets, "dealt": local_dealt,
                        "percent": (100.0 * local_tickets / local_dealt

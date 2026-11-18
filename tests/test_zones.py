@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import modelbandit  # noqa: E402
+from fakes import make_junction, world_fetch  # noqa: E402
 from test_cli import POLICY, build_world, make_model  # noqa: E402
 
 
@@ -243,16 +244,8 @@ class ZoneResolverTests(unittest.TestCase):
 def make_link(link, target):
     """A junction on Windows (`mklink /J` needs no privileges), a symlink
     elsewhere. Answers False when the platform cannot build one."""
-    if os.name == "nt":
-        completed = subprocess.run(
-            ["cmd", "/d", "/c", "mklink", "/J", link, target],
-            capture_output=True, text=True)
-        return completed.returncode == 0
-    try:
-        os.symlink(target, link)
-    except (OSError, NotImplementedError):
-        return False
-    return True
+    ok, _ = make_junction(link, target)
+    return ok
 
 
 class LinkZoneTests(TempDirMixin):
@@ -594,13 +587,8 @@ class SubmoduleFixtureTests(TempDirMixin):
                                              material_sensitive=True))
 
     def make_link(self, link, target):
-        if os.name == "nt":
-            completed = subprocess.run(
-                ["cmd", "/d", "/c", "mklink", "/J", link, target],
-                capture_output=True, text=True)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-        else:
-            os.symlink(target, link)
+        ok, err = make_junction(link, target)
+        self.assertTrue(ok, err)
         return link
 
     def test_a_link_to_the_repository_resolves_to_the_same_origin(self):
@@ -939,19 +927,7 @@ class BinaryZonesCliTests(TempDirMixin):
         else:
             env = {"XDG_CONFIG_HOME": config_home}
 
-        def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
-            if cache_name == "key.json":
-                raise SystemExit("cannot reach https://openrouter.ai/api/v1/key")
-            if cache_name == "models.json":
-                return {"data": world["models"]}
-            if cache_name == "classifications.json":
-                return {"data": world["classifications"]}
-            if cache_name == "rankings.json":
-                return world["rankings"]
-            if url.endswith("/endpoints"):
-                slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
-                return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
-            raise AssertionError(f"unexpected fetch: {url}")
+        fake_fetch = world_fetch(world)
 
         out, err = io.StringIO(), io.StringIO()
         code = None

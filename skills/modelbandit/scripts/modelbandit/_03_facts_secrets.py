@@ -69,14 +69,6 @@ _CREDENTIAL_RULES = (
 )
 
 
-def _gather(reader):
-    """One fact from the machine, best effort: never crash, never block."""
-    try:
-        return reader()
-    except Exception:
-        return None
-
-
 def _local_addresses() -> list[str]:
     """This machine's non-loopback address, without sending a packet."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -104,7 +96,10 @@ def machine_facts(*, hostname=None, username=None, home=None,
                "addresses": addresses or _local_addresses}
     facts: dict = {"identifiers": []}
     for field, reader in readers.items():
-        value = _gather(reader)
+        try:
+            value = reader()
+        except Exception:
+            value = None
         if field == "addresses":
             value = [address for address in (value or [])
                      if isinstance(address, str) and len(address) >= MIN_IDENTIFIER_LEN

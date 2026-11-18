@@ -5,8 +5,7 @@ Brief: paste `operating-discipline.md`, then this block.
 
 **Deal scope** — speed-scoped mechanical steps, not prose-judgment work. On
 glossary/prose tickets (#76) three consecutive sessions overclaimed and the
-ticket needed a strong-model finish. Its verification instinct is
-word-level: it greps tokens, not meaning. The bench ranks it fastest honest
+ticket needed a strong-model finish. The bench ranks it fastest honest
 runner-up (107 tok/s) but weakest design among greens.
 
 **Bench standing** — 5/5 at 262k ctx in about a minute; Phase-4 2/3/2
@@ -61,6 +60,5 @@ ticket: the mechanics hold when the criteria are mechanical.
   value is the operative control — request-body temperature overrides do
   not reach the server (config hot-reload is ineffective). Set UI
   temperature to ~0.7 before dispatch.
-- Fastest honest runner-up in the bench: ~107 tok/s at 262k ctx.
 - The Qwen3.5-9B backbone with MTP heads; static prompt-template preset
   (ChatML/Qwen family) recommended over template inference.

@@ -61,14 +61,12 @@ _Avoid_: re-gate, re-check, new gate
 
 **Concurrency lane**
 The deal's statement of mutual exclusion: every local-dealt ticket id in
-one strict lane — no two local runs concurrent, same model or not. Printed
-as `lane: strict — one local run at a time (grouped by model)` plus one
-`lane: <ids> -> <model>` line per served model (or `lane: none — no
-local-dealt tickets`), and carried in the budget `--json` as `lane` groups
-with `tickets_by_model`. Membership follows the served model under
-substitution, while the published blocking edges stay put: the chain a
-ticket workflow enforces is conservative enforcement of the lane, never a
-dependency claim — the lane record is the truth.
+one strict lane — no two local runs concurrent, same model or not. The
+deal's readout and the budget `--json` state it (shapes: SKILL.md).
+Membership follows the served model under substitution, while the
+published blocking edges stay put: the chain a ticket workflow enforces
+is conservative enforcement of the lane, never a dependency claim — the
+lane record is the truth.
 _Avoid_: dependency chain, execution order (those say why tickets wait;
 the lane says what may not run together)
 

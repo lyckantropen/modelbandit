@@ -232,12 +232,6 @@ def load_zones(path: str | None = None, *, environ=None) -> list:
     return validate_zones(payload, source=path, environ=environ)
 
 
-def _covers(zone_path: str, folder: str) -> bool:
-    """Whether a normalised zone path covers a normalised folder path."""
-    return (folder == zone_path
-            or folder.startswith(zone_path.rstrip(os.sep) + os.sep))
-
-
 def resolve_zone(folder: str, zones, *, environ=None) -> Zone:
     """The zone governing `folder`: the longest declared path that covers it,
     else open. A declared path may name the folder exactly.
@@ -254,8 +248,9 @@ def resolve_zone(folder: str, zones, *, environ=None) -> Zone:
     best = None
     for declared_path in zones:
         declared = compare_path(declared_path, environ=environ)
-        if _covers(declared, target) and (best is None
-                                          or len(declared) >= len(best[0])):
+        covers = target == declared or target.startswith(
+            declared.rstrip(os.sep) + os.sep)
+        if covers and (best is None or len(declared) >= len(best[0])):
             best = (declared, declared_path)
     if best is None:
         return Zone(path=None, posture="open", place=place,
@@ -374,21 +369,3 @@ def load_policy_file(path: str | None) -> dict:
     if not isinstance(policy, dict):
         raise SystemExit(f"policy file {path} must be a JSON object")
     return policy
-
-
-def policy_facts(path: str | None) -> dict:
-    """The policy's Exposure facts when the file exists, else none.
-
-    The pre-flight and the secrets check read the local policy for its
-    `exposure` overrides, its `free_models` catalog and its `plans` catalog
-    when it is there, and work without it: a missing file is not an error,
-    so the defaults answer (a ':free' or 'opencode/*' route exposed, a
-    paid route no-retention). No board, no classification fetch, no network.
-    """
-    policy = load_policy_file(path)
-    policy["free_models"] = load_free_models(policy)
-    policy["plans"] = load_plans(policy)
-    load_exposure_overrides(policy)
-    return policy
-
-

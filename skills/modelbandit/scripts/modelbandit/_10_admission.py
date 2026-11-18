@@ -63,12 +63,6 @@ def _shown_mid(mid: str, candidate: Candidate) -> str:
     return f"{'† ' if candidate.summary_missing else ''}{mid}"
 
 
-def facets_for_candidate(candidate: Candidate) -> dict | None:
-    """The facet contract for a candidate's Route kind, or None when no kind
-    classifies it: the one seam question a gate asks about a candidate."""
-    return facets_for(candidate.id, local=candidate.local)
-
-
 def resolve_exposure(mid: str, *, free_models: dict | None = None,
                      overrides: dict | None = None, local: bool = False,
                      plans: dict | None = None,
@@ -143,17 +137,6 @@ def known_exposure(mid: str, value: str) -> str:
     return value
 
 
-def row_exposure(mid: str, policy: dict, *, local_ids, loopback: bool) -> str:
-    """One ranked table row's Exposure cell: the same precedence admission
-    judged - override map, local serving, catalogs and the loopback fact
-    included - so the column can never disagree with the gate."""
-    return resolve_exposure(mid, free_models=policy["free_models"],
-                            overrides=policy.get("exposure", {}),
-                            local=mid in local_ids,
-                            plans=policy["plans"],
-                            loopback=loopback)
-
-
 def exposure_cell(mid: str, policy: dict, *, local_ids, loopback: bool,
                   plan: bool = False) -> str:
     """The ranked table's Exposure cell for one row, shared by both table
@@ -168,7 +151,11 @@ def exposure_cell(mid: str, policy: dict, *, local_ids, loopback: bool,
     dash - no figure is invented."""
     if (plan or free_candidate_details(mid, policy, local=mid in local_ids)
             or is_free_route(mid, local=mid in local_ids)):
-        return row_exposure(mid, policy, local_ids=local_ids, loopback=loopback)
+        return resolve_exposure(mid, free_models=policy["free_models"],
+                                overrides=policy.get("exposure", {}),
+                                local=mid in local_ids,
+                                plans=policy["plans"],
+                                loopback=loopback)
     return "—"
 
 
@@ -226,7 +213,7 @@ def candidate_for(mid: str, policy: dict, *, local: bool = False,
                                            policy.get("summaries", {}), mid)))
 
 
-def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
+def free_route_ids(mids, *, local=()) -> set[str]:
     """The Free routes among `mids` - the price class the seam derives (see
     is_free_route). Never the price a record shows: a paid route
     may be cheap, and Free is what the harness serves for nothing."""
@@ -234,21 +221,11 @@ def free_route_ids(mids, policy: dict, *, local=()) -> set[str]:
     return {mid for mid in mids if is_free_route(mid, local=mid in local)}
 
 
-def deal_free_share(rows: list[dict], policy: dict, *, local=()) -> tuple[int, int]:
+def deal_free_share(rows: list[dict], *, local=()) -> tuple[int, int]:
     """Count tickets dealt to Free routes, independent of their Exposure."""
-    free = free_route_ids((row["mid"] for row in rows), policy, local=local)
+    free = free_route_ids((row["mid"] for row in rows), local=local)
     total = sum(row["tickets"] for row in rows)
     return sum(row["tickets"] for row in rows if row["mid"] in free), total
-
-
-def deal_local_share(rows: list[dict], *, local=()) -> tuple[int, int]:
-    """Count tickets dealt to this machine's own servings — the harness's
-    local rows (issue #69): how much of the deal stays on this hardware.
-    The set is the run's local facts alone; no id shape is re-judged here,
-    so a remote route can never be counted local."""
-    local = set(local)
-    total = sum(row["tickets"] for row in rows)
-    return sum(row["tickets"] for row in rows if row["mid"] in local), total
 
 
 def share_line(label: str, tickets: int, dealt: int) -> str:
@@ -422,7 +399,7 @@ def zone_prohibition(posture: str, candidate: Candidate) -> str | None:
     (`zone: <path> (closed)`), which is how the absence is explained without
     a row and without a reason column.
     """
-    facets = facets_for_candidate(candidate)
+    facets = facets_for(candidate.id, local=candidate.local)
     if (facets and facets["zone_refusable_in_closed_zones"]
             and posture == "closed"):
         return "remote free route is prohibited by the closed zone"
@@ -474,7 +451,7 @@ def quota_gate(candidate: Candidate, verdict: QuotaVerdict) -> Decision:
     spends none of it, so a spent counter says nothing about them; a paid
     route is charged credits, not free requests.
     """
-    facets = facets_for_candidate(candidate)
+    facets = facets_for(candidate.id, local=candidate.local)
     if (not verdict.eligible and facets
             and facets["spends_free_request_counter"]):
         return Decision(False, verdict.reason)

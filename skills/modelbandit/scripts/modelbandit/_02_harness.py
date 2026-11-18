@@ -106,25 +106,22 @@ def read_local_endpoint(path: str) -> str | None:
     return base.strip() if isinstance(base, str) and base.strip() else None
 
 
-def harness_config_paths(cwd: str | None = None) -> list[str]:
-    """Where the harness declares its providers: the project config first,
-    then the user config (XDG_CONFIG_HOME when the machine states it, else
-    `~/.config`), both spellings the harness accepts."""
-    cwd = os.getcwd() if cwd is None else cwd
-    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config")
-    root = os.path.join(config_home, "opencode")
-    return [os.path.join(cwd, "opencode.json"),
-            os.path.join(cwd, "opencode.jsonc"),
-            os.path.join(root, "opencode.json"),
-            os.path.join(root, "opencode.jsonc")]
-
-
 def harness_serving_endpoint(paths: list[str] | None = None) -> str:
     """The baseURL the harness's local provider serves on — the endpoint
     `local` Exposure's loopback rule judges — defaulting to LM Studio's
-    loopback binding when no config declares one."""
-    for path in harness_config_paths() if paths is None else paths:
+    loopback binding when no config declares one. Providers read from the
+    project config first, then the user config home (XDG_CONFIG_HOME when
+    the machine states it, else `~/.config`), both spellings it accepts."""
+    if paths is None:
+        cwd = os.getcwd()
+        config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config")
+        root = os.path.join(config_home, "opencode")
+        paths = [os.path.join(cwd, "opencode.json"),
+                 os.path.join(cwd, "opencode.jsonc"),
+                 os.path.join(root, "opencode.json"),
+                 os.path.join(root, "opencode.jsonc")]
+    for path in paths:
         if (base := read_local_endpoint(path)) is not None:
             return base
     return DEFAULT_LOCAL_ENDPOINT

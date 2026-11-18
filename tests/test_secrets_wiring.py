@@ -16,12 +16,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from fakes import make_junction  # noqa: E402
 
 
 class TempDirMixin(unittest.TestCase):
@@ -53,6 +54,46 @@ def facts(**overrides):
                    home=lambda: HOME, addresses=lambda: [ADDRESS])
     readers.update(overrides)
     return modelbandit.machine_facts(**readers)
+
+
+def gate_config(root, zones=()):
+    """The gate harness's machine config: a temp XDG config home carrying
+    its zones file."""
+    config_home = os.path.join(root, "config")
+    os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
+    with open(os.path.join(config_home, "modelbandit", "zones.json"),
+              "w", encoding="utf-8") as f:
+        json.dump({"zones": list(zones)}, f)
+    return config_home
+
+
+def run_main(argv, *, stdin="", config_home, machine=None, guard_fetch=True):
+    """Run the CLI in-process through the gate harness's patches: argv,
+    stdin material, injected machine facts, the XDG config home and — by
+    default — no network."""
+    out, err = io.StringIO(), io.StringIO()
+    code = None
+    with ExitStack() as stack:
+        stack.enter_context(
+            mock.patch.object(sys, "argv", ["modelbandit", *argv]))
+        stack.enter_context(
+            mock.patch.object(sys, "stdin", io.StringIO(stdin)))
+        stack.enter_context(mock.patch(
+            "modelbandit.machine_facts",
+            return_value=machine or {"identifiers": []}))
+        stack.enter_context(mock.patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": config_home}))
+        if guard_fetch:
+            stack.enter_context(mock.patch(
+                "modelbandit.fetch_json",
+                side_effect=AssertionError("no network in a gate")))
+        stack.enter_context(redirect_stdout(out))
+        stack.enter_context(redirect_stderr(err))
+        try:
+            modelbandit.main()
+        except SystemExit as exc:
+            code = exc.code
+    return out.getvalue(), err.getvalue(), code
 
 
 class MachineFactsTests(unittest.TestCase):
@@ -262,25 +303,8 @@ class SecretsCliTests(TempDirMixin):
     verdict exits 0 (issue #41), the printed lines distinguish them."""
 
     def run_cli(self, *argv, stdin=""):
-        out, err = io.StringIO(), io.StringIO()
-        code = None
-        config_home = os.path.join(self.root, "config")
-        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
-        with open(os.path.join(config_home, "modelbandit", "zones.json"),
-                  "w", encoding="utf-8") as f:
-            json.dump({"zones": []}, f)
-        with mock.patch.object(sys, "argv", ["modelbandit", *argv]), \
-                mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
-                mock.patch("modelbandit.machine_facts", return_value={"identifiers": []}), \
-                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
-                mock.patch("modelbandit.fetch_json",
-                           side_effect=AssertionError("no network in a gate")), \
-                redirect_stdout(out), redirect_stderr(err):
-            try:
-                modelbandit.main()
-            except SystemExit as exc:
-                code = exc.code
-        return out.getvalue(), err.getvalue(), code
+        return run_main(argv, stdin=stdin,
+                        config_home=gate_config(self.root))
 
     def test_safe_material_exits_zero(self):
         out, _, code = self.run_cli("--check-secrets",
@@ -388,26 +412,8 @@ class JsonOutcomeVocabularyTests(TempDirMixin):
     zone`) — pinned at the CLI seam."""
 
     def run_cli(self, *argv, stdin="", zones=()):
-        out, err = io.StringIO(), io.StringIO()
-        code = None
-        config_home = os.path.join(self.root, "config")
-        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
-        with open(os.path.join(config_home, "modelbandit", "zones.json"),
-                  "w", encoding="utf-8") as f:
-            json.dump({"zones": list(zones)}, f)
-        with mock.patch.object(sys, "argv", ["modelbandit", *argv]), \
-                mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
-                mock.patch("modelbandit.machine_facts",
-                           return_value={"identifiers": []}), \
-                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
-                mock.patch("modelbandit.fetch_json",
-                           side_effect=AssertionError("no network in a gate")), \
-                redirect_stdout(out), redirect_stderr(err):
-            try:
-                modelbandit.main()
-            except SystemExit as exc:
-                code = exc.code
-        return out.getvalue(), err.getvalue(), code
+        return run_main(argv, stdin=stdin,
+                        config_home=gate_config(self.root, zones))
 
     def outcome_matches_the_printed_verdict(self, *argv, stdin="", zones=()):
         plain, _, code = self.run_cli(*argv, stdin=stdin, zones=zones)
@@ -497,22 +503,8 @@ class ZoneBlockedCheckTests(TempDirMixin):
             json.dump(payload, f)
 
     def run_check(self, *argv, stdin=""):
-        out, err = io.StringIO(), io.StringIO()
-        code = None
-        with mock.patch.object(sys, "argv", ["modelbandit", "--check-secrets",
-                                             *argv]), \
-                mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
-                mock.patch("modelbandit.machine_facts",
-                           return_value={"identifiers": []}), \
-                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.config}), \
-                mock.patch("modelbandit.fetch_json",
-                           side_effect=AssertionError("no network in a gate")), \
-                redirect_stdout(out), redirect_stderr(err):
-            try:
-                modelbandit.main()
-            except SystemExit as exc:
-                code = exc.code
-        return out.getvalue(), err.getvalue(), code
+        return run_main(["--check-secrets", *argv], stdin=stdin,
+                        config_home=self.config)
 
     def source(self, folder, line):
         path = os.path.join(folder, "notes.txt")
@@ -587,13 +579,8 @@ class ZoneBlockedCheckTests(TempDirMixin):
     def link(self, link, target):
         """A junction on Windows (`mklink /J` needs no privileges), a symlink
         elsewhere."""
-        if os.name == "nt":
-            completed = subprocess.run(
-                ["cmd", "/d", "/c", "mklink", "/J", link, target],
-                capture_output=True, text=True)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-        else:
-            os.symlink(target, link)
+        ok, err = make_junction(link, target)
+        self.assertTrue(ok, err)
         return link
 
     def test_a_source_named_through_a_link_into_a_closed_zone_blocks(self):
@@ -651,27 +638,15 @@ class ZoneBlockedCheckTests(TempDirMixin):
 class SecretsEndToEndTests(TempDirMixin):
     """The whole mechanism with deterministic machine facts and real files/git."""
 
-    def run_check(self, working_dir, material, *, machine=None, outside_files=()):
-        out, err, code = io.StringIO(), io.StringIO(), None
-        argv = ["modelbandit", "--check-secrets", "--working-dir", working_dir]
+    def run_check(self, working_dir, material, *, machine=None,
+                  outside_files=()):
+        argv = ["--check-secrets", "--working-dir", working_dir]
         for path in outside_files:
             argv.extend(("--outside-file", path))
-        config_home = os.path.join(self.root, "config")
-        os.makedirs(os.path.join(config_home, "modelbandit"), exist_ok=True)
-        with open(os.path.join(config_home, "modelbandit", "zones.json"),
-                  "w", encoding="utf-8") as f:
-            json.dump({"zones": []}, f)
-        with mock.patch.object(sys, "argv", argv), \
-                mock.patch.object(sys, "stdin", io.StringIO(material)), \
-                mock.patch("modelbandit.machine_facts",
-                           return_value=machine or {"identifiers": []}), \
-                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home}), \
-                redirect_stdout(out), redirect_stderr(err):
-            try:
-                modelbandit.main()
-            except SystemExit as exc:
-                code = exc.code
-        return out.getvalue(), code
+        out, _, code = run_main(argv, stdin=material,
+                                config_home=gate_config(self.root),
+                                machine=machine, guard_fetch=False)
+        return out, code
 
     def git(self, *args):
         subprocess.run(["git", "-C", self.root, *args], check=True,

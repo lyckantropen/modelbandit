@@ -73,7 +73,7 @@ of that first-run output, annotated:
 [docs/cli.md](docs/cli.md#first-run-annotated). `--help` is the full
 reference.
 
-Free routes work from the first run with no setup files. Zones are open unless declared: an absent zones file means everything is open, and the file is only an opt-out list of paths declared `closed` ([ADR-0010](docs/adr/0010-open-unless-declared.md)). Every run's header states the effective posture. The [single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop) describes the run.
+Free routes work from the first run with no setup files. Zones are open unless declared ([ADR-0010](docs/adr/0010-open-unless-declared.md)) and every run's header states the effective posture. The [single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop) describes the run.
 
 ## Setup
 
@@ -118,14 +118,11 @@ in [ADR-0010](docs/adr/0010-open-unless-declared.md). More:
 Write the JSON on stdin with `--write-zones`, then review the file and confirm
 the posture with the next run's `zone:` header or `--assert-allowed`.
 
-The [single interaction loop](skills/modelbandit/SKILL.md#one-interaction-loop)
-describes how a run proceeds.
-
 ### Secrets gate
 
-At deal time, the Secrets gate automatically applies the built-in credential,
-identifier, machine-fact, and gitignored-content rules to the material a run
-is given. `--check-secrets` manually inspects a single material.
+At deal time the Secrets gate applies the built-in rules to the material a run
+is given; `--check-secrets` inspects one material. Inventory:
+[docs/gates.md](docs/gates.md).
 
 ## Keeping your data safe with free models
 
@@ -135,10 +132,8 @@ Free routes can retain what you send - an unknown free route defaults to
 1. **Secrets gate — what the material is.** Before any model is chosen, the
    shape's material goes through `--check-secrets` and comes back **safe**,
    **sensitive** or **not certified** — decided once at collection; the loop runs this automatically.
-2. **Zones - where free may run.** Paths are `open` or `closed`, open unless
-   declared; an absent zones file means everything is open, and the file lists
-   only paths declared `closed`. A run takes the stricter posture of its
-   working folder and origin repository.
+2. **Zones - where free may run.** `open` unless declared, stricter of working
+   folder and origin repository ([zones.json](#zonesjson)).
 3. **Exposure marks — which routes retain.** Every candidate carries its
    serving route's Exposure — `no-retention`, `trains` or `local` — a property
    of the route, never inferred from price. On a Sensitive shape a `trains`
@@ -170,10 +165,8 @@ reports a projection like "30 tickets: $1.08 worst / $0.10 floor" before any
 spend — moving down the ranking or the rung if the budget binds. The deal
 spreads a batch across the popular candidates instead of running one model for
 everything: eligibility stays popularity, the deal tilts by preference
-(`policy.json` `affinity`), and the seed makes the plan reproducible. One
-`modelbandit.py --deal` invocation deals one ticket shape — a run's domain,
-effort, token profile, `--fit` and `--sensitive` combination — so tickets of
-the same shape share one task-fit assessment. A Sensitive shape is dealt with
+(`policy.json` `affinity`), and the seed makes the plan reproducible. A
+Sensitive shape is dealt with
 `--sensitive`: only candidates whose Exposure is `local` are admitted (ADR
 0008 — no-retention leaves the machine too), the rest marked in the table
 with their reason, never hidden, and a run with no eligible local candidate

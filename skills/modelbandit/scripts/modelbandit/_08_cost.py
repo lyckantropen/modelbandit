@@ -79,12 +79,7 @@ def effort_ladder(model: dict) -> list[str]:
 
 
 def resolve_rung_index(ladder: list[str], intent: str) -> int:
-    n = len(ladder)
-    if n == 1:
-        return 0
-    default_idx = ladder.index("medium") if "medium" in ladder else (n - 1 + 1) // 2
-    return {"glance": 0, "measured": default_idx,
-            "thorough": min(default_idx + 1, n - 1), "exhaustive": n - 1}[intent]
+    return min(requested_rung_index(ladder, intent), len(ladder) - 1)
 
 
 def resolve_rung(ladder: list[str], intent: str) -> str:

@@ -177,22 +177,6 @@ def eligibility_pool(share: dict, models: dict, aff: dict, top_k: int,
                              if weight_for(mid, aff) > 1.0]
 
 
-def blend_bases(pool: list[tuple[str, float]],
-                fit_adjusted_task_scores: dict | None) -> list[float]:
-    """Each pool member's blend base: its fit-adjusted task score.
-
-    Raw share is orders of magnitude below score scale, so substituting it for
-    a missing entry would hand the model to the preference term alone. A pool
-    member without a score is a caller bug and stops the deal instead.
-    """
-    scores = fit_adjusted_task_scores or {}
-    missing = [mid for mid, _ in pool if mid not in scores]
-    if missing:
-        raise SystemExit("deal pool member(s) without a fit-adjusted task "
-                         f"score: {', '.join(missing)}")
-    return [scores[mid] for mid, _ in pool]
-
-
 def _twin_index(mid: str, pool: list[tuple[str, float]], plans: dict,
                 *, local=frozenset()) -> int | None:
     """The pool row that absorbs an at-cap Plan route's ticket: the family's
@@ -234,8 +218,8 @@ def plan_deal(share: dict, models: dict, aff: dict,
         draw = (1 - blend_weight) * task_score + blend_weight * pref
         (each normalized)
 
-    where every pool member's base is its fit-adjusted task score, supplied
-    for the whole pool by the caller (blend_bases). Deterministic in seed.
+    where every pool member's base is its fit-adjusted task score; a pool
+    member without one stops the deal. Deterministic in seed.
     The standing favor (issue #69) multiplies into a row's pref —
     ``pref = weight_for(mid, aff) * favor.get(mid, 1.0)`` — so the caller's
     band-passing local rows tilt the draw through the same affinity
@@ -286,7 +270,14 @@ def plan_deal(share: dict, models: dict, aff: dict,
             or mid in catalog]
     if not pool:
         return []
-    bases = blend_bases(pool, parameters.fit_adjusted_task_scores)
+    scores = parameters.fit_adjusted_task_scores or {}
+    missing = [mid for mid, _ in pool if mid not in scores]
+    if missing:
+        # Raw share is orders of magnitude below score scale: a missing
+        # score would hand the model to the preference term alone.
+        raise SystemExit("deal pool member(s) without a fit-adjusted task "
+                         f"score: {', '.join(missing)}")
+    bases = [scores[mid] for mid, _ in pool]
     favor = parameters.favor or {}
     prefs = [weight_for(mid, aff) * favor.get(mid, 1.0)
              for mid, _ in pool]
@@ -321,12 +312,12 @@ def plan_deal(share: dict, models: dict, aff: dict,
     # itself stays keyed as it was -- ticket i's number is still seed::i --
     # so an at-cap row changes who takes a ticket, never the seeded order
     # they are offered in; no re-deal and no renormalization.
+    record = assign.append if assign is not None else (lambda item: None)
     for i in range(tickets):
         r = random.Random(f"{seed}::{i}").random() * run
         start = next((j for j, c in enumerate(cum) if r <= c), None)
         if start is None:
-            if assign is not None:
-                assign.append(None)
+            record(None)
             continue
         for step in range(len(cum)):
             j = (start + step) % len(cum)
@@ -336,8 +327,7 @@ def plan_deal(share: dict, models: dict, aff: dict,
                 k = twins[j]
                 counts[k] += 1
                 ledger.charge(pool[k][0])
-                if assign is not None:
-                    assign.append(pool[k][0])
+                record(pool[k][0])
                 break
             mid = pool[j][0]
             if ledger.crosses(mid):
@@ -346,21 +336,18 @@ def plan_deal(share: dict, models: dict, aff: dict,
                     twins[j] = k
                     counts[k] += 1
                     ledger.charge(pool[k][0])
-                    if assign is not None:
-                        assign.append(pool[k][0])
+                    record(pool[k][0])
                     break
                 evicted[j] = True
                 continue
             counts[j] += 1
             ledger.charge(mid)
-            if assign is not None:
-                assign.append(mid)
+            record(mid)
             break
         else:
             # Every row evicted: the draw left this ticket unassigned, and
             # the record keeps its position honest — None, no lane, no map.
-            if assign is not None:
-                assign.append(None)
+            record(None)
     return [{"mid": mid, "share": s, "base": b, "pref": pr, "draw": d,
              "tickets": n}
             for (mid, s), b, pr, d, n

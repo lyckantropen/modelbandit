@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import modelbandit  # noqa: E402
+from fakes import world_fetch  # noqa: E402
 from test_cli import POLICY, build_world  # noqa: E402
 
 
@@ -61,6 +62,22 @@ class ModelbanditCli(unittest.TestCase):
         resolved — for an undeclared open zone."""
         return modelbandit.display_path(folder or self.root)
 
+    def vault_file(self):
+        """An outside file inside a declared closed vault: the folder, the
+        notes path, and the ordinary line the provenance checks quote."""
+        vault = os.path.join(self.root, "vault")
+        os.makedirs(vault)
+        path = os.path.join(vault, "notes.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("ORDINARY_PRIVATE_LINE_7f2a\n")
+        return vault, path
+
+    def blocked_run(self):
+        """`--assert-allowed` judging a remote free model with the fixture
+        root itself declared closed: the run every blocked verdict pins."""
+        return self.run_cli("--assert-allowed", "--model", "vendor/model:free",
+                            "--working-dir", self.root, zones=[self.root])
+
     def run_cli(self, *argv, stdin="", world=None, zones=(), policy_path=None,
                 fetch_error=False):
         world = build_world() if world is None else world
@@ -70,21 +87,7 @@ class ModelbanditCli(unittest.TestCase):
                   encoding="utf-8") as f:
             json.dump({"zones": list(zones)}, f)
 
-        def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
-            if fetch_error:
-                raise SystemExit(f"cannot reach {url}")
-            if cache_name == "key.json":
-                raise SystemExit("cannot reach https://openrouter.ai/api/v1/key")
-            if cache_name == "models.json":
-                return {"data": world["models"]}
-            if cache_name == "classifications.json":
-                return {"data": world["classifications"]}
-            if cache_name == "rankings.json":
-                return world["rankings"]
-            if url.endswith("/endpoints"):
-                slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
-                return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
-            raise AssertionError(f"unexpected fetch: {url}")
+        fake_fetch = world_fetch(world, fetch_error=fetch_error)
 
         out, err = io.StringIO(), io.StringIO()
         code = None
@@ -157,11 +160,7 @@ class VerdictMatrixTests(ModelbanditCli):
         # The vault is declared closed; the outside file comes from it, so
         # provenance blocks before the content verdict — still a verdict:
         # exit 0.
-        vault = os.path.join(self.root, "vault")
-        os.makedirs(vault)
-        path = os.path.join(vault, "notes.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("ORDINARY_PRIVATE_LINE_7f2a\n")
+        vault, path = self.vault_file()
 
         out, _, code = self.run_cli("--check-secrets", "--working-dir",
                                     self.root, "--outside-file", path,
@@ -198,10 +197,7 @@ class VerdictMatrixTests(ModelbanditCli):
         self.assertEqual(err, "")
 
     def test_blocked_is_a_completed_run_not_a_status(self):
-        out, _, code = self.run_cli("--assert-allowed", "--model",
-                                    "vendor/model:free",
-                                    "--working-dir", self.root,
-                                    zones=[self.root])
+        out, _, code = self.blocked_run()
         self.assertEqual(code, 0)
         self.assertIn("blocked: free-use zone", out)
         self.assertIn("model: vendor/model:free", out)
@@ -330,11 +326,7 @@ class LineOutputParityTests(ModelbanditCli):
         # An outside file from a declared closed place blocks on provenance —
         # the check's only zone answer (spec #75's mode split): the zone is
         # named, the material never is.
-        vault = os.path.join(self.root, "vault")
-        os.makedirs(vault)
-        path = os.path.join(vault, "notes.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("ORDINARY_PRIVATE_LINE_7f2a\n")
+        vault, path = self.vault_file()
         out, _, code = self.run_cli("--check-secrets", "--working-dir",
                                     self.root, "--outside-file", path,
                                     zones=[vault],
@@ -371,10 +363,7 @@ class LineOutputParityTests(ModelbanditCli):
                          "shape (no-retention)\n")
 
     def test_assert_allowed_blocked_lines_are_byte_identical(self):
-        out, _, code = self.run_cli("--assert-allowed", "--model",
-                                    "vendor/model:free",
-                                    "--working-dir", self.root,
-                                    zones=[self.root])
+        out, _, code = self.blocked_run()
         self.assertEqual(code, 0)
         self.assertEqual(
             out, f"zone: {self.place()} (closed)\n"
@@ -494,11 +483,7 @@ class JsonModeTests(ModelbanditCli):
     def test_the_provenance_block_carries_the_reason_and_zone(self):
         # The outcome word is the stdout verdict word (`blocked`); the zone
         # is named, the material never is.
-        vault = os.path.join(self.root, "vault")
-        os.makedirs(vault)
-        path = os.path.join(vault, "notes.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("ORDINARY_PRIVATE_LINE_7f2a\n")
+        vault, path = self.vault_file()
         out, _, code = self.run_cli("--check-secrets", "--json",
                                     "--working-dir", self.root,
                                     "--outside-file", path,
@@ -599,10 +584,7 @@ class JsonModeTests(ModelbanditCli):
         # printed verdict vocabulary, asserted at the same seam. Each blocked
         # stop is the locked `blocked: <reason>` pattern, and the object
         # carries the same verdict word and reason the lines print.
-        out, _, code = self.run_cli("--assert-allowed", "--model",
-                                    "vendor/model:free",
-                                    "--working-dir", self.root,
-                                    zones=[self.root])
+        out, _, code = self.blocked_run()
         self.assertEqual(code, 0)
         stop = next(ln for ln in out.splitlines()
                     if ln.startswith("blocked: "))

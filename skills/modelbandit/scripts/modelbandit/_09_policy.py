@@ -43,18 +43,6 @@ def domain_weights(hints: dict, domain: str, factors: dict) -> dict[str, float]:
 
 
 @dataclasses.dataclass(frozen=True)
-class DealPolicy:
-    blend_weight: float
-    eligibility_top_k: int
-
-
-@dataclasses.dataclass(frozen=True)
-class ContextGatePolicy:
-    headroom: float = 2.0
-    margin: float = 0.5
-
-
-@dataclasses.dataclass(frozen=True)
 class DealParameters:
     blend_weight: float
     top_k: int
@@ -76,8 +64,10 @@ class PolicyConfig:
     beta: float
     thresholds: dict
     factors: dict
-    deal: DealPolicy
-    context: ContextGatePolicy
+    blend_weight: float
+    eligibility_top_k: int
+    headroom: float = 2.0
+    margin: float = 0.5
     free_risk: float = DEFAULT_FREE_RISK
     free_share_inheritance: float = DEFAULT_FREE_SHARE_INHERITANCE
     free_quota_reserve: int = DEFAULT_FREE_QUOTA_RESERVE
@@ -154,13 +144,12 @@ def load_policy_config(policy: dict) -> PolicyConfig:
         beta=float(required(scoring, "beta", "scoring.beta")),
         thresholds=thresholds,
         factors=factors,
-        deal=DealPolicy(
-            blend_weight=float(required(affinity, "blend_weight",
-                                        "affinity.blend_weight")),
-            eligibility_top_k=int(required(affinity, "eligibility_top_k",
-                                           "affinity.eligibility_top_k")),
-        ),
-        context=ContextGatePolicy(headroom=headroom, margin=margin),
+        blend_weight=float(required(affinity, "blend_weight",
+                                     "affinity.blend_weight")),
+        eligibility_top_k=int(required(affinity, "eligibility_top_k",
+                                       "affinity.eligibility_top_k")),
+        headroom=headroom,
+        margin=margin,
         free_risk=free_risk,
         free_share_inheritance=inheritance,
         free_quota_reserve=quota_reserve,

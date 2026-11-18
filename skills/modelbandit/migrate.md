@@ -36,7 +36,7 @@ an old invocation. This file lists the old names on purpose.
 
 - [ ] Move the zones config dir: `mv ~/.config/modelrouter ~/.config/modelbandit`.
        Skipped → zones fall back to `closed` everywhere.
-- [ ] Delete any secrets file: `rm -f modelrouter.secrets.json modelbandit.secrets.json`. The gate applies built-in credential/identifier/machine-fact/gitignored-content rules to the material a run is given, automatically at deal time and via `--check-secrets` on a single material. No project rules file participates, by design (spec #75's mode split).
+- [ ] Delete any secrets file: `rm -f modelrouter.secrets.json modelbandit.secrets.json`. Old files are inert weight; nothing reads them.
 - [ ] Delete the stale cache: `rm -rf ~/.cache/modelbind`. Skipped → the
        orphaned directory lingers; nothing else breaks (24h TTL, refetches
        free).
@@ -71,7 +71,7 @@ an old invocation. This file lists the old names on purpose.
        `modelbandit` — the old module does not exist. Skipped → those callers
        fail with file-not-found / ImportError the next time they run.
 
-The rename changed identifiers only: same ranking, same prices, same zones. Secrets rules-file semantics were RETIRED — old `modelrouter.secrets.json` / `modelbandit.secrets.json` files are inert weight; delete them where they exist. One behavior exception — **the default deal seed**:
+The rename changed identifiers only: same ranking, same prices, same zones. One behavior exception — **the default deal seed**:
 `--seed` used to default to `bind` and now defaults to `modelbandit`, so an
 unseeded `--deal` draws a different (equally valid) distribution than before
 the rename. To reproduce a pre-rename plan exactly, pass the old seed

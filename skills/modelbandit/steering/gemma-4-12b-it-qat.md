@@ -3,10 +3,9 @@
 Served id: `lmstudio/gemma-4-12b-it-qat`. Brief: paste
 `operating-discipline.md`, then this block.
 
-**Deal scope** — quick, bounded turns where speed matters more than depth.
-Fastest green of the local benchmark (~70 tok/s, 4/4 in ~99 s) but the
-thinnest artifact (Phase-4 2/3/2) and it **exits 0 on failure** — never use
-where exit codes matter. Both real spec-ticket attempts (#85) failed; the
+**Deal scope** — quick, bounded turns where speed matters more than depth,
+but the thinnest artifact, and it **exits 0 on failure** — never use where
+exit codes matter. Both real spec-ticket attempts (#85) failed; the
 second one's hardening moved the failure without removing it.
 
 **Bench standing** — fastest green run of the whole benchmark; artifacts

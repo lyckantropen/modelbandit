@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from policy_fixture import scoring_block  # noqa: E402
 
 POOL = {"a/model-1": 6.0, "b/model-2": 3.0, "c/model-3": 1.0}
 MODELS = {mid: {} for mid in POOL}
@@ -19,19 +20,7 @@ MODELS = {mid: {} for mid in POOL}
 SCORES = {"a/model-1": 8.0, "b/model-2": 3.5, "c/model-3": 1.2}
 FACTORS = {"favor_validated": 3.0, "favor_suspected": 2.0,
            "avoid_validated": 0.3, "avoid_suspected": 0.5}
-POLICY_CONFIG = {
-    "scoring": {
-        "alpha": 0.7,
-        "beta": 1.0,
-        "thresholds": {"top1_min": 0.2, "top1_max": 0.5, "top2_max": 0.75},
-    },
-    "affinity": {
-        "blend_weight": 0.6,
-        "eligibility_top_k": 5,
-        "factors": {"favor_validated": 3.0, "favor_suspected": 2.0,
-                    "avoid_validated": 0.3, "avoid_suspected": 0.5},
-    },
-}
+POLICY_CONFIG = scoring_block(alpha=0.7, beta=1.0)
 
 
 def plan(aff=None, **kw):

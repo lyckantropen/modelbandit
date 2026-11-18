@@ -23,6 +23,8 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from fakes import KEY_ENDPOINT, world_fetch  # noqa: E402
+from policy_fixture import scoring_block  # noqa: E402
 
 
 def make_model(mid, prompt, completion, cache_read, context=None):
@@ -38,15 +40,7 @@ POLICY = {
     "baseline": {"id": "xiaomi/mimo-v2.6-pro"},
     "summaries": {"family/flash": "flash family summary"},
     "domains": {"writing": ["content_writing"]},
-    "scoring": {"alpha": 1.0, "beta": 0.0,
-                "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
-                               "top2_max": 0.75}},
-    "affinity": {
-        "blend_weight": 0.6,
-        "eligibility_top_k": 5,
-        "factors": {"favor_validated": 3.0, "favor_suspected": 2.0,
-                    "avoid_validated": 0.3, "avoid_suspected": 0.5},
-    },
+    **scoring_block(),
     "free_models": {
         "opencode/flash-free": {"context_length": 262_144,
                                 "exposure": "no-retention",
@@ -105,22 +99,8 @@ class EndpointFetchWideningTests(unittest.TestCase):
         world = build_world()
         calls = []
 
-        def fake_fetch(url, cache_name, *, auth, refresh, **kwargs):
-            calls.append(url)
-            if cache_name == "key.json":
-                raise SystemExit("cannot reach the key endpoint")
-            if cache_name == "models.json":
-                return {"data": world["models"]}
-            if cache_name == "classifications.json":
-                return {"data": world["classifications"]}
-            if cache_name == "rankings.json":
-                return world["rankings"]
-            if cache_name == "benchmarks.json":
-                return world["benchmarks"]
-            if url.endswith("/endpoints"):
-                slug = url[len(modelbandit.MODELS_URL) + 1:-len("/endpoints")]
-                return {"data": {"endpoints": world["endpoints"].get(slug, [])}}
-            raise AssertionError(f"unexpected fetch: {url}")
+        fake_fetch = world_fetch(world, calls=calls, key=KEY_ENDPOINT,
+                                 benchmarks=True)
 
         out, err = io.StringIO(), io.StringIO()
         argv = ["modelbandit", "--policy", self.policy_path, *argv]

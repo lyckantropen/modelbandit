@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # Part of the modelbandit package: composed, in this file's original order, into
 # one namespace by __init__.py - see that file's docstring for why.
 from __future__ import annotations

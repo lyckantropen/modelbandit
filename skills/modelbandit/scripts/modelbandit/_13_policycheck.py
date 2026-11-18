@@ -392,7 +392,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     summaries = policy.get("summaries", {})
     signals = {k: v for k, v in policy.get("hints", {}).items()
                if isinstance(v, dict) and v.get("fit")}
-    pool_k = config.deal.eligibility_top_k
+    pool_k = config.eligibility_top_k
     # The same source filter as a ranking run: a route the zone forbids is
     # not a candidate here either, so the diagnostic deal plays only what may
     # serve and no Free-share signal is claimed for routes that cannot draw.
@@ -446,8 +446,8 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         profile_name = DOMAIN_PROFILE.get(name, "agentic")
         in_tok, out_tok, cached = PROFILES[profile_name]
         shape = Shape(material_sensitive=material_sensitive, input_tokens=in_tok,
-                      context_headroom=config.context.headroom,
-                      context_margin=config.context.margin,
+                      context_headroom=config.headroom,
+                      context_margin=config.margin,
                       posture=zone.posture, domain=name, intent=intent)
         aff = domain_weights(signals, name, config.factors)
         admitted = frozenset(
@@ -458,8 +458,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                 loopback=loopback)).admitted)
         pool = eligibility_pool(share_by_domain[name], models, aff, pool_k,
                                 admitted, local=local_ids)
-        free = free_route_ids((mid for mid, _ in pool), policy,
-                              local=local_ids)
+        free = free_route_ids((mid for mid, _ in pool), local=local_ids)
         if not free:
             continue
         costs = {}
@@ -479,24 +478,23 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
                   for (mid, share) in pool}
         rows = plan_deal(
             share_by_domain[name], models, aff,
-            DealParameters(blend_weight=config.deal.blend_weight,
+            DealParameters(blend_weight=config.blend_weight,
                            top_k=pool_k, seed=FREE_SHARE_CHECK_SEED,
                            tickets=FREE_SHARE_CHECK_TICKETS,
                            fit_adjusted_task_scores=scores,
                            admitted=admitted), local=local_ids)
-        free_tickets, dealt_tickets = deal_free_share(
-            rows, policy, local=local_ids)
+        free_tickets, dealt_tickets = deal_free_share(rows, local=local_ids)
         shape_key = {"domain": name, "profile": profile_name,
                      "input_tokens": in_tok, "output_tokens": out_tok,
                      "cached_share": cached, "effort": intent,
                      "pricing_basis": basis, "sensitive": material_sensitive,
                      "eligibility_top_k": pool_k,
-                     "blend_weight": config.deal.blend_weight,
+                     "blend_weight": config.blend_weight,
                      "scoring": {"alpha": config.alpha, "beta": config.beta,
                                  "free_risk": config.free_risk},
                      "context_gate": {
-                         "headroom": config.context.headroom,
-                         "margin": config.context.margin},
+                         "headroom": config.headroom,
+                         "margin": config.margin},
                      "eligible_free_routes": sorted(free),
                      "domain_hints": {
                          key: value for key, value in signals.items()
@@ -604,7 +602,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
     for name in domains:
         # The band judges the paid competition. Free routes' participation is
         # answered by the Free share signal above, never by this threshold.
-        free = free_route_ids(share_by_domain[name], policy, local=local_ids)
+        free = free_route_ids(share_by_domain[name], local=local_ids)
         pool = paid_pool(share_by_domain[name], models, free, pool_k,
                          local=local_ids)
         if not pool:
@@ -628,7 +626,7 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         eff = effective_costs(
             costs,
             free_risk=config.free_risk,
-            free=free_route_ids(costs, policy, local=local_ids),
+            free=free_route_ids(costs, local=local_ids),
             plans=policy["plans"])
         masses = [task_score(s, eff[mid], alpha, beta) for mid, s in pool]
         t1, t2 = mass_balance(masses)
@@ -644,24 +642,18 @@ def run_check_policy(models: dict, by_canon: dict, classif: dict, domains: dict,
         # Every non-empty pool was thin: no domain's balance was measurable.
         print("(no domain with 3+ paid candidates — balance not judgeable)")
 
-    due = bool(gaps) or bool(stale) or bool(stale_signals) or bool(coverage) \
-        or bool(free_share_zeros) \
-        or (age is not None and age > 30)
-    reasons = []
-    if gaps:
-        reasons.append(f"{len(gaps)} gap{'' if len(gaps) == 1 else 's'}")
-    if stale:
-        reasons.append(f"{len(stale)} stale")
-    if stale_signals:
-        reasons.append(f"{len(stale_signals)} stale signal{'' if len(stale_signals) == 1 else 's'}")
-    if coverage:
-        reasons.append(f"{len(coverage)} signal gap{'' if len(coverage) == 1 else 's'}")
-    if free_share_zeros:
-        reasons.append(f"{len(free_share_zeros)} zero Free-share signal"
-                       f"{'s' if len(free_share_zeros) != 1 else ''}")
-    if age is not None and age > 30:
-        reasons.append(f"policy {age} days old")
-    print(f"\nresearch cycle due: {'yes (' + ', '.join(reasons) + ')' if due else 'no'}")
+    reasons = [text for keep, text in (
+        (gaps, f"{len(gaps)} gap{'' if len(gaps) == 1 else 's'}"),
+        (stale, f"{len(stale)} stale"),
+        (stale_signals,
+         f"{len(stale_signals)} stale signal{'' if len(stale_signals) == 1 else 's'}"),
+        (coverage, f"{len(coverage)} signal gap{'' if len(coverage) == 1 else 's'}"),
+        (free_share_zeros,
+         f"{len(free_share_zeros)} zero Free-share signal"
+         f"{'s' if len(free_share_zeros) != 1 else ''}"),
+        (age is not None and age > 30, f"policy {age} days old"),
+    ) if keep]
+    print(f"\nresearch cycle due: {'yes (' + ', '.join(reasons) + ')' if reasons else 'no'}")
     print(f"coefficient re-tune due: {'yes' if re_tune else 'no'}")
 
 

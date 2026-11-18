@@ -13,7 +13,6 @@ reached through a link) is pinned here against `_default_policy`.
 """
 
 import os
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,6 +20,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from fakes import make_junction  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKILL_DIR = os.path.join(ROOT, "skills", "modelbandit")
@@ -118,13 +118,8 @@ class PolicyResolutionTests(unittest.TestCase):
     def link(self, link_path, target):
         """A junction on Windows (`mklink /J` needs no privileges), a symlink
         elsewhere — the same helper shape the secrets-wiring suite uses."""
-        if os.name == "nt":
-            completed = subprocess.run(
-                ["cmd", "/d", "/c", "mklink", "/J", link_path, target],
-                capture_output=True, text=True)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-        else:
-            os.symlink(target, link_path, target_is_directory=True)
+        ok, err = make_junction(link_path, target)
+        self.assertTrue(ok, err)
         return link_path
 
     def test_the_shipped_layout_resolves_the_skills_own_policy(self):

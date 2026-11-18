@@ -147,6 +147,10 @@ def load_policy_bundle(policy_path: str | None) -> dict:
     return policy
 
 
+# The pre-flight and the secrets check ask this same load under the older name.
+policy_facts = load_policy_bundle
+
+
 def run_status(*, working_dir: str | None = None,
                policy_path: str | None = None, as_json: bool = False) -> int:
     """The offline setup report: zone, zones file, built-in secrets rules,

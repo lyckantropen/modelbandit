@@ -29,11 +29,8 @@ the swing factor. Skip for broad tickets with prose-judgment criteria.
   the MOPD-fixed checkpoints.
 
 The #83 counter-evidence (run `***REMOVED***`,
-unaided pass, 31 min, commit `31fd1fc`) shows each mode is suppressible:
-under a record-fed discipline brief the run made one write call (to session
-scratch), held a minimal diff (52/20 lines), self-corrected a wrong test
-premise, self-caught and deleted a stray scratch file, and reported ACs
-read back from code.
+unaided, 31 min) shows each mode is suppressible: under a record-fed
+discipline brief the run made one write call and read ACs back from code.
 
 ## Steering block
 

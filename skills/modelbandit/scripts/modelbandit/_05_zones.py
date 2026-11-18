@@ -72,10 +72,6 @@ class RunContext:
     roster: dict | None = None
     intent: str = "measured"
 
-    @property
-    def posture(self) -> str:
-        return self.zone.posture
-
 
 def zone_payload(zone: Zone) -> dict:
     """The `zone` object every `--json` verdict carries: the place the

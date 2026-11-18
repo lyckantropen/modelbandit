@@ -1,7 +1,6 @@
 # Operating discipline — the shared brief skeleton
 
-Paste this into every implementer brief for a local model, then splice in the
-model's own block from `<model>.md`. Provenance: the spec #75 transcript
+Provenance: the spec #75 transcript
 post-mortem (2026-11-16). The record-fed discipline brief that made mimo
 pass #83 first-try with zero interventions is this skeleton's origin — every
 clause names a failure mode that was actually observed.

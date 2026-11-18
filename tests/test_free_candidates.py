@@ -13,6 +13,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from policy_fixture import scoring_block  # noqa: E402
 
 
 def catalog(entries):
@@ -121,16 +122,8 @@ class InheritanceDiscountTests(unittest.TestCase):
 
     def test_out_of_range_inheritance_fails_loudly(self):
         for bad in (0.0, -0.5, 1.5):
-            scoring = {"alpha": 0.4, "beta": 1.0,
-                       "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
-                                      "top2_max": 0.75},
-                       "free_share_inheritance": bad}
-            policy = {"scoring": scoring,
-                      "affinity": {"blend_weight": 0.6, "eligibility_top_k": 5,
-                                   "factors": {"favor_validated": 3.0,
-                                               "favor_suspected": 2.0,
-                                               "avoid_validated": 0.3,
-                                               "avoid_suspected": 0.5}}}
+            policy = scoring_block(alpha=0.4, beta=1.0,
+                                   free_share_inheritance=bad)
             with self.assertRaisesRegex(SystemExit,
                                         "free_share_inheritance"):
                 modelbandit.load_policy_config(policy)

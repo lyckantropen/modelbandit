@@ -17,27 +17,14 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from policy_fixture import scoring_block  # noqa: E402
 
 FREE_RISK = 0.35
 CHEAPEST_PAID = 0.02
 FREE_COST = FREE_RISK * CHEAPEST_PAID
 
-POLICY = {
-    "scoring": {"alpha": 1, "beta": 1,
-                "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
-                               "top2_max": 0.75}},
-    "affinity": {"blend_weight": 0.6, "eligibility_top_k": 5,
-                 "factors": {"favor_validated": 3, "favor_suspected": 2,
-                             "avoid_validated": 0.3, "avoid_suspected": 0.5}},
-}
-
-FREE_MODELS = {
-    "opencode/flash": {"context_length": 262_144, "exposure": "no-retention",
-                       "summary_ref": "family/flash"},
-    "vendor/model": {"context_length": 262_144, "exposure": "trains",
-                     "summary_ref": "family/model"},
-}
-
+POLICY = scoring_block(alpha=1, beta=1, favor_validated=3,
+                       favor_suspected=2)
 
 def with_scoring(**values):
     return {**POLICY, "scoring": {**POLICY["scoring"], **values}}
@@ -86,8 +73,8 @@ class FreeRouteIdsTests(unittest.TestCase):
 
     def test_free_suffix_and_opencode_prefix_are_free_routes(self):
         self.assertEqual(
-            modelbandit.free_route_ids(["vendor/model:free", "opencode/flash",
-                                 "vendor/model"], {"free_models": FREE_MODELS}),
+            modelbandit.free_route_ids(
+                ["vendor/model:free", "opencode/flash", "vendor/model"]),
             {"vendor/model:free", "opencode/flash"})
 
     def test_shared_free_route_predicate(self):
@@ -97,21 +84,19 @@ class FreeRouteIdsTests(unittest.TestCase):
         self.assertFalse(modelbandit.is_free_route("local-coder"))
 
     def test_a_paid_route_is_never_a_free_route(self):
-        self.assertEqual(modelbandit.free_route_ids(["vendor/model"],
-                                             {"free_models": FREE_MODELS}),
-                         set())
+        self.assertEqual(modelbandit.free_route_ids(["vendor/model"]), set())
 
     def test_an_unrelated_route_is_paid_whatever_it_costs(self):
         # The rule is given no prices at all: Free is a serving fact.
-        self.assertEqual(modelbandit.free_route_ids(["vendor/cheap"], {}), set())
+        self.assertEqual(modelbandit.free_route_ids(["vendor/cheap"]), set())
 
     def test_a_locally_served_model_is_a_free_route(self):
         # A local route is Free by where it runs, not by its id: the same id
         # is a paid route when this machine is not serving it.
-        self.assertEqual(modelbandit.free_route_ids(["qwen3-coder-30b"], {},
+        self.assertEqual(modelbandit.free_route_ids(["qwen3-coder-30b"],
                                              local={"qwen3-coder-30b"}),
                          {"qwen3-coder-30b"})
-        self.assertEqual(modelbandit.free_route_ids(["qwen3-coder-30b"], {}), set())
+        self.assertEqual(modelbandit.free_route_ids(["qwen3-coder-30b"]), set())
 
 
 class FreeRiskScoreTests(unittest.TestCase):

@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skills",
                                 "modelbandit", "scripts"))
 import modelbandit  # noqa: E402
+from policy_fixture import scoring_block  # noqa: E402
 
 # Curated free-candidate catalog, id-prefix keyed (the policy's `free_models`).
 FREE_MODELS = {
@@ -280,34 +281,28 @@ class AdmissionTests(unittest.TestCase):
 
 
 class ContextPolicyTests(unittest.TestCase):
-    POLICY = {
-        "scoring": {"alpha": 1, "beta": 1,
-                    "thresholds": {"top1_min": 0.2, "top1_max": 0.5,
-                                   "top2_max": 0.75}},
-        "affinity": {"blend_weight": 0.6, "eligibility_top_k": 5,
-                     "factors": {"favor_validated": 3, "favor_suspected": 2,
-                                 "avoid_validated": 0.3, "avoid_suspected": 0.5}},
-    }
+    POLICY = scoring_block(alpha=1, beta=1, favor_validated=3,
+                           favor_suspected=2)
 
     def test_context_policy_defaults(self):
         config = modelbandit.load_policy_config(self.POLICY)
-        self.assertEqual(config.context.headroom, 2.0)
-        self.assertEqual(config.context.margin, 0.5)
+        self.assertEqual(config.headroom, 2.0)
+        self.assertEqual(config.margin, 0.5)
 
     def test_context_policy_is_configurable(self):
         config = modelbandit.load_policy_config(
             {**self.POLICY,
              "context_gate": {"headroom": 3, "margin": 0.75}})
-        self.assertEqual(config.context.headroom, 3.0)
-        self.assertEqual(config.context.margin, 0.75)
+        self.assertEqual(config.headroom, 3.0)
+        self.assertEqual(config.margin, 0.75)
 
     def test_configured_context_policy_changes_admission(self):
         config = modelbandit.load_policy_config(
             {**self.POLICY,
              "context_gate": {"headroom": 1, "margin": 0.75}})
         shape = modelbandit.Shape(input_tokens=20_000,
-                           context_headroom=config.context.headroom,
-                           context_margin=config.context.margin)
+                           context_headroom=config.headroom,
+                           context_margin=config.margin)
         free_route = modelbandit.Candidate("provider/route:free", "trains",
                                     is_free=True, context_length=65_536)
 
@@ -318,8 +313,8 @@ class ContextPolicyTests(unittest.TestCase):
             {**self.POLICY,
              "context_gate": {"headroom": 1, "margin": 0.75}})
         shape = modelbandit.Shape(output_tokens=20_000,
-                           context_headroom=config.context.headroom,
-                           context_margin=config.context.margin)
+                           context_headroom=config.headroom,
+                           context_margin=config.margin)
         free_route = modelbandit.Candidate("provider/route:free", "trains",
                                     is_free=True, completion_cap=25_000)
 
