@@ -227,8 +227,12 @@ tool's own output, carry: `Source: OpenRouter (openrouter.ai/rankings), as of
 | `baseline.id` | price anchor for Δ columns; not a selection input |
 | `domains` | five domains → leaderboard tags (a lens, not a partition) |
 | `hints` | tentative user observations — advisory, shown beside rows, never reordering |
+| `summaries` | one research summary per model, claims cited; filled by the summaries-refresh procedure |
 
-Personal by design: this repo is private and the verdicts are taste.
+Personal by design: `hints` and `summaries` are your verdicts and
+your research — the shipped policy carries one clearly labeled
+example entry in each section and nothing else. Write your own;
+the summaries-refresh procedure fills `summaries`.
 
 ### Development
 

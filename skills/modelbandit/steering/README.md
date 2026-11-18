@@ -18,13 +18,13 @@ say in the run record which revision the brief carried.
 
 Every clause traces to evidence, named in the file that carries it:
 
-- **Run evidence** — the spec #75 transcript post-mortem (2026-11-16):
-  twelve implementer transcripts across five local models on real spec
-  tickets, plus the two unaided passes (#83 mimo, #84-pinfinish qwen36)
-  that prove which clauses work. The per-model files cite the run ids
-  (`…-***REMOVED***` and siblings) recorded in the local-llm-bench dossiers.
-- **Bench evidence** — the local-llm-bench benchmark and its dossiers
-  (sampling, load config, artifact quality).
+- **Run evidence** — a recorded transcript post-mortem (2026-11-16):
+  twelve implementer transcripts across five local models on real
+tickets, plus the two unaided passes that prove which clauses work.
+The per-model files name the recorded runs (dated) each clause
+came from.
+- **Bench evidence** — a local-model benchmark and its per-model
+  dossiers (sampling, load config, artifact quality).
 - **Community evidence** — cited in the dossiers (`community_findings`);
   carried here only where it changes how the model must be prompted or
   served.

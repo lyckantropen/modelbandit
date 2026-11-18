@@ -5,7 +5,7 @@ Served id: `lmstudio/abliterated-mimo-v2.6-distill-qwen-9b`. Brief: paste
 
 **Deal scope** — narrow tickets only, and only with a hard tool-cadence
 contract. Its failure shape is not incompetence but *stall*: the work gets
-fully drafted in reasoning and never reaches the tree. On #86 it produced
+fully drafted in reasoning and never reaches the tree. On that run it produced
 zero worktree output in ~1.5 h and was operator-cancelled; its bench
 redemption (8/8) shows it delivers when the deliverable is small and the
 loop is tight.
@@ -15,12 +15,12 @@ loop is tight.
 (python-style test functions with unimported `assertRaises` — claimed 4/4
 while unittest collected 0).
 
-## Observed failure modes (spec #86, 2026-11-16)
+## Observed failure modes (recorded run, 2026-11-16)
 
 - **Reasoning black hole** — 92.5% of measured step time spent streaming
   reasoning (181,430 chars of reasoning vs 463 chars of user-visible
   prose), one 337-second monologue alone = a third of all step time; 0.9%
-  tool execution (run `***REMOVED***`).
+  tool execution (the cancelled run).
 - **Plans drafted, never executed** — the same plan fully drafted in
   reasoning three separate times ("Now write the code") and converted to a
   tool write once — in the wrong directory.

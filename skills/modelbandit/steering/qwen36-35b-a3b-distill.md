@@ -4,21 +4,21 @@ Served id: `lmstudio/qwen36-35b-a3b-distill` (served quants `@q4_k_s`,
 `@iq4_xs`). Brief: paste `operating-discipline.md`, then this block.
 
 **Deal scope** — bounded deliverables with an explicit recipe. This is the
-model's demonstrated strength: the #84 pin sub-run passed unaided first try
+model's demonstrated strength: the bounded pin sub-run passed unaided first try
 when the brief named one artifact, copied a neighboring idiom, gave an exact
 suite count and fixed report fields. On broad acceptance criteria the same
-model self-certified twice (#79, #84) and neither run survived verification.
+model self-certified twice and neither run survived verification.
 
 **Bench standing** — strongest structured work of the local lineup
 (Phase-4 5/4/4 at `@iq4_xs`; 30–33 tok/s at 262k ctx). Pin a known-good
 quant: the f16 MTP-merged file crashes the server on load.
 
-## Observed failure modes (spec #75, 2026-11-16)
+## Observed failure modes (recorded runs, 2026-11-16)
 
 - **Confirmatory verification** — built a real checker, got `WARN` on AC3,
   dismissed it over four messages ("So criterion 3 is PASS"), reported
   MET — and quoted as proof of passing its own committed edit that *was* the
-  violation (run `***REMOVED***`, `@q4_k_s`).
+  violation (the first broad run, `@q4_k_s`).
 - **Prose blindness under mechanical diligence** — read the offending
   three-regime ladder and the superseded ADR citation in its own
   verification passes and moved on; `git log` showed the ADR superseded
@@ -26,17 +26,16 @@ quant: the f16 MTP-merged file crashes the server on load.
 - **Polishing its own inventions** — invented a slogan and flag
   instructions, then featured them in the final report while the acceptance
   criteria got the benefit of the doubt (same run).
-- **Silent end + overclaimed criterion** — `#84`'s main run ended "completed
+- **Silent end + overclaimed criterion** — the second broad run ended "completed
   without a response" with one uncommitted fix; its report had marked AC2
   "MET … byte-identical output verified" with no cross-entry-point pin ever
   grepped, and read "Delta: 0" as success where the criterion demanded a
-  new test (run `***REMOVED***`, `@iq4_xs`).
+  new test (the second broad run, `@iq4_xs`).
 - **Root mixing** — alternated between the session checkout and the
   worktree until it caught itself mid-run ("THIS IS THE CHECKOUT COPY!"),
   producing momentarily wrong conclusions in both directions (same run).
 
-The counter-evidence (run `***REMOVED***-pinfinish`,
-unaided pass, 19 min): bounded recipe, edge cases researched before coding,
+The counter-evidence (the bounded pin run, unaided pass, 19 min): bounded recipe, edge cases researched before coding,
 first failure self-corrected within two messages, and — the key habit —
 verified empirically and reported the discrepancy it found (suite 1081 vs
 the briefed 1080, root-caused with `-v` output instead of rounded to fit).

@@ -1,7 +1,6 @@
 ---
 name: modelbandit
-description: Pick OpenRouter models by domain popularity and price them live. Use when choosing a model for a domain — research, writing, coding, orchestration, ops — when ranking candidates by what traffic actually runs, or when costing a batch of agent runs against a budget. Use when asked to migrate from the old names — `modelrouter`, `modelbind`, `bind.py`, old paths.
-compatibility: "Python 3, stdlib only — no dependencies, no environment to provision. The summaries-refresh procedure and the unit test suite live in the repository checkout (research/, tests/), not in this skill folder."
+description: Use when choosing a model for a domain — research, writing, coding, orchestration, ops — when ranking candidates by what traffic actually runs, when costing a batch of agent runs against a budget at live prices, or when asked to migrate from the old names — `modelrouter`, `modelbind`, `bind.py`, old paths.
 ---
 
 # Modelbandit

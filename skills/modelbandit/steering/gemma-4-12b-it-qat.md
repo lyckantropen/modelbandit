@@ -5,17 +5,17 @@ Served id: `lmstudio/gemma-4-12b-it-qat`. Brief: paste
 
 **Deal scope** — quick, bounded turns where speed matters more than depth,
 but the thinnest artifact, and it **exits 0 on failure** — never use where
-exit codes matter. Both real spec-ticket attempts (#85) failed; the
+exit codes matter. Both real ticket attempts failed; the
 second one's hardening moved the failure without removing it.
 
 **Bench standing** — fastest green run of the whole benchmark; artifacts
 thin (broad `except`, 4 tests, zero exit codes).
 
-## Observed failure modes (spec #75, 2026-11-16)
+## Observed failure modes (recorded attempts, 2026-11-16)
 
 - **write-not-edit in the wrong root** — attempt 1 replaced the session
   checkout's 4,898-line script with a 34-line snippet via `write()` to a
-  relative path (run `***REMOVED***`). It self-reported
+  relative path (both attempts recorded 2026-11-16). It self-reported
   the damage honestly ("I have made a serious error…") and the file was
   git-restored with zero loss — honesty kept the recovery cheap, but the
   run made zero ticket progress.

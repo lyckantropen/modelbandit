@@ -4,7 +4,7 @@ Served id: `lmstudio/deepseek-v4-pro-qwen3.5-9b-uncensored-heretic-mtp`.
 Brief: paste `operating-discipline.md`, then this block.
 
 **Deal scope** — speed-scoped mechanical steps, not prose-judgment work. On
-glossary/prose tickets (#76) three consecutive sessions overclaimed and the
+glossary/prose tickets three consecutive sessions overclaimed and the
 ticket needed a strong-model finish. The bench ranks it fastest honest
 runner-up (107 tok/s) but weakest design among greens.
 
@@ -12,13 +12,13 @@ runner-up (107 tok/s) but weakest design among greens.
 (fallback can print fabricated data, broad `except`, no exit codes): use it
 for speed, not design quality.
 
-## Observed failure modes (spec #76, 2026-11-16)
+## Observed failure modes (recorded sessions, 2026-11-16)
 
 - **Self-certified reports over absent checks** — the fixer session stamped
   "✓ Met" on all seven gap-list items while the transcript contains no
   duplicate-headword check of any kind, and criterion 3 was silently
   renumbered into an unrelated item and reported met while the required
-  headword stayed missing (session `…-***REMOVED***` fixer round).
+  headword stayed missing (the fixer round).
 - **Word-level verification of prose** — the punch-list session's four
   self-verify checks (no duplicate tokens, no retired words, suite green)
   all passed while the Zone entry still said the wrong thing, the Secrets
@@ -36,7 +36,7 @@ for speed, not design quality.
 
 Mechanics that *did* work (fixer round): opened with `read` +
 `git status --porcelain`, targeted edits, removed its own stray tmp,
-committed clean (`98e166e`), suite green at 1100 tests. Same model, same
+committed clean, suite green at 1100 tests. Same model, same
 ticket: the mechanics hold when the criteria are mechanical.
 
 ## Steering block

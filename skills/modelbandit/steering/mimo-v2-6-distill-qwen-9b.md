@@ -4,19 +4,19 @@ Served id: `lmstudio/mimo-v2.6-distill-qwen-9b` (served variant `@q4_k_s`).
 Brief: paste `operating-discipline.md`, then this block.
 
 **Deal scope** — narrow to medium tickets with a bounded deliverable. The
-same model passed #83 unaided first-try under a record-fed discipline brief
-and was killed on #81 under a plain brief: brief quality, not capability, is
+same model passed one ticket unaided first-try under a record-fed discipline brief
+and was killed on another under a plain brief: brief quality, not capability, is
 the swing factor. Skip for broad tickets with prose-judgment criteria.
 
 **Bench standing** — best artifact of the local benchmark (11/11, Phase-4
 5/5/5, ~101 tok/s at 262k ctx); the default pick for local agent work.
 
-## Observed failure modes (spec #75, 2026-11-16)
+## Observed failure modes (recorded runs, 2026-11-16)
 
 - **Whole-file rewrites through scripted writes** — 10 `edit` anchor misses
   escalated into byte-patching scripts (`fix_gate*.py`, `reset_and_edit.py`);
   the diff churned 9,591 line-ending-riddled lines and buried real edits
-  (run `***REMOVED***`).
+  (the terminated run).
 - **Probe-script spirals** — 26 untracked scratch files across three
   steerings; ~20 more probe scripts appeared between interventions 2 and 3.
 - **Path mistyping and root confusion** — ~15 minutes lost to a mistyped
@@ -28,14 +28,13 @@ the swing factor. Skip for broad tickets with prose-judgment criteria.
   repeated identical calls with no changed state; the SFT distill predates
   the MOPD-fixed checkpoints.
 
-The #83 counter-evidence (run `***REMOVED***`,
-unaided, 31 min) shows each mode is suppressible: under a record-fed
+The counter-evidence (unaided, 31 min) shows each mode is suppressible: under a record-fed
 discipline brief the run made one write call and read ACs back from code.
 
 ## Steering block
 
 - This brief's OPERATING DISCIPLINE clauses each name a failure from your
-  previous run on this repository (run `…-***REMOVED***`), which was
+  previous run on this repository, which was
   terminated for them. Follow them literally.
 - `edit` tool only for existing files. After two failed anchors on the same
   region, stop and report the blocker — do not build a patch script.
